@@ -1,0 +1,151 @@
+import { describe, expect, it } from 'vitest'
+import type { GeoIndexPoint, GeoSearchQuery, GeoTemporalIndex } from '../types'
+import { BruteForceGeoIndex } from './bruteForceIndex'
+import { DynamicZOrderGeoIndex } from './dynamicZOrderGeoIndex'
+import { GeoIndexRegistry } from './registry'
+
+const points: GeoIndexPoint[] = [
+  { mediaId: 'zurich-a', lat: 47.3769, lon: 8.5417, capturedAt: 100 },
+  { mediaId: 'zurich-b', lat: 47.3769, lon: 8.5417, capturedAt: 200 },
+  { mediaId: 'basel', lat: 47.5596, lon: 7.5886, capturedAt: 300 },
+  { mediaId: 'munich', lat: 48.1351, lon: 11.582, capturedAt: 400 },
+  { mediaId: 'dateline-east', lat: 0, lon: 179.9, capturedAt: 500 },
+  { mediaId: 'dateline-west', lat: 0, lon: -179.9, capturedAt: 600 },
+  { mediaId: 'north-pole', lat: 89.9, lon: 15, capturedAt: 700 },
+  { mediaId: 'missing-time', lat: 45.4408, lon: 12.3155 },
+]
+
+async function expectMatchesBruteForce(
+  index: GeoTemporalIndex,
+  query: GeoSearchQuery,
+) {
+  const oracle = new BruteForceGeoIndex()
+  await oracle.build(points)
+  await index.build(points)
+
+  const actual = await index.search(query)
+  const expected = await oracle.search(query)
+
+  expect(actual.map((result) => result.mediaId)).toEqual(
+    expected.map((result) => result.mediaId),
+  )
+}
+
+describe('geo indexes', () => {
+  it('brute force returns deterministic duplicate-coordinate ordering', async () => {
+    const index = new BruteForceGeoIndex()
+    await index.build(points)
+    const results = await index.search({ lat: 47.3769, lon: 8.5417, k: 2 })
+    expect(results.map((result) => result.mediaId)).toEqual([
+      'zurich-a',
+      'zurich-b',
+    ])
+  })
+
+  it('brute force excludes missing timestamps when a timeframe is active', async () => {
+    const index = new BruteForceGeoIndex()
+    await index.build(points)
+    const results = await index.search({
+      lat: 45.4408,
+      lon: 12.3155,
+      startTime: 0,
+      endTime: 1_000,
+      k: 10,
+    })
+    expect(results.map((result) => result.mediaId)).not.toContain(
+      'missing-time',
+    )
+  })
+
+  it('registry exposes only incrementally updateable engines', () => {
+    const registry = new GeoIndexRegistry()
+    expect(
+      registry.indexes.every(
+        (index) =>
+          index.capabilities.incrementalInsert &&
+          index.capabilities.incrementalDelete,
+      ),
+    ).toBe(true)
+  })
+
+  it('dynamic Z-order index matches brute force for k=1', async () => {
+    await expectMatchesBruteForce(new DynamicZOrderGeoIndex(), {
+      lat: 47.38,
+      lon: 8.54,
+      k: 1,
+    })
+  })
+
+  it('dynamic Z-order index matches brute force for k greater than point count', async () => {
+    await expectMatchesBruteForce(new DynamicZOrderGeoIndex(), {
+      lat: 47.38,
+      lon: 8.54,
+      k: 100,
+    })
+  })
+
+  it('dynamic Z-order index matches brute force across the dateline', async () => {
+    await expectMatchesBruteForce(new DynamicZOrderGeoIndex(), {
+      lat: 0,
+      lon: 180,
+      k: 3,
+    })
+  })
+
+  it('dynamic Z-order index matches brute force with sparse timeframe matches', async () => {
+    await expectMatchesBruteForce(new DynamicZOrderGeoIndex(), {
+      lat: 47.38,
+      lon: 8.54,
+      startTime: 550,
+      endTime: 750,
+      k: 4,
+    })
+  })
+
+  it('dynamic Z-order index returns no results when timeframe has no matches', async () => {
+    await expectMatchesBruteForce(new DynamicZOrderGeoIndex(), {
+      lat: 47.38,
+      lon: 8.54,
+      startTime: 10_000,
+      endTime: 20_000,
+      k: 10,
+    })
+  })
+
+  it('dynamic Z-order index supports one-by-one inserts', async () => {
+    const index = new DynamicZOrderGeoIndex()
+    const oracle = new BruteForceGeoIndex()
+    await index.build([])
+    await oracle.build([])
+
+    for (const point of points) {
+      await index.insert(point)
+      await oracle.insert(point)
+    }
+
+    const query = { lat: 47.38, lon: 8.54, k: 5 }
+    const actual = await index.search(query)
+    const expected = await oracle.search(query)
+    expect(actual.map((result) => result.mediaId)).toEqual(
+      expected.map((result) => result.mediaId),
+    )
+  })
+
+  it('dynamic Z-order index supports removes', async () => {
+    const index = new DynamicZOrderGeoIndex()
+    const oracle = new BruteForceGeoIndex()
+    await index.build(points)
+    await oracle.build(points)
+
+    await index.remove('zurich-a')
+    await oracle.remove('zurich-a')
+
+    const query = { lat: 47.3769, lon: 8.5417, k: 3 }
+    const actual = await index.search(query)
+    const expected = await oracle.search(query)
+    expect(actual.map((result) => result.mediaId)).toEqual(
+      expected.map((result) => result.mediaId),
+    )
+    expect(actual.map((result) => result.mediaId)).not.toContain('zurich-a')
+  })
+})
