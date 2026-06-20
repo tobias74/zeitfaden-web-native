@@ -786,28 +786,30 @@ function App() {
                 <Calendar size={17} />
                 <h2>Catalog</h2>
               </div>
-              <label>
-                From
-                <input
-                  type="date"
-                  value={startDate}
-                  onChange={(event) => {
-                    setStartDate(event.target.value)
-                    setResultPage(0)
-                  }}
-                />
-              </label>
-              <label>
-                To
-                <input
-                  type="date"
-                  value={endDate}
-                  onChange={(event) => {
-                    setEndDate(event.target.value)
-                    setResultPage(0)
-                  }}
-                />
-              </label>
+              <div className="time-range-row">
+                <label>
+                  From
+                  <input
+                    type="datetime-local"
+                    value={startDate}
+                    onChange={(event) => {
+                      setStartDate(event.target.value)
+                      setResultPage(0)
+                    }}
+                  />
+                </label>
+                <label>
+                  To
+                  <input
+                    type="datetime-local"
+                    value={endDate}
+                    onChange={(event) => {
+                      setEndDate(event.target.value)
+                      setResultPage(0)
+                    }}
+                  />
+                </label>
+              </div>
               <label>
                 Kind
                 <select

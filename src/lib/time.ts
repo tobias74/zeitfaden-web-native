@@ -34,15 +34,28 @@ export function overlapsTimeRange(
   return true
 }
 
-export function dateInputToMillis(value: string): number | undefined {
+function localInputToMillis(
+  value: string,
+  dateOnlyFallbackTime: string,
+): number | undefined {
   if (!value) return undefined
-  const millis = new Date(`${value}T00:00:00`).getTime()
+  const timestamp = value.includes('T')
+    ? value
+    : `${value}T${dateOnlyFallbackTime}`
+  const millis = new Date(timestamp).getTime()
   return Number.isFinite(millis) ? millis : undefined
 }
 
+export function dateInputToMillis(value: string): number | undefined {
+  return localInputToMillis(value, '00:00:00')
+}
+
 export function dateInputEndToMillis(value: string): number | undefined {
-  if (!value) return undefined
-  const millis = new Date(`${value}T23:59:59.999`).getTime()
+  if (value.includes('T')) {
+    const millis = new Date(value).getTime()
+    return Number.isFinite(millis) ? millis : undefined
+  }
+  const millis = localInputToMillis(value, '23:59:59.999')
   return Number.isFinite(millis) ? millis : undefined
 }
 
@@ -53,4 +66,3 @@ export function formatDateTime(millis: number | undefined): string {
     timeStyle: 'short',
   }).format(new Date(millis))
 }
-
