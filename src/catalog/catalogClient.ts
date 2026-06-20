@@ -7,7 +7,7 @@ import type {
 } from '../types'
 
 type InitResult = {
-  storageMode: 'opfs' | 'transient'
+  storageMode: 'opfs'
   sqliteVersion: string
   filename: string
 }
@@ -101,4 +101,3 @@ export class CatalogClient {
     })
   }
 }
-

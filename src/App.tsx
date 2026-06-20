@@ -3,11 +3,14 @@ import {
   Calendar,
   Database,
   FolderOpen,
+  Images,
   FlaskConical,
   Image as ImageIcon,
+  List,
   MapPin,
   RefreshCcw,
   Search,
+  Settings2,
   Trash2,
   Video,
 } from 'lucide-react'
@@ -54,10 +57,13 @@ type QueryPoint = {
 }
 
 type CatalogInfo = {
-  storageMode: 'opfs' | 'transient'
+  storageMode: 'opfs'
   sqliteVersion: string
   filename: string
 }
+
+type ResultDisplayMode = 'images' | 'cards' | 'list'
+type ResultThumbnailSize = 'small' | 'medium' | 'large'
 
 const defaultStats: GeoIndexStats = {
   engineId: 'none',
@@ -72,6 +78,9 @@ const defaultStats: GeoIndexStats = {
 
 const LEFT_WIDTH_KEY = 'geo-media-index-lab:left-width'
 const MAP_HEIGHT_KEY = 'geo-media-index-lab:map-height'
+const RESULT_DISPLAY_MODE_KEY = 'geo-media-index-lab:result-display-mode'
+const RESULT_THUMBNAIL_SIZE_KEY = 'geo-media-index-lab:result-thumbnail-size'
+const RESULT_METADATA_KEY = 'geo-media-index-lab:result-metadata'
 const DEFAULT_LEFT_WIDTH = 440
 const DEFAULT_MAP_HEIGHT = 430
 const MIN_LEFT_WIDTH = 340
@@ -92,6 +101,22 @@ function storedNumber(key: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback
 }
 
+function storedString<T extends string>(
+  key: string,
+  fallback: T,
+  allowed: readonly T[],
+): T {
+  const stored = window.localStorage.getItem(key)
+  return allowed.includes(stored as T) ? (stored as T) : fallback
+}
+
+function storedBoolean(key: string, fallback: boolean): boolean {
+  const stored = window.localStorage.getItem(key)
+  if (stored === 'true') return true
+  if (stored === 'false') return false
+  return fallback
+}
+
 function filterValueToKind(value: string): MediaKind | 'all' {
   return value === 'image' || value === 'video' ? value : 'all'
 }
@@ -104,6 +129,23 @@ function filterValueToHasGeo(value: string): boolean | undefined {
 
 function statsNumber(value: number | undefined): string {
   return typeof value === 'number' ? value.toLocaleString() : '0'
+}
+
+function formatDimensions(item: MediaItem): string | undefined {
+  if (typeof item.width === 'number' && typeof item.height === 'number') {
+    return `${item.width} x ${item.height}`
+  }
+  if (typeof item.durationMs === 'number') {
+    return `${Math.round(item.durationMs / 1_000)} s`
+  }
+  return undefined
+}
+
+function formatGeo(item: MediaItem): string | undefined {
+  if (typeof item.latitude !== 'number' || typeof item.longitude !== 'number') {
+    return undefined
+  }
+  return `${item.latitude.toFixed(5)}, ${item.longitude.toFixed(5)}`
 }
 
 function timeRangeFromInputs(startDate: string, endDate: string): TimeRange {
@@ -159,6 +201,25 @@ function App() {
   const [status, setStatus] = useState('Initializing catalog')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
+  const [resultDisplayMode, setResultDisplayMode] =
+    useState<ResultDisplayMode>(() =>
+      storedString(RESULT_DISPLAY_MODE_KEY, 'cards', [
+        'images',
+        'cards',
+        'list',
+      ]),
+    )
+  const [resultThumbnailSize, setResultThumbnailSize] =
+    useState<ResultThumbnailSize>(() =>
+      storedString(RESULT_THUMBNAIL_SIZE_KEY, 'medium', [
+        'small',
+        'medium',
+        'large',
+      ]),
+    )
+  const [showResultMetadata, setShowResultMetadata] = useState(() =>
+    storedBoolean(RESULT_METADATA_KEY, true),
+  )
   const [leftWidth, setLeftWidth] = useState(() =>
     clamp(storedNumber(LEFT_WIDTH_KEY, DEFAULT_LEFT_WIDTH), MIN_LEFT_WIDTH, MAX_LEFT_WIDTH),
   )
@@ -169,6 +230,7 @@ function App() {
   const leftStackRef = useRef<HTMLElement | null>(null)
 
   const selectedIndex = registry.get(selectedIndexId)
+  const catalogReady = Boolean(catalogInfo)
   const timeRange = useMemo(
     () => timeRangeFromInputs(startDate, endDate),
     [endDate, startDate],
@@ -367,6 +429,21 @@ function App() {
     ? searchResults
     : mediaItems.map((item) => ({ item, mediaId: item.id, distanceMeters: NaN }))
 
+  const setDisplayMode = useCallback((mode: ResultDisplayMode) => {
+    setResultDisplayMode(mode)
+    window.localStorage.setItem(RESULT_DISPLAY_MODE_KEY, mode)
+  }, [])
+
+  const setThumbnailSize = useCallback((size: ResultThumbnailSize) => {
+    setResultThumbnailSize(size)
+    window.localStorage.setItem(RESULT_THUMBNAIL_SIZE_KEY, size)
+  }, [])
+
+  const toggleMetadata = useCallback((enabled: boolean) => {
+    setShowResultMetadata(enabled)
+    window.localStorage.setItem(RESULT_METADATA_KEY, String(enabled))
+  }, [])
+
   const resizeStyle = {
     '--left-width': `${leftWidth}px`,
     '--map-height': `${mapHeight}px`,
@@ -504,11 +581,19 @@ function App() {
           </p>
         </div>
         <div className="topbar-actions">
-          <button type="button" onClick={importFolder} disabled={busy}>
+          <button
+            type="button"
+            onClick={importFolder}
+            disabled={busy || !catalogReady}
+          >
             <FolderOpen size={17} />
             Import folder
           </button>
-          <button type="button" onClick={loadSampleData} disabled={busy}>
+          <button
+            type="button"
+            onClick={loadSampleData}
+            disabled={busy || !catalogReady}
+          >
             <Database size={17} />
             Sample data
           </button>
@@ -516,7 +601,7 @@ function App() {
             type="button"
             className="danger"
             onClick={clearCatalog}
-            disabled={busy}
+            disabled={busy || !catalogReady}
           >
             <Trash2 size={17} />
             Clear
@@ -734,21 +819,85 @@ function App() {
         />
 
         <section className="library-strip">
-        <div className="library-header">
-          <div>
-            <h2>{visibleResults ? 'Nearest results' : 'Catalog results'}</h2>
-            <p className="subtle">
-              {mediaItems.length.toLocaleString()} visible ·{' '}
-              {sources.length.toLocaleString()} sources · {status}
-            </p>
+          <div className="library-header">
+            <div>
+              <h2>{visibleResults ? 'Nearest results' : 'Catalog results'}</h2>
+              <p className="subtle">
+                {mediaItems.length.toLocaleString()} visible ·{' '}
+                {sources.length.toLocaleString()} sources · {status}
+              </p>
+            </div>
+            <div className="library-actions">
+              <details className="display-menu">
+                <summary>
+                  <Settings2 size={17} />
+                  Display
+                </summary>
+                <div className="display-popover">
+                  <div className="display-section">
+                    <span>Mode</span>
+                    <div className="segmented-control" role="group" aria-label="Result display mode">
+                      <button
+                        type="button"
+                        className={resultDisplayMode === 'images' ? 'active' : ''}
+                        onClick={() => setDisplayMode('images')}
+                      >
+                        <Images size={16} />
+                        Images
+                      </button>
+                      <button
+                        type="button"
+                        className={resultDisplayMode === 'cards' ? 'active' : ''}
+                        onClick={() => setDisplayMode('cards')}
+                      >
+                        <ImageIcon size={16} />
+                        Cards
+                      </button>
+                      <button
+                        type="button"
+                        className={resultDisplayMode === 'list' ? 'active' : ''}
+                        onClick={() => setDisplayMode('list')}
+                      >
+                        <List size={16} />
+                        List
+                      </button>
+                    </div>
+                  </div>
+                  <div className="display-section">
+                    <span>Thumbnail size</span>
+                    <div className="segmented-control compact" role="group" aria-label="Thumbnail size">
+                      {(['small', 'medium', 'large'] as const).map((size) => (
+                        <button
+                          key={size}
+                          type="button"
+                          className={resultThumbnailSize === size ? 'active' : ''}
+                          onClick={() => setThumbnailSize(size)}
+                        >
+                          {size}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <label className="toggle-row">
+                    <input
+                      type="checkbox"
+                      checked={showResultMetadata}
+                      onChange={(event) => toggleMetadata(event.target.checked)}
+                    />
+                    Show metadata
+                  </label>
+                </div>
+              </details>
+              <button type="button" onClick={refreshAll} disabled={busy}>
+                <RefreshCcw size={17} />
+                Refresh
+              </button>
+            </div>
           </div>
-          <button type="button" onClick={refreshAll} disabled={busy}>
-            <RefreshCcw size={17} />
-            Refresh
-          </button>
-        </div>
         {error && <p className="error-banner">{error}</p>}
-        <div className="media-grid">
+        <div
+          className={`media-grid media-grid-${resultDisplayMode} media-thumb-${resultThumbnailSize}`}
+        >
           {resultItems.map((result) => (
             <article key={result.item.id} className="media-card">
               <Thumbnail
@@ -756,21 +905,57 @@ function App() {
                 label={result.item.displayName}
                 kind={result.item.kind}
               />
-              <div className="media-card-body">
-                <div className="media-title-row">
-                  {result.item.kind === 'video' ? (
-                    <Video size={15} />
-                  ) : (
-                    <ImageIcon size={15} />
+              {resultDisplayMode !== 'images' && (
+                <div className="media-card-body">
+                  <div className="media-title-row">
+                    {result.item.kind === 'video' ? (
+                      <Video size={15} />
+                    ) : (
+                      <ImageIcon size={15} />
+                    )}
+                    <h3>{result.item.displayName}</h3>
+                  </div>
+                  {showResultMetadata && (
+                    <>
+                      <p>{formatDateTime(result.item.capturedAt)}</p>
+                      <p>{result.item.relativePath}</p>
+                      <p className="metadata-extra">
+                        {[
+                          result.item.mimeType,
+                          formatDimensions(result.item),
+                          formatGeo(result.item),
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </p>
+                    </>
                   )}
-                  <h3>{result.item.displayName}</h3>
+                  {Number.isFinite(result.distanceMeters) && (
+                    <strong>{formatDistance(result.distanceMeters)}</strong>
+                  )}
                 </div>
-                <p>{formatDateTime(result.item.capturedAt)}</p>
-                <p>{result.item.relativePath}</p>
-                {Number.isFinite(result.distanceMeters) && (
-                  <strong>{formatDistance(result.distanceMeters)}</strong>
-                )}
-              </div>
+              )}
+              {resultDisplayMode === 'images' && showResultMetadata && (
+                <div className="media-overlay">
+                  <span>{result.item.displayName}</span>
+                  {Number.isFinite(result.distanceMeters) && (
+                    <strong>{formatDistance(result.distanceMeters)}</strong>
+                  )}
+                </div>
+              )}
+              {resultDisplayMode === 'list' && (
+                <div className="media-list-columns">
+                  <span>{result.item.kind}</span>
+                  <span>{formatDateTime(result.item.capturedAt)}</span>
+                  <span>{formatDimensions(result.item) ?? 'n/a'}</span>
+                  <span>{formatGeo(result.item) ?? 'no GPS'}</span>
+                  {Number.isFinite(result.distanceMeters) ? (
+                    <strong>{formatDistance(result.distanceMeters)}</strong>
+                  ) : (
+                    <span>catalog</span>
+                  )}
+                </div>
+              )}
             </article>
           ))}
         </div>

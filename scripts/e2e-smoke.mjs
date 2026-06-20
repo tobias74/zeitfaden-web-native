@@ -10,7 +10,9 @@ function expect(condition, message) {
 }
 
 async function waitForText(page, text) {
-  await page.getByText(text, { exact: false }).waitFor({ timeout: 15_000 })
+  await page.getByText(text, { exact: false }).first().waitFor({
+    timeout: 15_000,
+  })
 }
 
 async function main() {
@@ -20,6 +22,13 @@ async function main() {
   })
   const page = await browser.newPage({
     viewport: { width: 1440, height: 1000 },
+  })
+  await page.addInitScript(() => {
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith('geo-media-index-lab:')) {
+        localStorage.removeItem(key)
+      }
+    }
   })
 
   const consoleMessages = []
@@ -37,6 +46,7 @@ async function main() {
 
   await waitForText(page, 'Geo Media Index Lab')
   await waitForText(page, 'SQLite')
+  await waitForText(page, 'OPFS')
 
   const verticalHandle = page.getByRole('separator', {
     name: /resize left tools and results/i,
@@ -90,7 +100,31 @@ async function main() {
   await page.getByRole('button', { name: /sample data/i }).click()
   await waitForText(page, 'Loaded sample geotagged library')
   await waitForText(page, 'Limmat evening')
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await waitForText(page, 'Limmat evening')
+  await waitForText(page, 'Indexed 5 geotagged items')
   await page.screenshot({ path: '/tmp/ding-e2e-sample.png', fullPage: true })
+
+  await page.getByText('Display').click()
+  await page.getByRole('button', { name: /list/i }).click()
+  await page.getByRole('button', { name: /large/i }).click()
+  await page.locator('.media-grid-list').waitFor({ timeout: 5_000 })
+  await page.locator('.media-thumb-large').waitFor({ timeout: 5_000 })
+  await page
+    .locator('.media-list-columns')
+    .filter({ hasText: '47.37690, 8.54170' })
+    .first()
+    .waitFor({ timeout: 5_000 })
+  await page.getByRole('button', { name: /images/i }).click()
+  await page.locator('.media-grid-images').waitFor({ timeout: 5_000 })
+  await page.getByLabel('Show metadata').uncheck()
+  await page.locator('.media-overlay').first().waitFor({
+    state: 'detached',
+    timeout: 5_000,
+  })
+  await page.getByLabel('Show metadata').check()
+  await page.getByRole('button', { name: /cards/i }).click()
+  await page.getByText('Display').click()
 
   await page
     .locator('label')

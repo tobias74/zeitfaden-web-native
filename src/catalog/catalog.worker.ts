@@ -14,7 +14,7 @@ type WorkerRequest = {
 }
 
 type InitResult = {
-  storageMode: 'opfs' | 'transient'
+  storageMode: 'opfs'
   sqliteVersion: string
   filename: string
 }
@@ -50,12 +50,16 @@ async function ensureDb(): Promise<InitResult> {
   if (db && initResult) return initResult
 
   const sqlite3 = await sqlite3InitModule()
-  const hasOpfs = 'opfs' in sqlite3
+  const opfsVfs = sqlite3.capi.sqlite3_vfs_find('opfs')
+  const opfsDb = sqlite3.oo1.OpfsDb
 
-  const openedDb = hasOpfs
-    ? new sqlite3.oo1.OpfsDb('/catalog.sqlite3')
-    : new sqlite3.oo1.DB('/catalog.sqlite3', 'ct')
-  db = openedDb as unknown as SqliteDb
+  if (!opfsVfs || !opfsDb) {
+    throw new Error(
+      'SQLite OPFS storage is unavailable. Use a modern browser served with Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp.',
+    )
+  }
+
+  db = new opfsDb('/catalog.sqlite3') as unknown as SqliteDb
   const activeDb = db
 
   activeDb.exec(`
@@ -102,7 +106,7 @@ async function ensureDb(): Promise<InitResult> {
   `)
 
   initResult = {
-    storageMode: hasOpfs ? 'opfs' : 'transient',
+    storageMode: 'opfs',
     sqliteVersion: sqlite3.version.libVersion,
     filename: activeDb.filename,
   }
@@ -181,24 +185,8 @@ function itemBind(item: MediaItem): unknown[] {
   ]
 }
 
-function timeWhere(
-  query: Pick<CatalogQuery, 'startTime' | 'endTime'>,
-  where: string[],
-  bind: unknown[],
-): void {
-  if (typeof query.startTime === 'number') {
-    where.push('captured_at >= ?')
-    bind.push(query.startTime)
-  }
-  if (typeof query.endTime === 'number') {
-    where.push('captured_at <= ?')
-    bind.push(query.endTime)
-  }
-}
-
-async function upsertSource(source: MediaSource): Promise<void> {
-  await ensureDb()
-  requireDb().exec({
+function upsertSourceIntoSqlite(activeDb: SqliteDb, source: MediaSource): void {
+  activeDb.exec({
     sql: `
       INSERT INTO media_sources (id, label, added_at)
       VALUES (?, ?, ?)
@@ -210,9 +198,9 @@ async function upsertSource(source: MediaSource): Promise<void> {
   })
 }
 
-async function upsertMedia(items: MediaItem[]): Promise<number> {
-  await ensureDb()
-  const activeDb = requireDb()
+function upsertMediaIntoSqlite(activeDb: SqliteDb, items: MediaItem[]): void {
+  if (items.length === 0) return
+
   const stmt = activeDb.prepare(`
     INSERT INTO media_items (
       id, source_id, relative_path, display_name, kind, mime_type, size_bytes,
@@ -240,17 +228,46 @@ async function upsertMedia(items: MediaItem[]): Promise<number> {
       last_seen_at = excluded.last_seen_at
   `)
 
-  activeDb.exec('BEGIN')
   try {
     for (const item of items) {
       stmt.bind(itemBind(item)).stepReset(true)
     }
+  } finally {
+    stmt.finalize()
+  }
+}
+
+function timeWhere(
+  query: Pick<CatalogQuery, 'startTime' | 'endTime'>,
+  where: string[],
+  bind: unknown[],
+): void {
+  if (typeof query.startTime === 'number') {
+    where.push('captured_at >= ?')
+    bind.push(query.startTime)
+  }
+  if (typeof query.endTime === 'number') {
+    where.push('captured_at <= ?')
+    bind.push(query.endTime)
+  }
+}
+
+async function upsertSource(source: MediaSource): Promise<void> {
+  await ensureDb()
+  upsertSourceIntoSqlite(requireDb(), source)
+}
+
+async function upsertMedia(items: MediaItem[]): Promise<number> {
+  await ensureDb()
+  const activeDb = requireDb()
+
+  activeDb.exec('BEGIN')
+  try {
+    upsertMediaIntoSqlite(activeDb, items)
     activeDb.exec('COMMIT')
   } catch (error) {
     activeDb.exec('ROLLBACK')
     throw error
-  } finally {
-    stmt.finalize()
   }
 
   return items.length
