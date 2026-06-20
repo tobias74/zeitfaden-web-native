@@ -26,6 +26,7 @@ import {
 } from 'react'
 import './App.css'
 import { MapView } from './components/MapView'
+import { MediaViewer } from './components/MediaViewer'
 import { Thumbnail } from './components/Thumbnail'
 import { sampleMedia, sampleSource } from './demo/sampleData'
 import { formatDistance } from './lib/distance'
@@ -222,6 +223,7 @@ function App() {
   const [resultPage, setResultPage] = useState(0)
   const [resultPageSize, setResultPageSize] = useState(storedPageSize)
   const [searchResults, setSearchResults] = useState<EnrichedSearchResult[]>([])
+  const [viewerIndex, setViewerIndex] = useState<number>()
   const [indexStats, setIndexStats] = useState<GeoIndexStats>(defaultStats)
   const [validation, setValidation] = useState<ValidationReport>()
   const [status, setStatus] = useState('Initializing catalog')
@@ -523,6 +525,14 @@ function App() {
     setResultPageSize(size)
     setResultPage(0)
     window.localStorage.setItem(RESULT_PAGE_SIZE_KEY, String(size))
+  }, [])
+
+  const openViewer = useCallback((index: number) => {
+    setViewerIndex(index)
+  }, [])
+
+  const closeViewer = useCallback(() => {
+    setViewerIndex(undefined)
   }, [])
 
   const setDisplayMode = useCallback((mode: ResultDisplayMode) => {
@@ -1034,8 +1044,19 @@ function App() {
         <div
           className={`media-grid media-grid-${resultDisplayMode} media-thumb-${resultThumbnailSize}`}
         >
-          {resultItems.map((result) => (
-            <article key={result.item.id} className="media-card">
+          {resultItems.map((result, index) => (
+            <article
+              key={result.item.id}
+              className="media-card"
+              role="button"
+              tabIndex={0}
+              onClick={() => openViewer(index)}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter' && event.key !== ' ') return
+                event.preventDefault()
+                openViewer(index)
+              }}
+            >
               <Thumbnail
                 thumbnails={platform.thumbnails}
                 thumbnailKey={result.item.thumbnailKey}
@@ -1097,6 +1118,15 @@ function App() {
           ))}
         </div>
       </section>
+      {viewerIndex !== undefined && viewerIndex < resultItems.length && (
+        <MediaViewer
+          platform={platform}
+          items={resultItems}
+          index={viewerIndex}
+          onClose={closeViewer}
+          onNavigate={setViewerIndex}
+        />
+      )}
       </section>
     </main>
   )

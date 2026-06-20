@@ -92,6 +92,25 @@ class TauriThumbnailBackend implements ThumbnailBackend {
   revokeThumbnailUrl(): void {}
 }
 
+class TauriFileLocationBackend {
+  async resolveOriginalUrl(
+    item: MediaItem,
+    location?: MediaLocation,
+  ): Promise<string | undefined> {
+    const selectedLocation =
+      location ?? item.locations.find((candidate) => candidate.absolutePath)
+    return selectedLocation?.absolutePath
+      ? convertFileSrc(selectedLocation.absolutePath)
+      : undefined
+  }
+
+  revokeOriginalUrl(): void {}
+
+  revealLocation(location: MediaLocation): Promise<void> {
+    return invoke('reveal_location', { location })
+  }
+}
+
 export function createTauriPlatformBackend(): PlatformBackend {
   const catalog = new TauriCatalogBackend()
 
@@ -106,11 +125,7 @@ export function createTauriPlatformBackend(): PlatformBackend {
     catalog,
     importer: new TauriImportBackend(),
     thumbnails: new TauriThumbnailBackend(),
-    files: {
-      revealLocation(location: MediaLocation): Promise<void> {
-        return invoke('reveal_location', { location })
-      },
-    },
+    files: new TauriFileLocationBackend(),
     dispose() {
       catalog.dispose()
     },

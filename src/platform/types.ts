@@ -67,6 +67,11 @@ export interface ThumbnailBackend {
 }
 
 export interface FileLocationBackend {
+  resolveOriginalUrl(
+    item: MediaItem,
+    location?: MediaLocation,
+  ): Promise<string | undefined>
+  revokeOriginalUrl(url: string): void
   revealLocation(location: MediaLocation): Promise<void>
 }
 

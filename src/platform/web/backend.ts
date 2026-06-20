@@ -1,5 +1,6 @@
 import { CatalogClient } from './catalogClient'
 import {
+  getDirectoryHandle,
   listDirectoryHandles,
   putDirectoryHandle,
   removeDirectoryHandle,
@@ -13,6 +14,7 @@ import type {
   PlatformBackend,
   ThumbnailBackend,
 } from '../types'
+import type { MediaItem, MediaLocation } from '../../types'
 
 type ImportSourceRecord = {
   id: string
@@ -167,6 +169,72 @@ class WebThumbnailBackend implements ThumbnailBackend {
   }
 }
 
+async function ensureReadPermission(
+  handle: FileSystemDirectoryHandle,
+): Promise<boolean> {
+  if (typeof handle.queryPermission === 'function') {
+    const current = await handle.queryPermission({ mode: 'read' })
+    if (current === 'granted') return true
+  }
+
+  if (typeof handle.requestPermission === 'function') {
+    return (await handle.requestPermission({ mode: 'read' })) === 'granted'
+  }
+
+  return true
+}
+
+async function fileHandleForRelativePath(
+  root: FileSystemDirectoryHandle,
+  relativePath: string,
+): Promise<FileSystemFileHandle | undefined> {
+  const segments = relativePath.split('/').filter(Boolean)
+  const fileName = segments.pop()
+  if (!fileName) return undefined
+
+  let directory = root
+  for (const segment of segments) {
+    directory = await directory.getDirectoryHandle(segment)
+  }
+
+  return directory.getFileHandle(fileName)
+}
+
+class WebFileLocationBackend {
+  async resolveOriginalUrl(
+    item: MediaItem,
+    location?: MediaLocation,
+  ): Promise<string | undefined> {
+    const selectedLocation = location ?? item.locations[0]
+    const sourceId = selectedLocation?.sourceId ?? item.sourceId
+    const relativePath = selectedLocation?.relativePath ?? item.relativePath
+    if (!sourceId || !relativePath) return undefined
+
+    try {
+      const sourceRecord = await getDirectoryHandle(sourceId)
+      if (!sourceRecord) return undefined
+      if (!(await ensureReadPermission(sourceRecord.handle))) return undefined
+
+      const fileHandle = await fileHandleForRelativePath(
+        sourceRecord.handle,
+        relativePath,
+      )
+      const file = await fileHandle?.getFile()
+      return file ? URL.createObjectURL(file) : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  revokeOriginalUrl(url: string): void {
+    URL.revokeObjectURL(url)
+  }
+
+  async revealLocation(): Promise<void> {
+    throw new Error('Revealing original files is only available in Tauri.')
+  }
+}
+
 export function createWebPlatformBackend(): PlatformBackend {
   const catalog = new CatalogClient()
   const scanner = new ScannerClient()
@@ -182,11 +250,7 @@ export function createWebPlatformBackend(): PlatformBackend {
     catalog,
     importer: new WebImportBackend(catalog, scanner),
     thumbnails: new WebThumbnailBackend(),
-    files: {
-      async revealLocation(): Promise<void> {
-        throw new Error('Revealing original files is only available in Tauri.')
-      },
-    },
+    files: new WebFileLocationBackend(),
     dispose() {
       catalog.dispose()
       scanner.dispose()
