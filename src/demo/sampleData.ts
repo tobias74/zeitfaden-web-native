@@ -8,8 +8,25 @@ export const sampleSource: MediaSource = {
 
 const day = 24 * 60 * 60 * 1_000
 
+function sampleItem(item: Omit<MediaItem, 'contentHash' | 'locations'>): MediaItem {
+  return {
+    ...item,
+    contentHash: item.id,
+    locations: [
+      {
+        id: `${item.id}-location`,
+        sourceId: item.sourceId,
+        relativePath: item.relativePath,
+        displayName: item.displayName,
+        deletedAt: item.deletedAt,
+        lastSeenAt: item.lastSeenAt,
+      },
+    ],
+  }
+}
+
 export const sampleMedia: MediaItem[] = [
-  {
+  sampleItem({
     id: 'sample-zurich-limmat',
     sourceId: sampleSource.id,
     relativePath: 'zurich/limmat-evening.jpg',
@@ -25,8 +42,8 @@ export const sampleMedia: MediaItem[] = [
     longitude: 8.5417,
     geoSource: 'exif',
     lastSeenAt: Date.now(),
-  },
-  {
+  }),
+  sampleItem({
     id: 'sample-basel-rhine',
     sourceId: sampleSource.id,
     relativePath: 'basel/rhine-walk.jpg',
@@ -42,8 +59,8 @@ export const sampleMedia: MediaItem[] = [
     longitude: 7.5886,
     geoSource: 'exif',
     lastSeenAt: Date.now() - day,
-  },
-  {
+  }),
+  sampleItem({
     id: 'sample-munich-park',
     sourceId: sampleSource.id,
     relativePath: 'munich/english-garden.jpg',
@@ -59,8 +76,8 @@ export const sampleMedia: MediaItem[] = [
     longitude: 11.5878,
     geoSource: 'exif',
     lastSeenAt: Date.now() - 2 * day,
-  },
-  {
+  }),
+  sampleItem({
     id: 'sample-venice-canal',
     sourceId: sampleSource.id,
     relativePath: 'venice/canal.mp4',
@@ -75,8 +92,8 @@ export const sampleMedia: MediaItem[] = [
     longitude: 12.3155,
     geoSource: 'manual',
     lastSeenAt: Date.now() - 3 * day,
-  },
-  {
+  }),
+  sampleItem({
     id: 'sample-reykjavik-harbor',
     sourceId: sampleSource.id,
     relativePath: 'iceland/reykjavik-harbor.jpg',
@@ -92,8 +109,8 @@ export const sampleMedia: MediaItem[] = [
     longitude: -21.9426,
     geoSource: 'exif',
     lastSeenAt: Date.now() - 4 * day,
-  },
-  {
+  }),
+  sampleItem({
     id: 'sample-no-gps',
     sourceId: sampleSource.id,
     relativePath: 'unsorted/kitchen.jpg',
@@ -106,6 +123,5 @@ export const sampleMedia: MediaItem[] = [
     capturedAt: Date.UTC(2024, 0, 7, 8, 30),
     capturedAtSource: 'filesystem',
     lastSeenAt: Date.now() - 5 * day,
-  },
+  }),
 ]
-

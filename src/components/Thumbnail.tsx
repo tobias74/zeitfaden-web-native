@@ -1,17 +1,24 @@
 import { useEffect, useState } from 'react'
+import type { ThumbnailBackend } from '../platform/types'
 
 type ThumbnailProps = {
+  thumbnails: ThumbnailBackend
   thumbnailKey?: string
   label: string
   kind: 'image' | 'video'
 }
 
-export function Thumbnail({ thumbnailKey, label, kind }: ThumbnailProps) {
+export function Thumbnail({
+  thumbnails,
+  thumbnailKey,
+  label,
+  kind,
+}: ThumbnailProps) {
   const [url, setUrl] = useState<string>()
 
   useEffect(() => {
     let cancelled = false
-    let objectUrl: string | undefined
+    let resolvedUrl: string | undefined
 
     async function loadThumbnail() {
       if (!thumbnailKey) {
@@ -20,13 +27,8 @@ export function Thumbnail({ thumbnailKey, label, kind }: ThumbnailProps) {
       }
 
       try {
-        const [directory, fileName] = thumbnailKey.split('/')
-        const root = await navigator.storage.getDirectory()
-        const dir = await root.getDirectoryHandle(directory)
-        const handle = await dir.getFileHandle(fileName)
-        const file = await handle.getFile()
-        objectUrl = URL.createObjectURL(file)
-        if (!cancelled) setUrl(objectUrl)
+        resolvedUrl = await thumbnails.resolveThumbnailUrl(thumbnailKey)
+        if (!cancelled) setUrl(resolvedUrl)
       } catch {
         if (!cancelled) setUrl(undefined)
       }
@@ -36,9 +38,9 @@ export function Thumbnail({ thumbnailKey, label, kind }: ThumbnailProps) {
 
     return () => {
       cancelled = true
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
+      if (resolvedUrl) thumbnails.revokeThumbnailUrl(resolvedUrl)
     }
-  }, [thumbnailKey])
+  }, [thumbnailKey, thumbnails])
 
   if (url) {
     return <img className="thumb-image" src={url} alt={label} loading="lazy" />
@@ -50,4 +52,3 @@ export function Thumbnail({ thumbnailKey, label, kind }: ThumbnailProps) {
     </div>
   )
 }
-

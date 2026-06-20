@@ -1,6 +1,11 @@
 import * as exifr from 'exifr'
-import { detectMediaKind, pathDisplayName } from '../lib/media'
-import type { CapturedAtSource, GeoSource, MediaItem, MediaSource } from '../types'
+import { detectMediaKind, pathDisplayName } from '../../lib/media'
+import type {
+  CapturedAtSource,
+  GeoSource,
+  MediaItem,
+  MediaSource,
+} from '../../types'
 
 type ScanRequest = {
   id: number
@@ -13,8 +18,11 @@ type ScanRequest = {
 }
 
 export type ScanProgress = {
+  phase: 'counting' | 'scanning' | 'storing'
   scannedFiles: number
+  totalFiles: number
   acceptedMedia: number
+  skippedFiles: number
   currentPath?: string
 }
 
@@ -24,6 +32,7 @@ export type ScanResult = {
   errors: string[]
   stats: {
     scannedFiles: number
+    totalFiles: number
     acceptedMedia: number
     skippedFiles: number
   }
@@ -55,18 +64,24 @@ function dateMillis(value: unknown): number | undefined {
   return undefined
 }
 
-async function stableMediaId(
-  sourceId: string,
-  relativePath: string,
-  file: File,
-): Promise<string> {
-  const material = `${sourceId}\n${relativePath}\n${file.size}\n${file.lastModified}`
-  const encoded = new TextEncoder().encode(material)
-  const digest = await crypto.subtle.digest('SHA-256', encoded)
-  const hex = Array.from(new Uint8Array(digest))
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
     .map((byte) => byte.toString(16).padStart(2, '0'))
     .join('')
-  return hex.slice(0, 32)
+}
+
+export async function fileContentHash(file: File): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+  return bytesToHex(new Uint8Array(digest))
+}
+
+async function stableOccurrenceId(
+  sourceId: string,
+  relativePath: string,
+): Promise<string> {
+  const encoded = new TextEncoder().encode(`${sourceId}\n${relativePath}`)
+  const digest = await crypto.subtle.digest('SHA-256', encoded)
+  return bytesToHex(new Uint8Array(digest))
 }
 
 async function writeThumbnail(id: string, file: File): Promise<string | undefined> {
@@ -174,16 +189,27 @@ async function mediaFromFile(
   const kind = detectMediaKind(file)
   if (!kind) return undefined
 
-  const id = await stableMediaId(sourceId, relativePath, file)
-  const base = {
-    id,
+  const contentHash = await fileContentHash(file)
+  const locationId = await stableOccurrenceId(sourceId, relativePath)
+  const lastSeenAt = Date.now()
+  const location = {
+    id: locationId,
     sourceId,
     relativePath,
     displayName: pathDisplayName(relativePath),
+    lastSeenAt,
+  }
+  const base = {
+    id: contentHash,
+    contentHash,
+    sourceId,
+    relativePath,
+    displayName: location.displayName,
     kind,
     mimeType: file.type || (kind === 'image' ? 'image/*' : 'video/*'),
     sizeBytes: file.size,
-    lastSeenAt: Date.now(),
+    lastSeenAt,
+    locations: [location],
   }
 
   if (kind === 'video') {
@@ -195,7 +221,7 @@ async function mediaFromFile(
   }
 
   const imageMetadata = await readImageMetadata(file)
-  const thumbnailKey = await writeThumbnail(id, file)
+  const thumbnailKey = await writeThumbnail(contentHash, file)
 
   return {
     ...base,
@@ -214,9 +240,37 @@ async function scanDirectory(
 ): Promise<Omit<ScanResult, 'source'>> {
   const items: MediaItem[] = []
   const errors: string[] = []
+  let totalFiles = 0
   let scannedFiles = 0
   let acceptedMedia = 0
   let skippedFiles = 0
+
+  async function countFiles(
+    directoryHandle: FileSystemDirectoryHandle,
+  ): Promise<void> {
+    const entries = directoryHandle.entries()
+    for await (const [, entry] of entries) {
+      if (entry.kind === 'directory') {
+        await countFiles(entry as FileSystemDirectoryHandle)
+        continue
+      }
+
+      totalFiles += 1
+      if (totalFiles % 200 === 0) {
+        ctx.postMessage({
+          id: currentRequestId,
+          type: 'progress',
+          progress: {
+            phase: 'counting',
+            scannedFiles: 0,
+            totalFiles,
+            acceptedMedia: 0,
+            skippedFiles: 0,
+          },
+        })
+      }
+    }
+  }
 
   async function walk(
     directoryHandle: FileSystemDirectoryHandle,
@@ -257,14 +311,48 @@ async function scanDirectory(
         ctx.postMessage({
           id: currentRequestId,
           type: 'progress',
-          progress: { scannedFiles, acceptedMedia, currentPath: relativePath },
+          progress: {
+            phase: 'scanning',
+            scannedFiles,
+            totalFiles,
+            acceptedMedia,
+            skippedFiles,
+            currentPath: relativePath,
+          },
         })
       }
     }
   }
 
+  await countFiles(handle)
+  ctx.postMessage({
+    id: currentRequestId,
+    type: 'progress',
+    progress: {
+      phase: 'scanning',
+      scannedFiles,
+      totalFiles,
+      acceptedMedia,
+      skippedFiles,
+    },
+  })
   await walk(handle, '')
-  return { items, errors, stats: { scannedFiles, acceptedMedia, skippedFiles } }
+  ctx.postMessage({
+    id: currentRequestId,
+    type: 'progress',
+    progress: {
+      phase: 'scanning',
+      scannedFiles,
+      totalFiles,
+      acceptedMedia,
+      skippedFiles,
+    },
+  })
+  return {
+    items,
+    errors,
+    stats: { scannedFiles, totalFiles, acceptedMedia, skippedFiles },
+  }
 }
 
 let currentRequestId = 0

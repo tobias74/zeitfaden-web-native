@@ -2,6 +2,46 @@
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
+## Development
+
+Install the web dependencies and run the browser app:
+
+```bash
+npm ci
+npm run dev
+```
+
+Run verification:
+
+```bash
+npm run build
+npm run lint
+npm test
+```
+
+## Tauri Desktop
+
+This repo also contains a Tauri v2 native shell in `src-tauri`. The web
+runtime keeps using OPFS/File System Access APIs, while the Tauri runtime uses
+Rust-side scanning, absolute filesystem paths, native SQLite, and native
+thumbnail files.
+
+Windows is the primary native target. Install the Tauri Windows prerequisites,
+including Rust and the Microsoft C++ build tools, then run:
+
+```bash
+npm run tauri:dev
+```
+
+If you run Cargo from Windows against this repo through the WSL UNC path, put
+the Cargo target directory on a local Windows path to avoid UNC artifact
+permission errors:
+
+```powershell
+$env:CARGO_TARGET_DIR='C:\Users\tobia\AppData\Local\Temp\zeitfaden-tauri-target'
+cargo test --manifest-path \\wsl.localhost\Ubuntu\home\tobias\projects\zeitfaden-web-native\src-tauri\Cargo.toml
+```
+
 Currently, two official plugins are available:
 
 - [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)

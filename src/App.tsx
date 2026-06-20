@@ -1,15 +1,15 @@
 import {
   Activity,
   Calendar,
+  ChevronLeft,
+  ChevronRight,
   Database,
   FolderOpen,
   Images,
-  FlaskConical,
   Image as ImageIcon,
   List,
   MapPin,
   RefreshCcw,
-  Search,
   Settings2,
   Trash2,
   Video,
@@ -25,7 +25,6 @@ import {
   useState,
 } from 'react'
 import './App.css'
-import { CatalogClient } from './catalog/catalogClient'
 import { MapView } from './components/MapView'
 import { Thumbnail } from './components/Thumbnail'
 import { sampleMedia, sampleSource } from './demo/sampleData'
@@ -36,8 +35,8 @@ import {
   formatDateTime,
 } from './lib/time'
 import { GeoIndexRegistry } from './geo/registry'
-import { ScannerClient } from './scanner/scannerClient'
-import { putDirectoryHandle } from './storage/handleStore'
+import { createPlatformBackend } from './platform'
+import type { CatalogInfo, ImportProgress } from './platform/types'
 import type {
   CatalogQuery,
   CatalogSort,
@@ -56,12 +55,7 @@ type QueryPoint = {
   lon: number
 }
 
-type CatalogInfo = {
-  storageMode: 'opfs'
-  sqliteVersion: string
-  filename: string
-}
-
+type SortMode = CatalogSort | 'distance'
 type ResultDisplayMode = 'images' | 'cards' | 'list'
 type ResultThumbnailSize = 'small' | 'medium' | 'large'
 
@@ -81,6 +75,9 @@ const MAP_HEIGHT_KEY = 'geo-media-index-lab:map-height'
 const RESULT_DISPLAY_MODE_KEY = 'geo-media-index-lab:result-display-mode'
 const RESULT_THUMBNAIL_SIZE_KEY = 'geo-media-index-lab:result-thumbnail-size'
 const RESULT_METADATA_KEY = 'geo-media-index-lab:result-metadata'
+const RESULT_PAGE_SIZE_KEY = 'geo-media-index-lab:result-page-size'
+const RESULT_PAGE_SIZE_OPTIONS = [50, 100, 250, 500] as const
+const DEFAULT_RESULT_PAGE_SIZE = 100
 const DEFAULT_LEFT_WIDTH = 440
 const DEFAULT_MAP_HEIGHT = 430
 const MIN_LEFT_WIDTH = 340
@@ -117,18 +114,46 @@ function storedBoolean(key: string, fallback: boolean): boolean {
   return fallback
 }
 
+function storedPageSize(): number {
+  const stored = storedNumber(RESULT_PAGE_SIZE_KEY, DEFAULT_RESULT_PAGE_SIZE)
+  return RESULT_PAGE_SIZE_OPTIONS.includes(
+    stored as (typeof RESULT_PAGE_SIZE_OPTIONS)[number],
+  )
+    ? stored
+    : DEFAULT_RESULT_PAGE_SIZE
+}
+
 function filterValueToKind(value: string): MediaKind | 'all' {
   return value === 'image' || value === 'video' ? value : 'all'
 }
 
-function filterValueToHasGeo(value: string): boolean | undefined {
-  if (value === 'yes') return true
-  if (value === 'no') return false
-  return undefined
-}
-
 function statsNumber(value: number | undefined): string {
   return typeof value === 'number' ? value.toLocaleString() : '0'
+}
+
+function importProgressPercent(progress: ImportProgress): number | undefined {
+  if (progress.phase === 'counting' || progress.totalFiles === 0) {
+    return undefined
+  }
+  return Math.min(100, (progress.scannedFiles / progress.totalFiles) * 100)
+}
+
+function importProgressLabel(progress: ImportProgress): string {
+  if (progress.phase === 'counting') {
+    return `Counting files in ${progress.sourceLabel}`
+  }
+  if (progress.phase === 'storing') {
+    return `Saving ${progress.acceptedMedia.toLocaleString()} media files`
+  }
+  return `Scanning ${progress.sourceLabel}`
+}
+
+function importProgressDetail(progress: ImportProgress): string {
+  if (progress.phase === 'counting') {
+    return `${progress.totalFiles.toLocaleString()} files found`
+  }
+
+  return `${progress.scannedFiles.toLocaleString()} / ${progress.totalFiles.toLocaleString()} files`
 }
 
 function formatDimensions(item: MediaItem): string | undefined {
@@ -176,14 +201,15 @@ function mediaItemsToGeoIndexPoints(items: MediaItem[]): GeoIndexPoint[] {
 }
 
 function App() {
-  const catalog = useMemo(() => new CatalogClient(), [])
-  const scanner = useMemo(() => new ScannerClient(), [])
+  const platform = useMemo(() => createPlatformBackend(), [])
+  const catalog = platform.catalog
   const registry = useMemo(() => new GeoIndexRegistry(), [])
 
   const [catalogInfo, setCatalogInfo] = useState<CatalogInfo>()
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([])
   const [sources, setSources] = useState<MediaSource[]>([])
   const [geoPointCount, setGeoPointCount] = useState(0)
+  const [geoIndexVersion, setGeoIndexVersion] = useState(0)
   const [selectedIndexId, setSelectedIndexId] = useState('brute-force')
   const [queryPoint, setQueryPoint] = useState<QueryPoint>({
     lat: 47.3769,
@@ -191,16 +217,17 @@ function App() {
   })
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
-  const [sort, setSort] = useState<CatalogSort>('captured_at_desc')
+  const [sort, setSort] = useState<SortMode>('captured_at_desc')
   const [kindFilter, setKindFilter] = useState<MediaKind | 'all'>('all')
-  const [hasGeoFilter, setHasGeoFilter] = useState<boolean | undefined>()
-  const [k, setK] = useState(24)
+  const [resultPage, setResultPage] = useState(0)
+  const [resultPageSize, setResultPageSize] = useState(storedPageSize)
   const [searchResults, setSearchResults] = useState<EnrichedSearchResult[]>([])
   const [indexStats, setIndexStats] = useState<GeoIndexStats>(defaultStats)
   const [validation, setValidation] = useState<ValidationReport>()
   const [status, setStatus] = useState('Initializing catalog')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
+  const [importProgress, setImportProgress] = useState<ImportProgress>()
   const [resultDisplayMode, setResultDisplayMode] =
     useState<ResultDisplayMode>(() =>
       storedString(RESULT_DISPLAY_MODE_KEY, 'cards', [
@@ -231,6 +258,10 @@ function App() {
 
   const selectedIndex = registry.get(selectedIndexId)
   const catalogReady = Boolean(catalogInfo)
+  const distanceSortActive = sort === 'distance'
+  const catalogSort: CatalogSort =
+    sort === 'distance' ? 'captured_at_desc' : sort
+  const resultOffset = resultPage * resultPageSize
   const timeRange = useMemo(
     () => timeRangeFromInputs(startDate, endDate),
     [endDate, startDate],
@@ -240,12 +271,11 @@ function App() {
     () => ({
       ...timeRange,
       kind: kindFilter,
-      hasGeo: hasGeoFilter,
-      sort,
-      limit: 500,
-      offset: 0,
+      sort: catalogSort,
+      limit: resultPageSize,
+      offset: resultOffset,
     }),
-    [hasGeoFilter, kindFilter, sort, timeRange],
+    [catalogSort, kindFilter, resultOffset, resultPageSize, timeRange],
   )
 
   const refreshMedia = useCallback(async () => {
@@ -262,6 +292,7 @@ function App() {
     setGeoPointCount(points.length)
     setStatus('Building geo index engines')
     await registry.buildAll(points)
+    setGeoIndexVersion((version) => version + 1)
     setIndexStats(await registry.get(selectedIndexId).stats())
     setStatus(`Indexed ${points.length.toLocaleString()} geotagged items`)
   }, [catalog, registry, selectedIndexId])
@@ -296,6 +327,10 @@ function App() {
   }, [catalog, refreshAll])
 
   useEffect(() => {
+    return () => platform.dispose()
+  }, [platform])
+
+  useEffect(() => {
     if (!catalogInfo) return
     const timer = window.setTimeout(() => {
       refreshMedia().catch((caught) => {
@@ -308,55 +343,30 @@ function App() {
 
   const importFolder = useCallback(async () => {
     setError(undefined)
-
-    if (!window.showDirectoryPicker) {
-      setError('This browser does not expose the File System Access API.')
-      return
-    }
+    setImportProgress(undefined)
 
     setBusy(true)
     try {
-      const handle = await window.showDirectoryPicker({ mode: 'read' })
-      const sourceId = crypto.randomUUID()
-      const sourceLabel = handle.name
-      await putDirectoryHandle({
-        id: sourceId,
-        label: sourceLabel,
-        addedAt: Date.now(),
-        handle,
+      const summary = await platform.importer.importFolder((progress) => {
+        setImportProgress(progress)
+        setStatus(importProgressDetail(progress))
       })
-
-      setStatus(`Scanning ${sourceLabel}`)
-      const result = await scanner.scanDirectory(
-        sourceId,
-        sourceLabel,
-        handle,
-        (progress) => {
-          setStatus(
-            `Scanned ${progress.scannedFiles.toLocaleString()} files, accepted ${progress.acceptedMedia.toLocaleString()}`,
-          )
-        },
-      )
-
-      await catalog.upsertSource(result.source)
-      await catalog.upsertMedia(result.items)
-      await registry.insertMany(mediaItemsToGeoIndexPoints(result.items))
-      setGeoPointCount((await catalog.getGeoPoints()).length)
-      setIndexStats(await registry.get(selectedIndexId).stats())
-      await refreshMedia()
+      setResultPage(0)
+      await refreshAll()
       setStatus(
-        `Imported ${result.stats.acceptedMedia.toLocaleString()} media files from ${sourceLabel}`,
+        `Imported ${summary.acceptedMedia.toLocaleString()} media files from ${summary.sourceLabel}`,
       )
-      if (result.errors.length > 0) {
-        setError(`${result.errors.length} files could not be read.`)
+      if (summary.errors.length > 0) {
+        setError(`${summary.errors.length} files could not be read.`)
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught))
       setStatus('Import stopped')
     } finally {
+      setImportProgress(undefined)
       setBusy(false)
     }
-  }, [catalog, refreshMedia, registry, scanner, selectedIndexId])
+  }, [platform, refreshAll])
 
   const loadSampleData = useCallback(async () => {
     setBusy(true)
@@ -365,7 +375,9 @@ function App() {
       await catalog.upsertSource(sampleSource)
       await catalog.upsertMedia(sampleMedia)
       await registry.insertMany(mediaItemsToGeoIndexPoints(sampleMedia))
+      setResultPage(0)
       setGeoPointCount((await catalog.getGeoPoints()).length)
+      setGeoIndexVersion((version) => version + 1)
       setIndexStats(await registry.get(selectedIndexId).stats())
       await refreshMedia()
       setStatus('Loaded sample geotagged library')
@@ -381,6 +393,7 @@ function App() {
     setError(undefined)
     try {
       await catalog.clear()
+      setResultPage(0)
       setSearchResults([])
       setValidation(undefined)
       await refreshAll()
@@ -392,42 +405,125 @@ function App() {
     }
   }, [catalog, refreshAll])
 
-  const runGeoSearch = useCallback(async () => {
-    setBusy(true)
-    setError(undefined)
-    try {
-      const query = {
-        ...timeRange,
-        lat: queryPoint.lat,
-        lon: queryPoint.lon,
-        k,
-      }
-      const results = await selectedIndex.search(query)
-      const items = await catalog.getMediaByIds(
-        results.map((result) => result.mediaId),
-      )
-      const byId = new Map(items.map((item) => [item.id, item]))
-      const enriched = results.flatMap((result) => {
-        const item = byId.get(result.mediaId)
-        return item ? [{ ...result, item }] : []
-      })
-      setSearchResults(enriched)
-      setValidation(await registry.validateSelected(selectedIndex.id, query))
-      setIndexStats(await selectedIndex.stats())
-      setStatus(
-        `Found ${enriched.length.toLocaleString()} nearest matches with ${selectedIndex.label}`,
-      )
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught))
-    } finally {
-      setBusy(false)
-    }
-  }, [catalog, k, queryPoint, registry, selectedIndex, timeRange])
+  useEffect(() => {
+    if (!catalogInfo || !distanceSortActive) return
 
-  const visibleResults = searchResults.length > 0
-  const resultItems = visibleResults
+    let cancelled = false
+
+    async function sortByDistance() {
+      setError(undefined)
+
+      try {
+        const query = {
+          ...timeRange,
+          lat: queryPoint.lat,
+          lon: queryPoint.lon,
+          k: geoPointCount,
+        }
+        const results = await selectedIndex.search(query)
+        const resultIds = results.map((result) => result.mediaId)
+        const mediaLookupBatchSize = 500
+        const itemChunks = await Promise.all(
+          Array.from(
+            { length: Math.ceil(resultIds.length / mediaLookupBatchSize) },
+            (_, index) =>
+              catalog.getMediaByIds(
+                resultIds.slice(
+                  index * mediaLookupBatchSize,
+                  (index + 1) * mediaLookupBatchSize,
+                ),
+              ),
+          ),
+        )
+        const items = itemChunks.flat()
+        const byId = new Map(items.map((item) => [item.id, item]))
+        const enriched = results
+          .flatMap((result) => {
+            const item = byId.get(result.mediaId)
+            if (!item) return []
+            if (kindFilter !== 'all' && item.kind !== kindFilter) return []
+            return [{ ...result, item }]
+          })
+        const [nextValidation, nextStats] = await Promise.all([
+          kindFilter === 'all'
+            ? registry.validateSelected(selectedIndex.id, query)
+            : Promise.resolve(undefined),
+          selectedIndex.stats(),
+        ])
+
+        if (cancelled) return
+
+        setSearchResults(enriched)
+        setValidation(nextValidation)
+        setIndexStats(nextStats)
+        setStatus(
+          `Sorted ${enriched.length.toLocaleString()} items by distance with ${selectedIndex.label}`,
+        )
+      } catch (caught) {
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : String(caught))
+          setStatus('Distance sort failed')
+        }
+      }
+    }
+
+    sortByDistance()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    catalog,
+    catalogInfo,
+    distanceSortActive,
+    geoIndexVersion,
+    geoPointCount,
+    kindFilter,
+    queryPoint.lat,
+    queryPoint.lon,
+    registry,
+    selectedIndex,
+    timeRange,
+  ])
+
+  const visibleResults = distanceSortActive
+  const allResultItems = distanceSortActive
     ? searchResults
     : mediaItems.map((item) => ({ item, mediaId: item.id, distanceMeters: NaN }))
+  const resultItems = distanceSortActive
+    ? allResultItems.slice(resultOffset, resultOffset + resultPageSize)
+    : allResultItems
+  const visibleStart = resultItems.length === 0 ? 0 : resultOffset + 1
+  const visibleEnd = resultOffset + resultItems.length
+  const visibleRange = distanceSortActive
+    ? `${visibleStart.toLocaleString()}-${visibleEnd.toLocaleString()} of ${allResultItems.length.toLocaleString()}`
+    : resultItems.length === 0
+      ? '0'
+      : `${visibleStart.toLocaleString()}-${visibleEnd.toLocaleString()}`
+  const canPageBackward = resultPage > 0
+  const canPageForward = distanceSortActive
+    ? visibleEnd < allResultItems.length
+    : resultItems.length === resultPageSize
+
+  const setFilterKind = useCallback((kind: MediaKind | 'all') => {
+    setKindFilter(kind)
+    setResultPage(0)
+  }, [])
+
+  const setSortMode = useCallback((nextSort: SortMode) => {
+    setSort(nextSort)
+    setResultPage(0)
+    if (nextSort !== 'distance') {
+      setSearchResults([])
+      setValidation(undefined)
+    }
+  }, [])
+
+  const setPageSize = useCallback((size: number) => {
+    setResultPageSize(size)
+    setResultPage(0)
+    window.localStorage.setItem(RESULT_PAGE_SIZE_KEY, String(size))
+  }, [])
 
   const setDisplayMode = useCallback((mode: ResultDisplayMode) => {
     setResultDisplayMode(mode)
@@ -572,7 +668,7 @@ function App() {
   return (
     <main className="app-shell" style={resizeStyle}>
       <header className="topbar">
-        <div>
+        <div className="topbar-copy">
           <h1>Geo Media Index Lab</h1>
           <p className="subtle">
             {catalogInfo
@@ -580,32 +676,73 @@ function App() {
               : 'Starting local catalog'}
           </p>
         </div>
-        <div className="topbar-actions">
-          <button
-            type="button"
-            onClick={importFolder}
-            disabled={busy || !catalogReady}
+        <div className="topbar-tools">
+          <div className="topbar-actions">
+            <button
+              type="button"
+              onClick={importFolder}
+              disabled={busy || !catalogReady}
+            >
+              <FolderOpen size={17} />
+              Import folder
+            </button>
+            <button
+              type="button"
+              onClick={loadSampleData}
+              disabled={busy || !catalogReady}
+            >
+              <Database size={17} />
+              Sample data
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={clearCatalog}
+              disabled={busy || !catalogReady}
+            >
+              <Trash2 size={17} />
+              Clear
+            </button>
+          </div>
+          <div
+            className={`topbar-progress-slot ${importProgress ? 'active' : 'idle'}`}
+            aria-live="polite"
           >
-            <FolderOpen size={17} />
-            Import folder
-          </button>
-          <button
-            type="button"
-            onClick={loadSampleData}
-            disabled={busy || !catalogReady}
-          >
-            <Database size={17} />
-            Sample data
-          </button>
-          <button
-            type="button"
-            className="danger"
-            onClick={clearCatalog}
-            disabled={busy || !catalogReady}
-          >
-            <Trash2 size={17} />
-            Clear
-          </button>
+            {importProgress ? (
+              <div className="import-progress-strip">
+                <div className="import-progress-header">
+                  <span>{importProgressLabel(importProgress)}</span>
+                  <strong>{importProgressDetail(importProgress)}</strong>
+                </div>
+                <div
+                  className={`progress-track ${
+                    importProgress.phase === 'counting' ? 'indeterminate' : ''
+                  }`}
+                  role="progressbar"
+                  aria-label="Import progress"
+                  aria-valuemax={importProgress.totalFiles || undefined}
+                  aria-valuemin={0}
+                  aria-valuenow={
+                    importProgress.phase === 'counting'
+                      ? undefined
+                      : importProgress.scannedFiles
+                  }
+                >
+                  <div
+                    className="progress-fill"
+                    style={{
+                      width:
+                        importProgressPercent(importProgress) === undefined
+                          ? undefined
+                          : `${importProgressPercent(importProgress)}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="import-progress-idle" aria-hidden="true" />
+            )}
+          </div>
         </div>
       </header>
 
@@ -616,7 +753,10 @@ function App() {
               queryPoint={queryPoint}
               geoItems={mediaItems}
               results={searchResults}
-              onQueryPointChange={setQueryPoint}
+              onQueryPointChange={(point) => {
+                setQueryPoint(point)
+                setResultPage(0)
+              }}
             />
             <div className="map-readout">
               <MapPin size={16} />
@@ -651,7 +791,10 @@ function App() {
                 <input
                   type="date"
                   value={startDate}
-                  onChange={(event) => setStartDate(event.target.value)}
+                  onChange={(event) => {
+                    setStartDate(event.target.value)
+                    setResultPage(0)
+                  }}
                 />
               </label>
               <label>
@@ -659,100 +802,58 @@ function App() {
                 <input
                   type="date"
                   value={endDate}
-                  onChange={(event) => setEndDate(event.target.value)}
+                  onChange={(event) => {
+                    setEndDate(event.target.value)
+                    setResultPage(0)
+                  }}
                 />
               </label>
-              <div className="control-row">
-                <label>
-                  Kind
-                  <select
-                    value={kindFilter}
-                    onChange={(event) =>
-                      setKindFilter(filterValueToKind(event.target.value))
-                    }
-                  >
-                    <option value="all">All</option>
-                    <option value="image">Images</option>
-                    <option value="video">Videos</option>
-                  </select>
-                </label>
-                <label>
-                  GPS
-                  <select
-                    value={
-                      hasGeoFilter === true
-                        ? 'yes'
-                        : hasGeoFilter === false
-                          ? 'no'
-                          : 'all'
-                    }
-                    onChange={(event) =>
-                      setHasGeoFilter(filterValueToHasGeo(event.target.value))
-                    }
-                  >
-                    <option value="all">All</option>
-                    <option value="yes">With GPS</option>
-                    <option value="no">Missing GPS</option>
-                  </select>
-                </label>
-              </div>
+              <label>
+                Kind
+                <select
+                  value={kindFilter}
+                  onChange={(event) =>
+                    setFilterKind(filterValueToKind(event.target.value))
+                  }
+                >
+                  <option value="all">All</option>
+                  <option value="image">Images</option>
+                  <option value="video">Videos</option>
+                </select>
+              </label>
               <label>
                 Sort
                 <select
                   value={sort}
-                  onChange={(event) => setSort(event.target.value as CatalogSort)}
+                  onChange={(event) =>
+                    setSortMode(event.target.value as SortMode)
+                  }
                 >
                   <option value="captured_at_desc">Newest first</option>
                   <option value="captured_at_asc">Oldest first</option>
+                  <option value="distance">Distance from map point</option>
                 </select>
               </label>
-            </section>
-
-            <section className="panel accent-panel">
-              <div className="panel-title">
-                <FlaskConical size={17} />
-                <h2>Geo Search</h2>
-              </div>
-              <label>
-                Engine
-                <select
-                  value={selectedIndexId}
-                  onChange={(event) => setSelectedIndexId(event.target.value)}
-                >
-                  {registry.indexes.map((index) => (
-                    <option key={index.id} value={index.id}>
-                      {index.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Result count
-                <input
-                  type="number"
-                  min={1}
-                  max={500}
-                  value={k}
-                  onChange={(event) => setK(Number(event.target.value))}
-                />
-              </label>
-              <button type="button" onClick={runGeoSearch} disabled={busy}>
-                <Search size={17} />
-                Search nearest
-              </button>
-              <div className="capabilities">
-                <span>{selectedIndex.capabilities.exact ? 'exact' : 'approx'}</span>
-                <span>
-                  {selectedIndex.capabilities.supportsTimePruning
-                    ? 'time-pruning'
-                    : 'time-filter'}
-                </span>
-                <span>
-                  {selectedIndex.capabilities.incrementalInsert
-                    ? 'incremental'
-                    : 'rebuild'}
-                </span>
-              </div>
+              {distanceSortActive && (
+                <div className="distance-sort-controls">
+                  <label>
+                    Engine
+                    <select
+                      value={selectedIndexId}
+                      onChange={(event) => {
+                        setSelectedIndexId(event.target.value)
+                        setResultPage(0)
+                      }}
+                    >
+                      {registry.indexes.map((index) => (
+                        <option key={index.id} value={index.id}>
+                          {index.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              )}
             </section>
 
             <section className="panel metrics-panel">
@@ -823,11 +924,42 @@ function App() {
             <div>
               <h2>{visibleResults ? 'Nearest results' : 'Catalog results'}</h2>
               <p className="subtle">
-                {mediaItems.length.toLocaleString()} visible ·{' '}
+                {visibleRange} visible ·{' '}
                 {sources.length.toLocaleString()} sources · {status}
               </p>
             </div>
             <div className="library-actions">
+              <label className="pagination-size">
+                Page
+                <select
+                  value={resultPageSize}
+                  onChange={(event) => setPageSize(Number(event.target.value))}
+                >
+                  {RESULT_PAGE_SIZE_OPTIONS.map((size) => (
+                    <option key={size} value={size}>
+                      {size}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="pagination-buttons" aria-label="Result pages">
+                <button
+                  type="button"
+                  onClick={() => setResultPage((page) => Math.max(0, page - 1))}
+                  disabled={!canPageBackward}
+                  title="Previous page"
+                >
+                  <ChevronLeft size={17} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setResultPage((page) => page + 1)}
+                  disabled={!canPageForward}
+                  title="Next page"
+                >
+                  <ChevronRight size={17} />
+                </button>
+              </div>
               <details className="display-menu">
                 <summary>
                   <Settings2 size={17} />
@@ -894,13 +1026,16 @@ function App() {
               </button>
             </div>
           </div>
-        {error && <p className="error-banner">{error}</p>}
+          <div className="library-notices">
+            {error && <p className="error-banner">{error}</p>}
+          </div>
         <div
           className={`media-grid media-grid-${resultDisplayMode} media-thumb-${resultThumbnailSize}`}
         >
           {resultItems.map((result) => (
             <article key={result.item.id} className="media-card">
               <Thumbnail
+                thumbnails={platform.thumbnails}
                 thumbnailKey={result.item.thumbnailKey}
                 label={result.item.displayName}
                 kind={result.item.kind}

@@ -8,8 +8,19 @@ export type CapturedAtSource =
 
 export type GeoSource = 'exif' | 'video-metadata' | 'manual'
 
+export type MediaLocation = {
+  id: string
+  sourceId: string
+  relativePath?: string
+  absolutePath?: string
+  displayName: string
+  deletedAt?: number
+  lastSeenAt: number
+}
+
 export type MediaItem = {
   id: string
+  contentHash: string
   sourceId: string
   relativePath: string
   displayName: string
@@ -27,6 +38,7 @@ export type MediaItem = {
   thumbnailKey?: string
   deletedAt?: number
   lastSeenAt: number
+  locations: MediaLocation[]
 }
 
 export type MediaSource = {
@@ -116,4 +128,3 @@ export interface GeoTemporalIndex {
 export type EnrichedSearchResult = GeoSearchResult & {
   item: MediaItem
 }
-

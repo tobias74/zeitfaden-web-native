@@ -44,4 +44,3 @@ export async function removeDirectoryHandle(id: string): Promise<void> {
   const database = await db()
   await database.delete(SOURCE_STORE, id)
 }
-

@@ -17,11 +17,16 @@
 
 .topbar {
   min-height: 72px;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(420px, 680px);
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   padding: 12px 14px;
+}
+
+.topbar-copy {
+  min-width: 0;
 }
 
 .topbar h1 {
@@ -37,11 +42,32 @@
   line-height: 1.35;
 }
 
+.topbar-tools {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
 .topbar-actions {
+  grid-column: 2;
+  grid-row: 1;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.topbar-progress-slot {
+  grid-column: 1;
+  grid-row: 1;
+  height: 32px;
+  min-width: 0;
+}
+
+.import-progress-idle {
+  height: 100%;
 }
 
 .workspace {
@@ -184,21 +210,10 @@
   gap: 8px;
 }
 
-.capabilities {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.capabilities span {
-  min-height: 24px;
-  display: inline-flex;
-  align-items: center;
-  padding: 0 8px;
-  border-radius: 999px;
-  background: #e8f3ef;
-  color: #24564b;
-  font-size: 12px;
+.distance-sort-controls {
+  display: grid;
+  gap: 8px;
+  padding-top: 2px;
 }
 
 .metrics-grid {
@@ -270,6 +285,100 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.pagination-size {
+  width: auto;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #58645f;
+  font-size: 12px;
+}
+
+.pagination-size select {
+  width: 78px;
+  min-height: 36px;
+}
+
+.pagination-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pagination-buttons button {
+  width: 36px;
+  min-height: 36px;
+  padding: 0;
+}
+
+.library-notices {
+  min-width: 0;
+}
+
+.import-progress-strip {
+  height: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) 4px;
+  gap: 4px;
+  align-content: center;
+  overflow: hidden;
+}
+
+.import-progress-header {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.import-progress-header span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #17221e;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.import-progress-header strong {
+  flex: 0 0 auto;
+  color: #0d6f5d;
+  font-size: 12px;
+}
+
+.progress-track {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dce6e1;
+}
+
+.progress-fill {
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: #0f7668;
+  transition: width 0.16s ease;
+}
+
+.progress-track.indeterminate .progress-fill {
+  width: 38%;
+  animation: import-progress-sweep 1.1s ease-in-out infinite;
+}
+
+@keyframes import-progress-sweep {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(270%);
+  }
 }
 
 .display-menu {
@@ -601,8 +710,42 @@
   .workspace,
   .library-header {
     grid-template-columns: 1fr;
-    flex-direction: column;
     align-items: stretch;
+  }
+
+  .topbar {
+    min-height: 116px;
+  }
+
+  .topbar-tools {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar-actions,
+  .topbar-progress-slot {
+    grid-column: 1;
+  }
+
+  .topbar-actions {
+    grid-row: 1;
+    flex-wrap: wrap;
+  }
+
+  .topbar-progress-slot {
+    grid-row: 2;
+    height: 24px;
+  }
+
+  .topbar-progress-slot.idle {
+    display: none;
+  }
+
+  .topbar-actions {
+    justify-content: stretch;
+  }
+
+  .topbar-actions button {
+    flex: 1 1 150px;
   }
 
   .workspace {
@@ -626,11 +769,30 @@
 
   .library-actions {
     align-items: stretch;
+    flex-wrap: wrap;
   }
 
   .display-menu summary,
   .library-actions button {
     width: 100%;
+  }
+
+  .pagination-size {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .pagination-size select {
+    width: 120px;
+  }
+
+  .pagination-buttons {
+    width: 100%;
+  }
+
+  .pagination-buttons button {
+    flex: 1;
+    width: auto;
   }
 
   .display-popover {
