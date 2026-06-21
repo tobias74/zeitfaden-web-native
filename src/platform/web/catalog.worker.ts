@@ -74,7 +74,6 @@ type IdbAsset = {
   longitude?: number
   geoSource?: MediaItem['geoSource']
   thumbnailKey?: string
-  deletedAt?: number
   lastSeenAt: number
 }
 
@@ -178,16 +177,16 @@ const geoIndexRegistry = new GeoIndexRegistry()
 
 const IMPORT_BATCH_SIZE = 1000
 const SQLITE_BIND_CHUNK_LIMIT = 12000
-const ASSET_BIND_COLUMNS = 15
-const LOCATION_BIND_COLUMNS = 7
+const ASSET_BIND_COLUMNS = 14
+const LOCATION_BIND_COLUMNS = 6
 const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
 const GEO_IMPORT_PARSE_SLICE_MS = 250
 const PROGRESS_HEARTBEAT_MS = 1000
 const GEO_POINT_ITEM_BUILD_CHUNK_SIZE = 250
 const GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE = 250
 const GEO_IMPORT_INDEXEDDB_WRITE_BATCH_SIZE = 2000
-const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb'
-const INDEXED_DB_VERSION = 2
+const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb-v2'
+const INDEXED_DB_VERSION = 1
 
 const ctx = self as unknown as {
   postMessage: (message: unknown) => void
@@ -263,7 +262,7 @@ async function ensureDb(): Promise<InitResult> {
     )
   }
 
-  db = new opfsDb('/catalog-v2.sqlite3') as unknown as SqliteDb
+  db = new opfsDb('/catalog-v3.sqlite3') as unknown as SqliteDb
   const activeDb = db
 
   activeDb.exec(`
@@ -272,40 +271,6 @@ async function ensureDb(): Promise<InitResult> {
       label TEXT NOT NULL,
       added_at INTEGER NOT NULL
     );
-
-    CREATE TABLE IF NOT EXISTS media_items (
-      id TEXT PRIMARY KEY,
-      content_hash TEXT,
-      source_id TEXT NOT NULL,
-      relative_path TEXT NOT NULL,
-      display_name TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      mime_type TEXT NOT NULL,
-      size_bytes INTEGER NOT NULL,
-      width INTEGER,
-      height INTEGER,
-      duration_ms INTEGER,
-      captured_at INTEGER,
-      captured_at_source TEXT,
-      latitude REAL,
-      longitude REAL,
-      geo_source TEXT,
-      thumbnail_key TEXT,
-      deleted_at INTEGER,
-      last_seen_at INTEGER NOT NULL,
-      UNIQUE(source_id, relative_path)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_media_captured_at
-      ON media_items(captured_at);
-    CREATE INDEX IF NOT EXISTS idx_media_kind
-      ON media_items(kind);
-    CREATE INDEX IF NOT EXISTS idx_media_source
-      ON media_items(source_id);
-    CREATE INDEX IF NOT EXISTS idx_media_geo
-      ON media_items(latitude, longitude);
-    CREATE INDEX IF NOT EXISTS idx_media_deleted
-      ON media_items(deleted_at);
 
     CREATE TABLE IF NOT EXISTS media_assets (
       content_hash TEXT PRIMARY KEY,
@@ -321,7 +286,6 @@ async function ensureDb(): Promise<InitResult> {
       longitude REAL,
       geo_source TEXT,
       thumbnail_key TEXT,
-      deleted_at INTEGER,
       last_seen_at INTEGER NOT NULL
     );
 
@@ -331,7 +295,6 @@ async function ensureDb(): Promise<InitResult> {
       source_id TEXT NOT NULL,
       relative_path TEXT NOT NULL,
       display_name TEXT NOT NULL,
-      deleted_at INTEGER,
       last_seen_at INTEGER NOT NULL
     );
 
@@ -341,16 +304,10 @@ async function ensureDb(): Promise<InitResult> {
       ON media_assets(kind);
     CREATE INDEX IF NOT EXISTS idx_media_assets_geo
       ON media_assets(latitude, longitude);
-    CREATE INDEX IF NOT EXISTS idx_media_assets_deleted
-      ON media_assets(deleted_at);
     CREATE INDEX IF NOT EXISTS idx_media_locations_content_hash
       ON media_locations(content_hash);
     CREATE INDEX IF NOT EXISTS idx_media_locations_source
       ON media_locations(source_id);
-    CREATE INDEX IF NOT EXISTS idx_media_locations_source_path
-      ON media_locations(source_id, relative_path);
-    CREATE INDEX IF NOT EXISTS idx_media_locations_deleted
-      ON media_locations(deleted_at);
   `)
 
   initResult = {
@@ -430,12 +387,6 @@ function ensureIdbIndex(
   }
 }
 
-function deleteIdbIndexIfExists(store: IDBObjectStore, name: string): void {
-  if (store.indexNames.contains(name)) {
-    store.deleteIndex(name)
-  }
-}
-
 async function ensureIndexedDb(): Promise<InitResult> {
   if (indexedDb && indexedDbInitResult) return indexedDbInitResult
   if (typeof indexedDB === 'undefined') {
@@ -465,8 +416,6 @@ async function ensureIndexedDb(): Promise<InitResult> {
         const assets = request.transaction?.objectStore('assets')
         if (assets) {
           ensureIdbIndex(assets, 'capturedAt', 'capturedAt')
-          deleteIdbIndexIfExists(assets, 'kind')
-          deleteIdbIndexIfExists(assets, 'deletedAt')
         }
       }
 
@@ -481,8 +430,6 @@ async function ensureIndexedDb(): Promise<InitResult> {
         if (locations) {
           ensureIdbIndex(locations, 'contentHash', 'contentHash')
           ensureIdbIndex(locations, 'sourceId', 'sourceId')
-          deleteIdbIndexIfExists(locations, 'sourcePath')
-          deleteIdbIndexIfExists(locations, 'deletedAt')
         }
       }
     }
@@ -533,7 +480,6 @@ function idbAssetFromItem(
     longitude: item.longitude,
     geoSource: item.geoSource,
     thumbnailKey: item.thumbnailKey ?? existing?.thumbnailKey,
-    deletedAt: item.deletedAt,
     lastSeenAt: Math.max(existing?.lastSeenAt ?? 0, item.lastSeenAt),
   }
 }
@@ -557,7 +503,6 @@ function mediaFromIdbAsset(
     longitude: asset.longitude,
     geo_source: asset.geoSource,
     thumbnail_key: asset.thumbnailKey,
-    deleted_at: asset.deletedAt,
     last_seen_at: asset.lastSeenAt,
   }
   return mediaFromAssetRow(row, locations, preferredSourceId)
@@ -570,7 +515,6 @@ function mediaLocationFromIdbLocation(location: IdbLocation): MediaLocation {
     relativePath: location.relativePath,
     absolutePath: location.absolutePath,
     displayName: location.displayName,
-    deletedAt: location.deletedAt,
     lastSeenAt: location.lastSeenAt,
   }
 }
@@ -607,9 +551,7 @@ async function idbLocationsForHash(
   const index = transaction.objectStore('locations').index('contentHash')
   const rows = await idbRequest<IdbLocation[]>(index.getAll(contentHash))
   await done
-  return rows
-    .filter((location) => location.deletedAt === undefined)
-    .map(mediaLocationFromIdbLocation)
+  return rows.map(mediaLocationFromIdbLocation)
 }
 
 async function idbMediaItemsFromAssets(
@@ -733,7 +675,6 @@ function idbAssetMatchesQuery(
   query: CatalogQuery,
   sourceHashes?: Set<string>,
 ): boolean {
-  if (asset.deletedAt !== undefined) return false
   if (query.kind === 'media') {
     if (asset.kind !== 'image' && asset.kind !== 'video') return false
   } else if (query.kind && query.kind !== 'all' && asset.kind !== query.kind) {
@@ -783,11 +724,7 @@ async function idbSourceContentHashes(
     transaction.objectStore('locations').index('sourceId').getAll(sourceId),
   )
   await done
-  return new Set(
-    rows
-      .filter((location) => location.deletedAt === undefined)
-      .map((location) => location.contentHash),
-  )
+  return new Set(rows.map((location) => location.contentHash))
 }
 
 function capturedAtRange(query: TimeRange): IDBKeyRange | undefined {
@@ -862,7 +799,6 @@ async function idbGetGeoPoints(range: TimeRange): Promise<GeoIndexPoint[]> {
     (cursor) => {
       const asset = cursor.value as IdbAsset
       if (
-        asset.deletedAt !== undefined ||
         asset.latitude === undefined ||
         asset.longitude === undefined ||
         (range.startTime !== undefined &&
@@ -903,8 +839,7 @@ async function idbCountMedia(): Promise<number> {
   const transaction = database.transaction('assets', 'readonly')
   const done = idbTransactionDone(transaction)
   await iterateIdbCursor(transaction.objectStore('assets').openCursor(), (cursor) => {
-    const asset = cursor.value as IdbAsset
-    if (asset.deletedAt === undefined) count += 1
+    if (cursor.value) count += 1
   })
   await done
   return count
@@ -929,7 +864,6 @@ function locationFromRow(row: Record<string, unknown>): MediaLocation {
     sourceId: String(row.source_id),
     relativePath: String(row.relative_path),
     displayName: String(row.display_name),
-    deletedAt: toNumber(row.deleted_at),
     lastSeenAt: toNumber(row.last_seen_at) ?? 0,
   }
 }
@@ -985,7 +919,6 @@ function mediaFromAssetRow(
     longitude: toNumber(row.longitude),
     geoSource: toString(row.geo_source) as MediaItem['geoSource'] | undefined,
     thumbnailKey: toString(row.thumbnail_key),
-    deletedAt: toNumber(row.deleted_at),
     lastSeenAt: toNumber(row.last_seen_at) ?? 0,
     locations: sortedLocations,
   }
@@ -1014,7 +947,6 @@ function assetBind(item: MediaItem): unknown[] {
     item.longitude ?? null,
     item.geoSource ?? null,
     item.thumbnailKey ?? null,
-    item.deletedAt ?? null,
     item.lastSeenAt,
   ]
 }
@@ -1027,7 +959,6 @@ function itemLocations(item: MediaItem): MediaLocation[] {
       sourceId: item.sourceId,
       relativePath: item.relativePath,
       displayName: item.displayName,
-      deletedAt: item.deletedAt,
       lastSeenAt: item.lastSeenAt,
     },
   ]
@@ -1166,7 +1097,7 @@ function upsertMediaIntoSqlite(
     INSERT INTO media_assets (
       content_hash, kind, mime_type, size_bytes, width, height, duration_ms,
       captured_at, captured_at_source, latitude, longitude, geo_source,
-      thumbnail_key, deleted_at, last_seen_at
+      thumbnail_key, last_seen_at
     )
     `,
     `
@@ -1183,7 +1114,6 @@ function upsertMediaIntoSqlite(
       longitude = excluded.longitude,
       geo_source = excluded.geo_source,
       thumbnail_key = COALESCE(excluded.thumbnail_key, media_assets.thumbnail_key),
-      deleted_at = excluded.deleted_at,
       last_seen_at = MAX(media_assets.last_seen_at, excluded.last_seen_at)
     `,
     assetRows,
@@ -1198,7 +1128,6 @@ function upsertMediaIntoSqlite(
       location.sourceId,
       location.relativePath ?? '',
       location.displayName,
-      location.deletedAt ?? null,
       location.lastSeenAt,
     ]),
   )
@@ -1209,8 +1138,7 @@ function upsertMediaIntoSqlite(
     'media_locations',
     `
     INSERT INTO media_locations (
-      id, content_hash, source_id, relative_path, display_name, deleted_at,
-      last_seen_at
+      id, content_hash, source_id, relative_path, display_name, last_seen_at
     )
     `,
     `
@@ -1219,7 +1147,6 @@ function upsertMediaIntoSqlite(
       source_id = excluded.source_id,
       relative_path = excluded.relative_path,
       display_name = excluded.display_name,
-      deleted_at = excluded.deleted_at,
       last_seen_at = excluded.last_seen_at
     `,
     locationRows,
@@ -1275,7 +1202,7 @@ function mediaItemsFromAssetRows(
     `
       SELECT *
       FROM media_locations
-      WHERE deleted_at IS NULL AND content_hash IN (${placeholders})
+      WHERE content_hash IN (${placeholders})
       ORDER BY relative_path ASC, id ASC
     `,
     contentHashes,
@@ -1323,10 +1250,6 @@ function removeSourcesFromSqlite(activeDb: SqliteDb, sourceIds: string[]): void 
   if (sourceIds.length === 0) return
 
   const placeholders = sourceIds.map(() => '?').join(', ')
-  activeDb.exec({
-    sql: `DELETE FROM media_items WHERE source_id IN (${placeholders})`,
-    bind: sourceIds,
-  })
   activeDb.exec({
     sql: `DELETE FROM media_locations WHERE source_id IN (${placeholders})`,
     bind: sourceIds,
@@ -2467,10 +2390,9 @@ async function listMedia(query: CatalogQuery): Promise<MediaItem[]> {
   await ensureDb()
   const activeDb = requireDb()
   const where = [
-    'a.deleted_at IS NULL',
     `EXISTS (
       SELECT 1 FROM media_locations l
-      WHERE l.content_hash = a.content_hash AND l.deleted_at IS NULL
+      WHERE l.content_hash = a.content_hash
     )`,
   ]
   const bind: unknown[] = []
@@ -2485,7 +2407,6 @@ async function listMedia(query: CatalogQuery): Promise<MediaItem[]> {
     where.push(`EXISTS (
       SELECT 1 FROM media_locations ls
       WHERE ls.content_hash = a.content_hash
-        AND ls.deleted_at IS NULL
         AND ls.source_id = ?
     )`)
     bind.push(query.sourceId)
@@ -2552,12 +2473,11 @@ async function getGeoPoints(range: {
 }): Promise<GeoIndexPoint[]> {
   await ensureDb()
   const where = [
-    'a.deleted_at IS NULL',
     'a.latitude IS NOT NULL',
     'a.longitude IS NOT NULL',
     `EXISTS (
       SELECT 1 FROM media_locations l
-      WHERE l.content_hash = a.content_hash AND l.deleted_at IS NULL
+      WHERE l.content_hash = a.content_hash
     )`,
   ]
   const bind: unknown[] = []
@@ -2700,10 +2620,6 @@ async function removeSources(sourceIds: string[]): Promise<void> {
   activeDb.exec('BEGIN')
   try {
     activeDb.exec({
-      sql: `DELETE FROM media_items WHERE source_id IN (${placeholders})`,
-      bind: sourceIds,
-    })
-    activeDb.exec({
       sql: `DELETE FROM media_locations WHERE source_id IN (${placeholders})`,
       bind: sourceIds,
     })
@@ -2731,10 +2647,9 @@ async function countMedia(): Promise<number> {
     `
       SELECT COUNT(*)
       FROM media_assets a
-      WHERE a.deleted_at IS NULL
-        AND EXISTS (
+      WHERE EXISTS (
           SELECT 1 FROM media_locations l
-          WHERE l.content_hash = a.content_hash AND l.deleted_at IS NULL
+          WHERE l.content_hash = a.content_hash
         )
     `,
   )
@@ -2746,7 +2661,6 @@ async function clearCatalog(): Promise<void> {
   requireDb().exec(`
     DELETE FROM media_locations;
     DELETE FROM media_assets;
-    DELETE FROM media_items;
     DELETE FROM media_sources;
   `)
 }

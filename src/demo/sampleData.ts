@@ -18,7 +18,6 @@ function sampleItem(item: Omit<MediaItem, 'contentHash' | 'locations'>): MediaIt
         sourceId: item.sourceId,
         relativePath: item.relativePath,
         displayName: item.displayName,
-        deletedAt: item.deletedAt,
         lastSeenAt: item.lastSeenAt,
       },
     ],

@@ -16,7 +16,6 @@ export type MediaLocation = {
   relativePath?: string
   absolutePath?: string
   displayName: string
-  deletedAt?: number
   lastSeenAt: number
 }
 
@@ -38,7 +37,6 @@ export type MediaItem = {
   longitude?: number
   geoSource?: GeoSource
   thumbnailKey?: string
-  deletedAt?: number
   lastSeenAt: number
   locations: MediaLocation[]
 }
