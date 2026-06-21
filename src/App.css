@@ -7,7 +7,7 @@
   overflow: hidden;
 }
 
-.imprint-shell {
+.legal-shell {
   min-height: 100vh;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -37,18 +37,18 @@
   min-width: 0;
 }
 
-.imprint-topbar {
+.legal-topbar {
   grid-template-columns: minmax(260px, 1fr) auto;
 }
 
-.imprint-actions {
+.legal-actions {
   display: flex;
   align-items: center;
   gap: 8px;
   justify-content: flex-end;
 }
 
-.imprint-content {
+.legal-content {
   min-width: 0;
   min-height: 0;
   display: grid;
@@ -57,7 +57,7 @@
   padding: 52px 12px;
 }
 
-.imprint-panel {
+.legal-panel {
   width: min(680px, 100%);
   display: grid;
   gap: 18px;
@@ -67,14 +67,14 @@
   background: #ffffff;
 }
 
-.imprint-panel > div {
+.legal-panel-title {
   display: flex;
   align-items: center;
   gap: 9px;
   color: #1b5a4d;
 }
 
-.imprint-panel h2 {
+.legal-panel h2 {
   color: #111816;
   font-size: 18px;
   font-weight: 720;
@@ -92,6 +92,20 @@
 
 .imprint-address strong {
   font-weight: 720;
+}
+
+.privacy-panel {
+  height: min(720px, calc(100vh - 170px));
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.privacy-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 1px solid #e0e5e2;
+  border-radius: 6px;
+  background: #ffffff;
 }
 
 .topbar h1 {
@@ -1094,7 +1108,7 @@
   }
 
   .topbar,
-  .imprint-topbar,
+  .legal-topbar,
   .workspace,
   .library-header {
     grid-template-columns: 1fr;
@@ -1149,17 +1163,21 @@
     justify-content: space-between;
   }
 
-  .imprint-actions {
+  .legal-actions {
     flex-wrap: wrap;
     justify-content: stretch;
   }
 
-  .imprint-actions button {
+  .legal-actions button {
     flex: 1 1 150px;
   }
 
-  .imprint-content {
+  .legal-content {
     padding: 18px 0;
+  }
+
+  .privacy-panel {
+    height: calc(100vh - 180px);
   }
 
   .workspace {

@@ -60,6 +60,22 @@ async function main() {
   await page.getByRole('button', { name: /back to app/i }).click()
   await waitForText(page, 'Catalog results')
 
+  await page.getByText('Settings', { exact: true }).click()
+  await page.getByRole('button', { name: /privacy policy/i }).click()
+  await page
+    .frameLocator('.privacy-frame')
+    .getByText('Paste the English privacy policy HTML here')
+    .waitFor({ timeout: 15_000 })
+  await page.locator('.language-control select').selectOption('de')
+  await page
+    .frameLocator('.privacy-frame')
+    .getByText('Hier die deutsche Datenschutzerklärung')
+    .waitFor({ timeout: 15_000 })
+  await page.screenshot({ path: '/tmp/ding-e2e-privacy.png', fullPage: true })
+  await page.locator('.language-control select').selectOption('en')
+  await page.getByRole('button', { name: /back to app/i }).click()
+  await waitForText(page, 'Catalog results')
+
   const verticalHandle = page.getByRole('separator', {
     name: /resize left tools and results/i,
   })
@@ -195,6 +211,7 @@ async function main() {
   console.log('Screenshots:')
   console.log('/tmp/ding-e2e-initial.png')
   console.log('/tmp/ding-e2e-imprint.png')
+  console.log('/tmp/ding-e2e-privacy.png')
   console.log('/tmp/ding-e2e-settings.png')
   console.log('/tmp/ding-e2e-final.png')
 }

@@ -12,6 +12,7 @@ import {
   List,
   MapPin,
   Settings2,
+  ShieldCheck,
   Trash2,
   Video,
 } from 'lucide-react'
@@ -29,6 +30,8 @@ import './App.css'
 import { MapView } from './components/MapView'
 import { MediaViewer } from './components/MediaViewer'
 import { Thumbnail } from './components/Thumbnail'
+import privacyDeHtml from './legal/privacy.de.html?raw'
+import privacyEnHtml from './legal/privacy.en.html?raw'
 import { formatDistance } from './lib/distance'
 import {
   LANGUAGES,
@@ -75,6 +78,7 @@ type QueryPoint = {
 }
 
 type SortMode = CatalogSort | 'distance'
+type ActivePage = 'app' | 'imprint' | 'privacy'
 type ResultDisplayMode = 'images' | 'cards' | 'list'
 type ResultThumbnailSize = 'small' | 'medium' | 'large'
 type ActivityLogEntry = {
@@ -265,7 +269,7 @@ function App() {
   const catalog = platform.catalog
   const registry = useMemo(() => new GeoIndexRegistry(), [])
   const [language, setLanguage] = useState<Language>(() => storedLanguage())
-  const [activePage, setActivePage] = useState<'app' | 'imprint'>('app')
+  const [activePage, setActivePage] = useState<ActivePage>('app')
   const locale = languageLocale(language)
   const t = useCallback(
     (key: TranslationKey, values?: TranslationValues) =>
@@ -1013,16 +1017,19 @@ function App() {
   const viewerLocalIndex = viewerSession
     ? viewerSession.absoluteIndex - viewerSession.windowOffset
     : -1
+  const legalPageTitle =
+    activePage === 'privacy' ? t('privacy') : t('imprint')
+  const privacyHtml = language === 'de' ? privacyDeHtml : privacyEnHtml
 
-  if (activePage === 'imprint') {
+  if (activePage !== 'app') {
     return (
-      <main className="imprint-shell">
-        <header className="topbar imprint-topbar">
+      <main className="legal-shell">
+        <header className="topbar legal-topbar">
           <div className="topbar-copy">
             <h1>Geo Media Index Lab</h1>
-            <p className="subtle">{t('imprint')}</p>
+            <p className="subtle">{legalPageTitle}</p>
           </div>
-          <div className="imprint-actions">
+          <div className="legal-actions">
             <label className="language-control" title={t('language')}>
               <span aria-hidden="true">
                 <Languages size={16} />
@@ -1045,21 +1052,36 @@ function App() {
             </button>
           </div>
         </header>
-        <section className="imprint-content">
-          <article className="imprint-panel">
-            <div>
-              <FileText size={20} />
-              <h2>{t('imprint')}</h2>
-            </div>
-            <address className="imprint-address">
-              <strong>tobiga UG (haftungsbeschränkt)</strong>
-              <span>Tobias Gassmann</span>
-              <span>Bodenseestr. 4a</span>
-              <span>81241 München</span>
-              <span>HRB 219431</span>
-              <span>USt-IdNr. DE 301206623</span>
-            </address>
-          </article>
+        <section className="legal-content">
+          {activePage === 'imprint' ? (
+            <article className="legal-panel">
+              <div className="legal-panel-title">
+                <FileText size={20} />
+                <h2>{t('imprint')}</h2>
+              </div>
+              <address className="imprint-address">
+                <strong>tobiga UG (haftungsbeschränkt)</strong>
+                <span>Tobias Gassmann</span>
+                <span>Bodenseestr. 4a</span>
+                <span>81241 München</span>
+                <span>HRB 219431</span>
+                <span>USt-IdNr. DE 301206623</span>
+              </address>
+            </article>
+          ) : (
+            <article className="legal-panel privacy-panel">
+              <div className="legal-panel-title">
+                <ShieldCheck size={20} />
+                <h2>{t('privacy')}</h2>
+              </div>
+              <iframe
+                className="privacy-frame"
+                title={t('privacy')}
+                sandbox="allow-same-origin"
+                srcDoc={privacyHtml}
+              />
+            </article>
+          )}
         </section>
       </main>
     )
@@ -1142,6 +1164,14 @@ function App() {
                   >
                     <FileText size={16} />
                     {t('imprint')}
+                  </button>
+                  <button
+                    type="button"
+                    className="settings-link-button"
+                    onClick={() => setActivePage('privacy')}
+                  >
+                    <ShieldCheck size={16} />
+                    {t('privacy')}
                   </button>
                 </div>
               </div>
