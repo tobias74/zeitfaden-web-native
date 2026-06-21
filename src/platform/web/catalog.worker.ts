@@ -69,6 +69,7 @@ const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
 const GEO_IMPORT_PARSE_SLICE_MS = 250
 const PROGRESS_HEARTBEAT_MS = 1000
 const GEO_POINT_ITEM_BUILD_CHUNK_SIZE = 250
+const GEO_IMPORT_WRITE_BATCH_SIZE = 250
 
 const ctx = self as unknown as {
   postMessage: (message: unknown) => void
@@ -652,6 +653,21 @@ function upsertMediaBatch(activeDb: SqliteDb, items: MediaItem[]): number {
   return items.length
 }
 
+async function withSqliteTransaction<T>(
+  activeDb: SqliteDb,
+  run: () => Promise<T>,
+): Promise<T> {
+  activeDb.exec('BEGIN')
+  try {
+    const result = await run()
+    activeDb.exec('COMMIT')
+    return result
+  } catch (error) {
+    activeDb.exec('ROLLBACK')
+    throw error
+  }
+}
+
 function removeSourcesFromSqlite(activeDb: SqliteDb, sourceIds: string[]): void {
   if (sourceIds.length === 0) return
 
@@ -1119,41 +1135,15 @@ async function importGpxIntoCatalog(
   let acceptedMedia = 0
   const batch: MediaItem[] = []
 
-  for (
-    let offset = 0;
-    offset < parsed.points.length;
-    offset += GEO_POINT_ITEM_BUILD_CHUNK_SIZE
-  ) {
-    const itemChunk = await geoPointItemsFromParsedPoints(
-      source.id,
-      sourceLabel,
-      parsed.mimeType,
-      parsed.points.slice(offset, offset + GEO_POINT_ITEM_BUILD_CHUNK_SIZE),
-    )
-
-    for (const item of itemChunk) {
-      batch.push(item)
-      acceptedMedia += 1
-      if (batch.length >= IMPORT_BATCH_SIZE) {
-        postProgress({
-          phase: 'storing',
-          sourceLabel,
-          scannedFiles: 1,
-          totalFiles: 1,
-          acceptedMedia,
-          skippedFiles: parsed.skippedPoints,
-          currentPath: sourceLabel,
-          scannedBytes: file.size,
-          totalBytes: file.size,
-        })
-        upsertMediaBatch(activeDb, batch)
-        batch.length = 0
-        await yieldToEventLoop()
-      }
-    }
+  const flushBatch = async (phase: ImportProgress['phase']) => {
+    if (batch.length === 0) return
+    const flushedItems = batch.length
+    upsertMediaIntoSqlite(activeDb, batch)
+    acceptedMedia += flushedItems
+    batch.length = 0
 
     postProgress({
-      phase: 'scanning',
+      phase,
       sourceLabel,
       scannedFiles: 1,
       totalFiles: 1,
@@ -1166,20 +1156,42 @@ async function importGpxIntoCatalog(
     await yieldToEventLoop()
   }
 
-  if (batch.length > 0) {
-    postProgress({
-      phase: 'storing',
-      sourceLabel,
-      scannedFiles: 1,
-      totalFiles: 1,
-      acceptedMedia,
-      skippedFiles: parsed.skippedPoints,
-      currentPath: sourceLabel,
-      scannedBytes: file.size,
-      totalBytes: file.size,
-    })
-    upsertMediaBatch(activeDb, batch)
-  }
+  await withSqliteTransaction(activeDb, async () => {
+    for (
+      let offset = 0;
+      offset < parsed.points.length;
+      offset += GEO_POINT_ITEM_BUILD_CHUNK_SIZE
+    ) {
+      const itemChunk = await geoPointItemsFromParsedPoints(
+        source.id,
+        sourceLabel,
+        parsed.mimeType,
+        parsed.points.slice(offset, offset + GEO_POINT_ITEM_BUILD_CHUNK_SIZE),
+      )
+
+      for (const item of itemChunk) {
+        batch.push(item)
+        if (batch.length >= GEO_IMPORT_WRITE_BATCH_SIZE) {
+          await flushBatch('storing')
+        }
+      }
+
+      postProgress({
+        phase: 'scanning',
+        sourceLabel,
+        scannedFiles: 1,
+        totalFiles: 1,
+        acceptedMedia,
+        skippedFiles: parsed.skippedPoints,
+        currentPath: sourceLabel,
+        scannedBytes: file.size,
+        totalBytes: file.size,
+      })
+      await yieldToEventLoop()
+    }
+
+    await flushBatch('storing')
+  })
 
   return { acceptedMedia, skippedFiles: parsed.skippedPoints }
 }
@@ -1199,7 +1211,6 @@ async function importGoogleTakeoutIntoCatalog(
   let bytesRead = 0
   let acceptedMedia = 0
   let skippedFiles = 0
-  let preparingPoints = 0
   let lastProgressAt = 0
 
   const emitProgress = (phase: ImportProgress['phase']) => {
@@ -1208,8 +1219,7 @@ async function importGoogleTakeoutIntoCatalog(
       sourceLabel,
       scannedFiles: phase === 'storing' && bytesRead >= file.size ? 1 : 0,
       totalFiles: 1,
-      acceptedMedia:
-        acceptedMedia + pendingPoints.length + preparingPoints + batch.length,
+      acceptedMedia,
       skippedFiles,
       currentPath: sourceLabel,
       scannedBytes: bytesRead,
@@ -1226,9 +1236,9 @@ async function importGoogleTakeoutIntoCatalog(
 
   const flushBatch = async (phase: ImportProgress['phase']) => {
     if (batch.length === 0) return
-    emitProgress(phase)
-    upsertMediaBatch(activeDb, batch)
-    acceptedMedia += batch.length
+    const flushedItems = batch.length
+    upsertMediaIntoSqlite(activeDb, batch)
+    acceptedMedia += flushedItems
     batch.length = 0
     emitProgress(phase)
     await yieldToEventLoop()
@@ -1236,7 +1246,6 @@ async function importGoogleTakeoutIntoCatalog(
 
   const consumePoints = async () => {
     const points = pendingPoints.splice(0)
-    preparingPoints += points.length
 
     for (
       let offset = 0;
@@ -1253,11 +1262,10 @@ async function importGoogleTakeoutIntoCatalog(
         'application/json',
         pointChunk,
       )
-      preparingPoints -= pointChunk.length
 
       for (const item of itemChunk) {
         batch.push(item)
-        if (batch.length >= IMPORT_BATCH_SIZE) {
+        if (batch.length >= GEO_IMPORT_WRITE_BATCH_SIZE) {
           await flushBatch('scanning')
         }
       }
@@ -1286,23 +1294,25 @@ async function importGoogleTakeoutIntoCatalog(
 
   emitProgress('scanning')
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
+  await withSqliteTransaction(activeDb, async () => {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
 
-    bytesRead += value.byteLength
-    await consumeText(decoder.decode(value, { stream: true }))
-  }
+      bytesRead += value.byteLength
+      await consumeText(decoder.decode(value, { stream: true }))
+    }
 
-  const finalChunk = decoder.decode()
-  if (finalChunk) {
-    await consumeText(finalChunk)
-  }
+    const finalChunk = decoder.decode()
+    if (finalChunk) {
+      await consumeText(finalChunk)
+    }
 
-  const final = parser.finish()
-  skippedFiles = final.skippedPoints
-  await consumePoints()
-  await flushBatch('storing')
+    const final = parser.finish()
+    skippedFiles = final.skippedPoints
+    await consumePoints()
+    await flushBatch('storing')
+  })
   emitProgress('storing')
 
   return { acceptedMedia, skippedFiles }
