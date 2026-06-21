@@ -11,8 +11,12 @@ export type ParsedGeoFile = {
   mimeType: string
 }
 
+export type GeoFileFormat = 'gpx' | 'google-takeout-json'
+
 const GEO_POINT_HASH_VERSION = 'geo_point:v1'
 const GPX_POINT_TAGS = new Set(['trkpt', 'rtept', 'wpt'])
+const UNSUPPORTED_GEO_FILE_FORMAT =
+  'The selected file is not a supported geo import format. Supported formats are GPX and Google Takeout Location History JSON.'
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes)
@@ -74,6 +78,29 @@ function timestampMs(value: unknown): number | undefined {
   return parsed === undefined ? undefined : Math.trunc(parsed)
 }
 
+function isGoogleTakeoutLocationJson(value: unknown): value is {
+  locations: unknown[]
+} {
+  return isRecord(value) && Array.isArray(value.locations)
+}
+
+function isGeoJson(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.type !== 'string') return false
+  return ['FeatureCollection', 'Feature', 'Point'].includes(value.type)
+}
+
+function parsedXmlDocument(xmlText: string): Document | undefined {
+  const document = new DOMParser().parseFromString(xmlText, 'application/xml')
+  const parserError = Array.from(document.getElementsByTagName('*')).find(
+    (element) => localName(element) === 'parsererror',
+  )
+  return parserError ? undefined : document
+}
+
+function isGpxDocument(document: Document): boolean {
+  return localName(document.documentElement) === 'gpx'
+}
+
 async function sha256String(value: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     'SHA-256',
@@ -104,11 +131,8 @@ export function geoPointContentHash(
 }
 
 export function parseGpxPoints(xmlText: string): ParsedGeoFile {
-  const document = new DOMParser().parseFromString(xmlText, 'application/xml')
-  const parserError = Array.from(document.getElementsByTagName('*')).find(
-    (element) => localName(element) === 'parsererror',
-  )
-  if (parserError) {
+  const document = parsedXmlDocument(xmlText)
+  if (!document) {
     throw new Error('The selected GPX file could not be parsed as XML.')
   }
 
@@ -148,7 +172,7 @@ export function parseGoogleTakeoutLocationPoints(
   jsonText: string,
 ): ParsedGeoFile {
   const parsed = JSON.parse(jsonText) as unknown
-  if (!isRecord(parsed) || !Array.isArray(parsed.locations)) {
+  if (!isGoogleTakeoutLocationJson(parsed)) {
     throw new Error(
       'The selected JSON file does not look like a Google Takeout location export.',
     )
@@ -193,13 +217,43 @@ export function parseGoogleTakeoutLocationPoints(
   return { points, skippedPoints, mimeType: 'application/json' }
 }
 
+export function detectGeoFileFormat(
+  _fileName: string,
+  fileText: string,
+): GeoFileFormat {
+  if (fileText.trim() === '') {
+    throw new Error(UNSUPPORTED_GEO_FILE_FORMAT)
+  }
+
+  try {
+    const parsed = JSON.parse(fileText) as unknown
+    if (isGoogleTakeoutLocationJson(parsed)) return 'google-takeout-json'
+    if (isGeoJson(parsed)) {
+      throw new Error(
+        'GeoJSON files are not supported yet. Supported formats are GPX and Google Takeout Location History JSON.',
+      )
+    }
+    throw new Error(
+      'The selected JSON file is not a supported geo import format. Supported JSON format is Google Takeout Location History JSON.',
+    )
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error
+  }
+
+  const document = parsedXmlDocument(fileText)
+  if (document && isGpxDocument(document)) return 'gpx'
+
+  throw new Error(UNSUPPORTED_GEO_FILE_FORMAT)
+}
+
 export function parseGeoFilePoints(
   fileName: string,
   fileText: string,
 ): ParsedGeoFile {
-  if (fileName.toLowerCase().endsWith('.json')) {
-    return parseGoogleTakeoutLocationPoints(fileText)
+  switch (detectGeoFileFormat(fileName, fileText)) {
+    case 'google-takeout-json':
+      return parseGoogleTakeoutLocationPoints(fileText)
+    case 'gpx':
+      return parseGpxPoints(fileText)
   }
-
-  return parseGpxPoints(fileText)
 }

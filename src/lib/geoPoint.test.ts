@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  detectGeoFileFormat,
   geoPointContentHash,
   geoPointIdentityInput,
   parseGeoFilePoints,
@@ -119,7 +120,7 @@ describe('geo point helpers', () => {
 
   it('selects the JSON parser for imported geo JSON files', () => {
     const result = parseGeoFilePoints(
-      'Records.json',
+      'Records.gpx',
       JSON.stringify({
         locations: [
           {
@@ -133,5 +134,38 @@ describe('geo point helpers', () => {
 
     expect(result.mimeType).toBe('application/json')
     expect(result.points).toHaveLength(1)
+  })
+
+  it('detects GPX content without relying on the file extension', () => {
+    const gpx = `
+      <gpx>
+        <wpt lat="48.4" lon="11.8"><time>2026-06-21T10:03:00Z</time></wpt>
+      </gpx>
+    `
+
+    expect(detectGeoFileFormat('track.json', gpx)).toBe('gpx')
+    expect(parseGeoFilePoints('track.json', gpx).points).toHaveLength(1)
+  })
+
+  it('rejects unsupported JSON geo formats with a clear error', () => {
+    expect(() =>
+      parseGeoFilePoints(
+        'places.geojson',
+        JSON.stringify({
+          type: 'FeatureCollection',
+          features: [],
+        }),
+      ),
+    ).toThrow('GeoJSON files are not supported yet')
+
+    expect(() =>
+      parseGeoFilePoints('unknown.json', JSON.stringify({ items: [] })),
+    ).toThrow('not a supported geo import format')
+  })
+
+  it('rejects files whose geo format cannot be detected', () => {
+    expect(() => parseGeoFilePoints('notes.txt', 'plain text')).toThrow(
+      'not a supported geo import format',
+    )
   })
 })

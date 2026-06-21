@@ -146,6 +146,12 @@ struct ParsedGeoFile {
     mime_type: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeoFileFormat {
+    Gpx,
+    GoogleTakeoutJson,
+}
+
 #[derive(Default)]
 struct NativeMetadata {
     width: Option<i64>,
@@ -355,6 +361,51 @@ fn json_number(value: Option<&JsonValue>) -> Option<f64> {
     })
 }
 
+fn is_google_takeout_location_json(value: &JsonValue) -> bool {
+    value
+        .get("locations")
+        .and_then(|value| value.as_array())
+        .is_some()
+}
+
+fn is_geojson(value: &JsonValue) -> bool {
+    matches!(
+        value.get("type").and_then(|value| value.as_str()),
+        Some("FeatureCollection" | "Feature" | "Point")
+    )
+}
+
+fn unsupported_geo_file_format_message() -> String {
+    "The selected file is not a supported geo import format. Supported formats are GPX and Google Takeout Location History JSON.".to_string()
+}
+
+fn detect_geo_file_format(text: &str) -> AppResult<GeoFileFormat> {
+    if text.trim().is_empty() {
+        return Err(unsupported_geo_file_format_message());
+    }
+
+    match serde_json::from_str::<JsonValue>(text) {
+        Ok(parsed) if is_google_takeout_location_json(&parsed) => {
+            return Ok(GeoFileFormat::GoogleTakeoutJson);
+        }
+        Ok(parsed) if is_geojson(&parsed) => {
+            return Err("GeoJSON files are not supported yet. Supported formats are GPX and Google Takeout Location History JSON.".to_string());
+        }
+        Ok(_) => {
+            return Err("The selected JSON file is not a supported geo import format. Supported JSON format is Google Takeout Location History JSON.".to_string());
+        }
+        Err(_) => {}
+    }
+
+    if let Ok(document) = roxmltree::Document::parse(text) {
+        if document.root_element().tag_name().name() == "gpx" {
+            return Ok(GeoFileFormat::Gpx);
+        }
+    }
+
+    Err(unsupported_geo_file_format_message())
+}
+
 fn valid_latitude(value: f64) -> bool {
     value.is_finite() && (-90.0..=90.0).contains(&value)
 }
@@ -450,12 +501,11 @@ fn parse_google_takeout_location_points(json: &str) -> AppResult<ParsedGeoFile> 
     })
 }
 
-fn parse_geo_file_points(path: &Path, text: &str) -> AppResult<ParsedGeoFile> {
-    if extension(path).as_deref() == Some("json") {
-        return parse_google_takeout_location_points(text);
+fn parse_geo_file_points(_path: &Path, text: &str) -> AppResult<ParsedGeoFile> {
+    match detect_geo_file_format(text)? {
+        GeoFileFormat::GoogleTakeoutJson => parse_google_takeout_location_points(text),
+        GeoFileFormat::Gpx => parse_gpx_points(text),
     }
-
-    parse_gpx_points(text)
 }
 
 fn file_hash(path: &Path) -> AppResult<String> {
@@ -1411,7 +1461,7 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
 #[tauri::command]
 fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
     let Some(path) = rfd::FileDialog::new()
-        .add_filter("Geo point files", &["gpx", "json"])
+        .add_filter("Geo point files", &["gpx", "json", "geojson"])
         .pick_file()
     else {
         return Err("Import cancelled".to_string());
@@ -1666,6 +1716,80 @@ mod tests {
         );
         assert_eq!(parsed.points[2].index, 4);
         assert_eq!(parsed.points[2].captured_at, 1_351_434_205_077);
+    }
+
+    #[test]
+    fn detects_geo_file_format_from_content() {
+        assert_eq!(
+            detect_geo_file_format(
+                r#"
+                <gpx>
+                  <wpt lat="48.4" lon="11.8"><time>2026-06-21T10:03:00Z</time></wpt>
+                </gpx>
+                "#
+            )
+            .unwrap(),
+            GeoFileFormat::Gpx
+        );
+
+        assert_eq!(
+            detect_geo_file_format(
+                r#"
+                {
+                  "locations": [{
+                    "latitudeE7": 481370673,
+                    "longitudeE7": 115775995,
+                    "timestamp": "2012-10-28T14:21:22.010Z"
+                  }]
+                }
+                "#
+            )
+            .unwrap(),
+            GeoFileFormat::GoogleTakeoutJson
+        );
+    }
+
+    #[test]
+    fn parses_geo_files_by_detected_content_not_extension() {
+        let google_json = r#"
+            {
+              "locations": [{
+                "latitudeE7": 481370673,
+                "longitudeE7": 115775995,
+                "timestamp": "2012-10-28T14:21:22.010Z"
+              }]
+            }
+        "#;
+        let gpx = r#"
+            <gpx>
+              <wpt lat="48.4" lon="11.8"><time>2026-06-21T10:03:00Z</time></wpt>
+            </gpx>
+        "#;
+
+        let json_result = parse_geo_file_points(Path::new("records.gpx"), google_json).unwrap();
+        let gpx_result = parse_geo_file_points(Path::new("track.json"), gpx).unwrap();
+
+        assert_eq!(json_result.mime_type, "application/json");
+        assert_eq!(json_result.points.len(), 1);
+        assert_eq!(gpx_result.mime_type, "application/gpx+xml");
+        assert_eq!(gpx_result.points.len(), 1);
+    }
+
+    #[test]
+    fn rejects_unsupported_geo_json_formats() {
+        let geojson_error = parse_geo_file_points(
+            Path::new("places.geojson"),
+            r#"{ "type": "FeatureCollection", "features": [] }"#,
+        )
+        .unwrap_err();
+        let unknown_json_error =
+            parse_geo_file_points(Path::new("unknown.json"), r#"{ "items": [] }"#).unwrap_err();
+        let unknown_text_error =
+            parse_geo_file_points(Path::new("notes.txt"), "plain text").unwrap_err();
+
+        assert!(geojson_error.contains("GeoJSON files are not supported yet"));
+        assert!(unknown_json_error.contains("not a supported geo import format"));
+        assert!(unknown_text_error.contains("not a supported geo import format"));
     }
 
     #[test]

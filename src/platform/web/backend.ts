@@ -271,6 +271,7 @@ class WebImportBackend implements ImportBackend {
             'application/xml': ['.gpx'],
             'text/xml': ['.gpx'],
             'application/json': ['.json'],
+            'application/geo+json': ['.geojson'],
           },
         },
       ],
