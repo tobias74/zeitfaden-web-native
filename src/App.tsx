@@ -176,6 +176,20 @@ function formatGeo(item: MediaItem): string | undefined {
   return `${item.latitude.toFixed(5)}, ${item.longitude.toFixed(5)}`
 }
 
+function itemWithinGeoBounds(item: MediaItem, bounds?: GeoBounds): boolean {
+  if (!bounds) return true
+  if (typeof item.latitude !== 'number' || typeof item.longitude !== 'number') {
+    return false
+  }
+
+  return (
+    item.latitude >= bounds.minLat &&
+    item.latitude <= bounds.maxLat &&
+    item.longitude >= bounds.minLon &&
+    item.longitude <= bounds.maxLon
+  )
+}
+
 function timeRangeFromInputs(startDate: string, endDate: string): TimeRange {
   return {
     startTime: dateInputToMillis(startDate),
@@ -277,14 +291,13 @@ function App() {
     () => ({
       ...timeRange,
       kind: kindFilter,
-      geoBounds: distanceSortActive ? undefined : geoBounds,
+      geoBounds,
       sort: catalogSort,
       limit: resultPageSize,
       offset: resultOffset,
     }),
     [
       catalogSort,
-      distanceSortActive,
       geoBounds,
       kindFilter,
       resultOffset,
@@ -459,6 +472,7 @@ function App() {
             const item = byId.get(result.mediaId)
             if (!item) return []
             if (kindFilter !== 'all' && item.kind !== kindFilter) return []
+            if (!itemWithinGeoBounds(item, geoBounds)) return []
             return [{ ...result, item }]
           })
         const [nextValidation, nextStats] = await Promise.all([
@@ -495,6 +509,7 @@ function App() {
     distanceSortActive,
     geoIndexVersion,
     geoPointCount,
+    geoBounds,
     kindFilter,
     queryPoint.lat,
     queryPoint.lon,
@@ -800,43 +815,39 @@ function App() {
       <section ref={workspaceRef} className="workspace">
         <section ref={leftStackRef} className="left-stack">
           <div
-            className={`map-pane ${
-              boundsDrawing && !distanceSortActive ? 'area-drawing' : ''
-            }`}
+            className={`map-pane ${boundsDrawing ? 'area-drawing' : ''}`}
           >
             <MapView
               queryPoint={distanceSortActive ? queryPoint : undefined}
               geoItems={mediaItems}
               results={searchResults}
-              geoBounds={distanceSortActive ? undefined : geoBounds}
-              boundsDrawing={boundsDrawing && !distanceSortActive}
+              geoBounds={geoBounds}
+              boundsDrawing={boundsDrawing}
               onQueryPointChange={setMapQueryPoint}
               onGeoBoundsChange={setMapGeoBounds}
             />
-            {!distanceSortActive && (
-              <div className="map-area-tools">
+            <div className="map-area-tools">
+              <button
+                type="button"
+                className={boundsDrawing ? 'active' : undefined}
+                aria-pressed={boundsDrawing}
+                onClick={toggleBoundsDrawing}
+                title="Area filter"
+              >
+                <BoxSelect size={16} />
+                Area
+              </button>
+              {geoBounds && (
                 <button
                   type="button"
-                  className={boundsDrawing ? 'active' : undefined}
-                  aria-pressed={boundsDrawing}
-                  onClick={toggleBoundsDrawing}
-                  title="Area filter"
+                  onClick={clearMapGeoBounds}
+                  title="Clear area filter"
                 >
-                  <BoxSelect size={16} />
-                  Area
+                  <Trash2 size={16} />
+                  Clear
                 </button>
-                {geoBounds && (
-                  <button
-                    type="button"
-                    onClick={clearMapGeoBounds}
-                    title="Clear area filter"
-                  >
-                    <Trash2 size={16} />
-                    Clear
-                  </button>
-                )}
-              </div>
-            )}
+              )}
+            </div>
             {distanceSortActive && (
               <div className="map-readout">
                 <MapPin size={16} />
