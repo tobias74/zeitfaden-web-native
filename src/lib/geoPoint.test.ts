@@ -9,16 +9,16 @@ import {
 } from './geoPoint'
 
 describe('geo point helpers', () => {
-  it('normalizes identity with 9 coordinate decimals and epoch milliseconds', async () => {
+  it('normalizes identity with 9 coordinate decimals and epoch milliseconds', () => {
     const capturedAt = Date.parse('2026-06-21T10:15:30.123Z')
 
     expect(geoPointIdentityInput(48.1234567894, 11.9876543214, capturedAt)).toBe(
-      'geo_point:v1\n48.123456789\n11.987654321\n1782036930123',
+      'geo_point:v1:48.123456789:11.987654321:1782036930123',
     )
 
-    await expect(
-      geoPointContentHash(48.1234567894, 11.9876543214, capturedAt),
-    ).resolves.toMatch(/^[a-f0-9]{64}$/)
+    expect(geoPointContentHash(48.1234567894, 11.9876543214, capturedAt)).toBe(
+      'geo_point:v1:48.123456789:11.987654321:1782036930123',
+    )
   })
 
   it('parses timed GPX track, route, and waypoint entries only', () => {

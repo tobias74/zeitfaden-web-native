@@ -47,24 +47,16 @@ const ctx = self as unknown as {
   ) => void
 }
 
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('')
+function geoPointLocationId(sourceId: string, contentHash: string): string {
+  return `geo_point_location:v1:${sourceId}:${contentHash}`
 }
 
-async function stableId(...parts: string[]): Promise<string> {
-  const encoded = new TextEncoder().encode(parts.join('\n'))
-  const digest = await crypto.subtle.digest('SHA-256', encoded)
-  return bytesToHex(new Uint8Array(digest))
-}
-
-async function geoPointItemFromParsedPoint(
+function geoPointItemFromParsedPoint(
   sourceId: string,
   sourceLabel: string,
   point: ParsedGeoPoint,
-): Promise<MediaItem> {
-  const contentHash = await geoPointContentHash(
+): MediaItem {
+  const contentHash = geoPointContentHash(
     point.latitude,
     point.longitude,
     point.capturedAt,
@@ -72,7 +64,7 @@ async function geoPointItemFromParsedPoint(
   const lastSeenAt = Date.now()
   const displayName = `${sourceLabel} #${point.index}`
   const location: MediaLocation = {
-    id: await stableId(sourceId, sourceLabel, contentHash),
+    id: geoPointLocationId(sourceId, contentHash),
     sourceId,
     relativePath: sourceLabel,
     displayName,
@@ -184,10 +176,8 @@ async function importGoogleTakeout(
     inFlightAcceptedMedia += points.length
     emitProgress('storing')
     try {
-      const items = await Promise.all(
-        points.map((point) =>
-          geoPointItemFromParsedPoint(sourceId, sourceLabel, point),
-        ),
+      const items = points.map((point) =>
+        geoPointItemFromParsedPoint(sourceId, sourceLabel, point),
       )
       await emitBatch(items)
       acceptedMedia += items.length

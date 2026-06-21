@@ -727,11 +727,15 @@ fn sha256_string(value: &str) -> String {
 }
 
 fn geo_point_identity_input(latitude: f64, longitude: f64, captured_at: i64) -> String {
-    format!("geo_point:v1\n{latitude:.9}\n{longitude:.9}\n{captured_at}")
+    format!("geo_point:v1:{latitude:.9}:{longitude:.9}:{captured_at}")
 }
 
 fn geo_point_content_hash(latitude: f64, longitude: f64, captured_at: i64) -> String {
-    sha256_string(&geo_point_identity_input(latitude, longitude, captured_at))
+    geo_point_identity_input(latitude, longitude, captured_at)
+}
+
+fn geo_point_location_id(source_id: &str, content_hash: &str) -> String {
+    format!("geo_point_location:v1:{source_id}:{content_hash}")
 }
 
 fn parse_gpx_time(value: &str) -> Option<i64> {
@@ -1615,10 +1619,7 @@ fn geo_point_item_from_parsed_point(
     let last_seen_at = now_ms();
     let display_name = format!("{} #{}", source.label, point.index);
     let location = MediaLocation {
-        id: sha256_string(&format!(
-            "{}\n{}\n{}",
-            source.id, absolute_path, content_hash
-        )),
+        id: geo_point_location_id(&source.id, &content_hash),
         source_id: source.id.clone(),
         source_label: Some(source.label.clone()),
         source_added_at: Some(source.added_at),
@@ -2938,11 +2939,11 @@ mod tests {
     fn normalizes_geo_point_identity_with_9_decimals() {
         assert_eq!(
             geo_point_identity_input(48.1234567894, 11.9876543214, 1_782_036_930_123),
-            "geo_point:v1\n48.123456789\n11.987654321\n1782036930123"
+            "geo_point:v1:48.123456789:11.987654321:1782036930123"
         );
         assert_eq!(
-            geo_point_content_hash(48.1234567894, 11.9876543214, 1_782_036_930_123).len(),
-            64
+            geo_point_content_hash(48.1234567894, 11.9876543214, 1_782_036_930_123),
+            "geo_point:v1:48.123456789:11.987654321:1782036930123"
         );
     }
 

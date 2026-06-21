@@ -1387,16 +1387,20 @@ async function mediaFromFile(
   }
 }
 
-async function geoPointItemFromParsedPoint(
+function geoPointLocationId(sourceId: string, contentHash: string): string {
+  return `geo_point_location:v1:${sourceId}:${contentHash}`
+}
+
+function geoPointItemFromParsedPoint(
   sourceId: string,
   sourceLabel: string,
   sourceAddedAt: number,
   mimeType: string,
   point: ParsedGeoPoint,
   timing?: GeoPointItemTiming,
-): Promise<MediaItem> {
+): MediaItem {
   const contentHashStartedAt = performance.now()
-  const contentHash = await geoPointContentHash(
+  const contentHash = geoPointContentHash(
     point.latitude,
     point.longitude,
     point.capturedAt,
@@ -1406,7 +1410,7 @@ async function geoPointItemFromParsedPoint(
   }
 
   const locationHashStartedAt = performance.now()
-  const locationId = await stableId(sourceId, sourceLabel, contentHash)
+  const locationId = geoPointLocationId(sourceId, contentHash)
   if (timing) {
     timing.locationHashMs += performance.now() - locationHashStartedAt
   }
@@ -1448,24 +1452,22 @@ async function geoPointItemFromParsedPoint(
   return item
 }
 
-async function geoPointItemsFromParsedPoints(
+function geoPointItemsFromParsedPoints(
   sourceId: string,
   sourceLabel: string,
   sourceAddedAt: number,
   mimeType: string,
   points: ParsedGeoPoint[],
   timing?: GeoPointItemTiming,
-): Promise<MediaItem[]> {
-  return Promise.all(
-    points.map((point) =>
-      geoPointItemFromParsedPoint(
-        sourceId,
-        sourceLabel,
-        sourceAddedAt,
-        mimeType,
-        point,
-        timing,
-      ),
+): MediaItem[] {
+  return points.map((point) =>
+    geoPointItemFromParsedPoint(
+      sourceId,
+      sourceLabel,
+      sourceAddedAt,
+      mimeType,
+      point,
+      timing,
     ),
   )
 }
@@ -1933,12 +1935,12 @@ async function debugParseGoogleTakeoutFile(
       skippedPoints += result.skippedPoints
       const hashStartedAt = performance.now()
       for (const point of result.points) {
-        const contentHash = await geoPointContentHash(
+        const contentHash = geoPointContentHash(
           point.latitude,
           point.longitude,
           point.capturedAt,
         )
-        await stableId('debug-source', sourceLabel, contentHash)
+        geoPointLocationId('debug-source', contentHash)
         hashedPoints += 1
       }
       hashDurationMs += performance.now() - hashStartedAt
@@ -2035,7 +2037,7 @@ async function importGpxIntoCatalog(
       offset < parsed.points.length;
       offset += GEO_POINT_ITEM_BUILD_CHUNK_SIZE
     ) {
-      const itemChunk = await geoPointItemsFromParsedPoints(
+      const itemChunk = geoPointItemsFromParsedPoints(
         source.id,
         sourceLabel,
         source.addedAt,
@@ -2160,7 +2162,7 @@ async function importGoogleTakeoutIntoCatalog(
         offset,
         offset + GEO_POINT_ITEM_BUILD_CHUNK_SIZE,
       )
-      const itemChunk = await geoPointItemsFromParsedPoints(
+      const itemChunk = geoPointItemsFromParsedPoints(
         source.id,
         sourceLabel,
         source.addedAt,

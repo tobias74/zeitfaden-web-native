@@ -14,7 +14,7 @@ const en = {
   activityImportedMediaFilesFrom:
     'Imported {count} items from {sourceLabel}',
   activityDebugParsedGeoFile:
-    'Debug parsed and hashed {count} points from {sourceLabel} in {duration} ms, hash work {hashDuration} ms ({skipped} skipped)',
+    'Debug parsed and built identities for {count} points from {sourceLabel} in {duration} ms, identity work {hashDuration} ms ({skipped} skipped)',
   activityImportStopped: 'Import stopped',
   activityCatalogCleared: 'Catalog cleared',
   all: 'All',
@@ -128,7 +128,7 @@ const de: Record<TranslationKey, string> = {
   activityImportedMediaFilesFrom:
     '{count} Elemente aus {sourceLabel} importiert',
   activityDebugParsedGeoFile:
-    'Debug: {count} Punkte aus {sourceLabel} in {duration} ms geparst und gehasht, Hash-Arbeit {hashDuration} ms ({skipped} übersprungen)',
+    'Debug: Für {count} Punkte aus {sourceLabel} wurden in {duration} ms Identitäten gebaut, Identitätsarbeit {hashDuration} ms ({skipped} übersprungen)',
   activityImportStopped: 'Import gestoppt',
   activityCatalogCleared: 'Katalog geleert',
   all: 'Alle',

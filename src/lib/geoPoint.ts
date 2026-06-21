@@ -13,17 +13,11 @@ export type ParsedGeoFile = {
 
 export type GeoFileFormat = 'gpx' | 'google-takeout-json'
 
-const GEO_POINT_HASH_VERSION = 'geo_point:v1'
+const GEO_POINT_IDENTITY_VERSION = 'geo_point:v1'
 const GPX_POINT_TAGS = new Set(['trkpt', 'rtept', 'wpt'])
 const UNSUPPORTED_GEO_FILE_FORMAT =
   'The selected file is not a supported geo import format. Supported formats are GPX and Google Takeout Location History JSON.'
 const GEO_IMPORT_DEBUG_PREFIX = '[geo-import]'
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('')
-}
 
 function localName(element: Element): string {
   return element.localName || element.tagName
@@ -150,33 +144,25 @@ function isGpxDocument(document: Document): boolean {
   return localName(document.documentElement) === 'gpx'
 }
 
-async function sha256String(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    'SHA-256',
-    new TextEncoder().encode(value),
-  )
-  return bytesToHex(new Uint8Array(digest))
-}
-
 export function geoPointIdentityInput(
   latitude: number,
   longitude: number,
   capturedAt: number,
 ): string {
   return [
-    GEO_POINT_HASH_VERSION,
+    GEO_POINT_IDENTITY_VERSION,
     latitude.toFixed(9),
     longitude.toFixed(9),
     String(capturedAt),
-  ].join('\n')
+  ].join(':')
 }
 
 export function geoPointContentHash(
   latitude: number,
   longitude: number,
   capturedAt: number,
-): Promise<string> {
-  return sha256String(geoPointIdentityInput(latitude, longitude, capturedAt))
+): string {
+  return geoPointIdentityInput(latitude, longitude, capturedAt)
 }
 
 export function parseGpxPoints(xmlText: string): ParsedGeoFile {
