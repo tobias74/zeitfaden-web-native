@@ -747,6 +747,25 @@ function App() {
   }, [])
 
   useEffect(() => {
+    function closeMenusOnOutsidePointer(event: globalThis.PointerEvent) {
+      const path = event.composedPath()
+      const menus = [settingsMenuRef.current, displayMenuRef.current].filter(
+        (menu): menu is HTMLDetailsElement => Boolean(menu?.open),
+      )
+
+      for (const menu of menus) {
+        if (!path.includes(menu)) {
+          menu.open = false
+        }
+      }
+    }
+
+    window.addEventListener('pointerdown', closeMenusOnOutsidePointer)
+    return () =>
+      window.removeEventListener('pointerdown', closeMenusOnOutsidePointer)
+  }, [])
+
+  useEffect(() => {
     const params = buildSearchUrlParams(searchUrlState, searchUrlDefaults)
     const nextUrl = pathWithSearchParams(params)
     const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`
