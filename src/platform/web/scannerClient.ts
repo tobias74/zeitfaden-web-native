@@ -69,6 +69,7 @@ export class ScannerClient {
       } else if ('ok' in response) {
         pending.reject(new Error(response.error))
       }
+      this.shutdownWhenIdle()
     })
 
     worker.addEventListener('error', (event) => {
@@ -92,5 +93,11 @@ export class ScannerClient {
       pending.reject(error)
     }
     this.pending.clear()
+  }
+
+  private shutdownWhenIdle(): void {
+    if (this.pending.size > 0) return
+    this.worker?.terminate()
+    this.worker = undefined
   }
 }

@@ -17,7 +17,10 @@ type PendingRequest<T> = {
 }
 
 export class CatalogClient {
+  private static readonly idleShutdownMs = 1_000
+
   private worker: Worker | undefined
+  private idleTimer: number | undefined
   private nextId = 1
   private readonly pending = new Map<number, PendingRequest<unknown>>()
 
@@ -62,12 +65,14 @@ export class CatalogClient {
   }
 
   dispose(): void {
+    this.clearIdleTimer()
     this.worker?.terminate()
     this.worker = undefined
     this.rejectAll(new Error('Catalog worker terminated'))
   }
 
   private ensureWorker(): Worker {
+    this.clearIdleTimer()
     if (this.worker) return this.worker
 
     const worker = new Worker(new URL('./catalog.worker.ts', import.meta.url), {
@@ -86,16 +91,19 @@ export class CatalogClient {
       } else {
         pending.reject(new Error(response.error))
       }
+      this.scheduleIdleShutdown()
     })
 
     worker.addEventListener('error', (event) => {
       event.preventDefault()
+      this.clearIdleTimer()
       this.worker = undefined
       worker.terminate()
       this.rejectAll(new Error(`Catalog worker failed: ${event.message}`))
     })
 
     worker.addEventListener('messageerror', () => {
+      this.clearIdleTimer()
       this.worker = undefined
       worker.terminate()
       this.rejectAll(new Error('Catalog worker sent an unreadable response'))
@@ -109,6 +117,23 @@ export class CatalogClient {
       pending.reject(error)
     }
     this.pending.clear()
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer === undefined) return
+    window.clearTimeout(this.idleTimer)
+    this.idleTimer = undefined
+  }
+
+  private scheduleIdleShutdown(): void {
+    if (this.pending.size > 0) return
+    this.clearIdleTimer()
+    this.idleTimer = window.setTimeout(() => {
+      if (this.pending.size > 0) return
+      this.worker?.terminate()
+      this.worker = undefined
+      this.idleTimer = undefined
+    }, CatalogClient.idleShutdownMs)
   }
 
   private request<T>(type: string, payload?: unknown): Promise<T> {
