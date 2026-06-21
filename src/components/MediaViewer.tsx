@@ -14,6 +14,11 @@ type MediaViewerProps = {
   platform: PlatformBackend
   items: EnrichedSearchResult[]
   index: number
+  absoluteIndex: number
+  totalItems?: number
+  canNavigatePrevious: boolean
+  canNavigateNext: boolean
+  navigationPending?: boolean
   onClose: () => void
   onNavigate: (index: number) => void
 }
@@ -65,6 +70,11 @@ export function MediaViewer({
   platform,
   items,
   index,
+  absoluteIndex,
+  totalItems,
+  canNavigatePrevious,
+  canNavigateNext,
+  navigationPending = false,
   onClose,
   onNavigate,
 }: MediaViewerProps) {
@@ -80,8 +90,6 @@ export function MediaViewer({
   })
   const [actionError, setActionError] = useState<string>()
 
-  const canNavigatePrevious = index > 0
-  const canNavigateNext = index < items.length - 1
   const canReveal =
     platform.capabilities.absolutePaths && Boolean(location?.absolutePath)
 
@@ -91,13 +99,17 @@ export function MediaViewer({
         event.preventDefault()
         onClose()
       }
-      if (event.key === 'ArrowLeft' && canNavigatePrevious) {
+      if (
+        event.key === 'ArrowLeft' &&
+        canNavigatePrevious &&
+        !navigationPending
+      ) {
         event.preventDefault()
-        onNavigate(index - 1)
+        onNavigate(absoluteIndex - 1)
       }
-      if (event.key === 'ArrowRight' && canNavigateNext) {
+      if (event.key === 'ArrowRight' && canNavigateNext && !navigationPending) {
         event.preventDefault()
-        onNavigate(index + 1)
+        onNavigate(absoluteIndex + 1)
       }
     }
 
@@ -106,7 +118,9 @@ export function MediaViewer({
   }, [
     canNavigateNext,
     canNavigatePrevious,
+    absoluteIndex,
     index,
+    navigationPending,
     onClose,
     onNavigate,
   ])
@@ -193,7 +207,11 @@ export function MediaViewer({
           <div>
             <h2>{item.displayName}</h2>
             <p>
-              {(index + 1).toLocaleString()} / {items.length.toLocaleString()}
+              {(absoluteIndex + 1).toLocaleString()}
+              {typeof totalItems === 'number'
+                ? ` / ${totalItems.toLocaleString()}`
+                : ''}
+              {navigationPending ? ' · Loading' : ''}
             </p>
           </div>
           <div className="media-viewer-actions">
@@ -213,8 +231,8 @@ export function MediaViewer({
           <button
             type="button"
             className="media-viewer-nav media-viewer-nav-prev"
-            onClick={() => onNavigate(index - 1)}
-            disabled={!canNavigatePrevious}
+            onClick={() => onNavigate(absoluteIndex - 1)}
+            disabled={!canNavigatePrevious || navigationPending}
             title="Previous item"
           >
             <ChevronLeft size={26} />
@@ -243,8 +261,8 @@ export function MediaViewer({
           <button
             type="button"
             className="media-viewer-nav media-viewer-nav-next"
-            onClick={() => onNavigate(index + 1)}
-            disabled={!canNavigateNext}
+            onClick={() => onNavigate(absoluteIndex + 1)}
+            disabled={!canNavigateNext || navigationPending}
             title="Next item"
           >
             <ChevronRight size={26} />

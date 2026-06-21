@@ -71,6 +71,13 @@ type ActivityLogEntry = {
   message: string
   createdAt: number
 }
+type ViewerSession = {
+  absoluteIndex: number
+  windowOffset: number
+  items: EnrichedSearchResult[]
+  canNavigateNext: boolean
+  totalItems?: number
+}
 
 const defaultStats: GeoIndexStats = {
   engineId: 'none',
@@ -211,6 +218,14 @@ function timeRangeFromInputs(startDate: string, endDate: string): TimeRange {
   }
 }
 
+function mediaItemsToResults(items: MediaItem[]): EnrichedSearchResult[] {
+  return items.map((item) => ({
+    item,
+    mediaId: item.id,
+    distanceMeters: NaN,
+  }))
+}
+
 function pathWithSearchParams(params: URLSearchParams): string {
   const search = params.toString()
   return `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`
@@ -276,7 +291,8 @@ function App() {
     initialSearchState.resultPageSize,
   )
   const [searchResults, setSearchResults] = useState<EnrichedSearchResult[]>([])
-  const [viewerIndex, setViewerIndex] = useState<number>()
+  const [viewerSession, setViewerSession] = useState<ViewerSession>()
+  const [viewerNavigationPending, setViewerNavigationPending] = useState(false)
   const [indexStats, setIndexStats] = useState<GeoIndexStats>(defaultStats)
   const [validation, setValidation] = useState<ValidationReport>()
   const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>(() => [
@@ -399,7 +415,8 @@ function App() {
     setResultPageSize(nextState.resultPageSize)
     setSearchResults([])
     setValidation(undefined)
-    setViewerIndex(undefined)
+    setViewerSession(undefined)
+    setViewerNavigationPending(false)
   }, [])
 
   const refreshMedia = useCallback(async () => {
@@ -530,6 +547,8 @@ function App() {
       setBoundsDrawing(false)
       setSearchResults([])
       setValidation(undefined)
+      setViewerSession(undefined)
+      setViewerNavigationPending(false)
       await refreshAll()
       recordActivity('Catalog cleared')
     } catch (caught) {
@@ -630,9 +649,13 @@ function App() {
   ])
 
   const visibleResults = distanceSortActive
+  const catalogPageResultItems = useMemo(
+    () => mediaItemsToResults(mediaItems),
+    [mediaItems],
+  )
   const allResultItems = distanceSortActive
     ? searchResults
-    : mediaItems.map((item) => ({ item, mediaId: item.id, distanceMeters: NaN }))
+    : catalogPageResultItems
   const resultItems = distanceSortActive
     ? allResultItems.slice(resultOffset, resultOffset + resultPageSize)
     : allResultItems
@@ -692,12 +715,93 @@ function App() {
     window.localStorage.setItem(RESULT_PAGE_SIZE_KEY, String(size))
   }, [])
 
-  const openViewer = useCallback((index: number) => {
-    setViewerIndex(index)
-  }, [])
+  const openViewerAtIndex = useCallback(
+    async (absoluteIndex: number) => {
+      if (absoluteIndex < 0) return
+
+      setViewerNavigationPending(true)
+      try {
+        if (distanceSortActive) {
+          if (absoluteIndex >= searchResults.length) return
+
+          setViewerSession({
+            absoluteIndex,
+            windowOffset: 0,
+            items: searchResults,
+            canNavigateNext: absoluteIndex < searchResults.length - 1,
+            totalItems: searchResults.length,
+          })
+          return
+        }
+
+        const windowOffset =
+          Math.floor(absoluteIndex / resultPageSize) * resultPageSize
+        const localIndex = absoluteIndex - windowOffset
+        let windowItems = catalogPageResultItems
+
+        if (windowOffset !== resultOffset) {
+          const pageItems = await catalog.listMedia({
+            ...timeRange,
+            kind: kindFilter,
+            geoBounds,
+            sort: catalogSort,
+            limit: resultPageSize,
+            offset: windowOffset,
+          })
+          windowItems = mediaItemsToResults(pageItems)
+          setResultPage(windowOffset / resultPageSize)
+          setMediaItems(pageItems)
+        }
+
+        if (!windowItems[localIndex]) {
+          setViewerSession((session) =>
+            session ? { ...session, canNavigateNext: false } : session,
+          )
+          return
+        }
+
+        setViewerSession({
+          absoluteIndex,
+          windowOffset,
+          items: windowItems,
+          canNavigateNext:
+            localIndex < windowItems.length - 1 ||
+            windowItems.length === resultPageSize,
+          totalItems:
+            windowItems.length < resultPageSize
+              ? windowOffset + windowItems.length
+              : undefined,
+        })
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : String(caught))
+      } finally {
+        setViewerNavigationPending(false)
+      }
+    },
+    [
+      catalog,
+      catalogPageResultItems,
+      catalogSort,
+      distanceSortActive,
+      geoBounds,
+      kindFilter,
+      resultOffset,
+      resultPageSize,
+      searchResults,
+      timeRange,
+    ],
+  )
+
+  const openViewer = useCallback(
+    (index: number) => {
+      void openViewerAtIndex(resultOffset + index)
+    },
+    [openViewerAtIndex, resultOffset],
+  )
 
   const closeViewer = useCallback(() => {
-    setViewerIndex(undefined)
+    setViewerSession(undefined)
+    setViewerNavigationPending(false)
   }, [])
 
   const setDisplayMode = useCallback((mode: ResultDisplayMode) => {
@@ -839,6 +943,10 @@ function App() {
     },
     [mapHeight],
   )
+
+  const viewerLocalIndex = viewerSession
+    ? viewerSession.absoluteIndex - viewerSession.windowOffset
+    : -1
 
   return (
     <main className="app-shell" style={resizeStyle}>
@@ -1325,13 +1433,22 @@ function App() {
           ))}
         </div>
       </section>
-      {viewerIndex !== undefined && viewerIndex < resultItems.length && (
+      {viewerSession &&
+        viewerLocalIndex >= 0 &&
+        viewerLocalIndex < viewerSession.items.length && (
         <MediaViewer
           platform={platform}
-          items={resultItems}
-          index={viewerIndex}
+          items={viewerSession.items}
+          index={viewerLocalIndex}
+          absoluteIndex={viewerSession.absoluteIndex}
+          totalItems={viewerSession.totalItems}
+          canNavigatePrevious={viewerSession.absoluteIndex > 0}
+          canNavigateNext={viewerSession.canNavigateNext}
+          navigationPending={viewerNavigationPending}
           onClose={closeViewer}
-          onNavigate={setViewerIndex}
+          onNavigate={(index) => {
+            void openViewerAtIndex(index)
+          }}
         />
       )}
       </section>
