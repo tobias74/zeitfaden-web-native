@@ -41,12 +41,25 @@ type ImportGeoFileRecord = {
 }
 
 const GEO_IMPORT_LOG_PREFIX = '[geo-import]'
+const GEO_IMPORT_READ_PROGRESS_BYTES = 100 * 1024 * 1024
 
-function logGeoFileRead(
-  file: File,
-  sourceLabel: string,
-  text: string,
-): void {
+function textReadSummary(text: string): Record<string, unknown> {
+  const trimmed = text.trimStart()
+  const firstCharacter = trimmed[0]
+  return {
+    textLength: text.length,
+    trimmedLength: trimmed.length,
+    leadingWhitespaceCharacters: text.length - trimmed.length,
+    firstCodePointHex:
+      firstCharacter === undefined
+        ? undefined
+        : firstCharacter.codePointAt(0)?.toString(16),
+    firstCharacters: trimmed.slice(0, 120),
+  }
+}
+
+function logGeoFileRead(file: File, sourceLabel: string, text: string): void {
+  const summary = textReadSummary(text)
   console.log(GEO_IMPORT_LOG_PREFIX, {
     phase: 'file read',
     fileName: file.name,
@@ -55,10 +68,62 @@ function logGeoFileRead(
     sizeKiB: Math.round(file.size / 1024),
     mimeType: file.type || undefined,
     lastModified: file.lastModified,
-    textLength: text.length,
+    ...summary,
     readEmptyButFileHasBytes: file.size > 0 && text.length === 0,
-    firstCharacters: text.slice(0, 120),
   })
+  console.log(
+    `${GEO_IMPORT_LOG_PREFIX} file-read-summary file=${JSON.stringify(
+      file.name,
+    )} sizeBytes=${file.size} textLength=${String(
+      summary.textLength,
+    )} trimmedLength=${String(
+      summary.trimmedLength,
+    )} firstCodePointHex=${String(summary.firstCodePointHex)}`,
+  )
+}
+
+async function readGeoFileText(file: File, sourceLabel: string): Promise<string> {
+  const reader = file.stream().getReader()
+  const decoder = new TextDecoder()
+  const chunks: string[] = []
+  let bytesRead = 0
+  let nextProgressAt = GEO_IMPORT_READ_PROGRESS_BYTES
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    bytesRead += value.byteLength
+    chunks.push(decoder.decode(value, { stream: true }))
+
+    if (bytesRead >= nextProgressAt) {
+      console.log(GEO_IMPORT_LOG_PREFIX, {
+        phase: 'file read progress',
+        fileName: file.name,
+        sourceLabel,
+        bytesRead,
+        sizeBytes: file.size,
+      })
+      while (nextProgressAt <= bytesRead) {
+        nextProgressAt += GEO_IMPORT_READ_PROGRESS_BYTES
+      }
+    }
+  }
+
+  const finalChunk = decoder.decode()
+  if (finalChunk) chunks.push(finalChunk)
+
+  const text = chunks.join('')
+  console.log(GEO_IMPORT_LOG_PREFIX, {
+    phase: 'file stream read complete',
+    fileName: file.name,
+    sourceLabel,
+    bytesRead,
+    sizeBytes: file.size,
+    bytesReadMatchesFileSize: bytesRead === file.size,
+  })
+  logGeoFileRead(file, sourceLabel, text)
+  return text
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -322,8 +387,7 @@ class WebImportBackend implements ImportBackend {
       mimeType: file.type || undefined,
       lastModified: file.lastModified,
     })
-    const fileText = await file.text()
-    logGeoFileRead(file, sourceLabel, fileText)
+    const fileText = await readGeoFileText(file, sourceLabel)
     const parsed = parseGeoFilePoints(file.name || sourceLabel, fileText)
     const items = await Promise.all(
       parsed.points.map((point) =>
