@@ -82,6 +82,68 @@ type IdbLocation = MediaLocation & {
   contentHash: string
 }
 
+type SqliteUpsertChunkTiming = {
+  offset: number
+  rows: number
+  columnCount: number
+  bindValues: number
+  sqlChars: number
+  placeholderMs: number
+  sqlBuildMs: number
+  bindFlattenMs: number
+  execMs: number
+}
+
+type SqliteUpsertTiming = {
+  label: string
+  rows: number
+  columnCount: number
+  chunks: number
+  bindValues: number
+  sqlChars: number
+  placeholderMs: number
+  sqlBuildMs: number
+  bindFlattenMs: number
+  execMs: number
+  totalMs: number
+  chunkTimings: SqliteUpsertChunkTiming[]
+}
+
+type SqliteMediaWriteTiming = {
+  items: number
+  locations: number
+  totalMs: number
+  assetRowsMs: number
+  locationRowsMs: number
+  asset: SqliteUpsertTiming
+  location: SqliteUpsertTiming
+  accountedMs: number
+  unaccountedMs: number
+}
+
+type MediaBatchWriteTiming = {
+  storageMode: WebCatalogStorageMode
+  items: number
+  transactionActive: boolean
+  totalMs: number
+  ensureDbMs: number
+  requireDbMs: number
+  writeMs: number
+  accountedMs: number
+  unaccountedMs: number
+  sqlite?: SqliteMediaWriteTiming
+}
+
+type MediaBatchWriteResult = {
+  written: number
+  timing: MediaBatchWriteTiming
+}
+
+type ImportTransactionOptions = {
+  traceId?: string
+  sourceLabel?: string
+}
+
 type CatalogStore = {
   geoImportWriteBatchSize: number
   init(): Promise<InitResult>
@@ -94,8 +156,11 @@ type CatalogStore = {
   writeMediaBatch(
     items: MediaItem[],
     options?: { transactionActive?: boolean },
-  ): Promise<number>
-  withImportTransaction<T>(run: () => Promise<T>): Promise<T>
+  ): Promise<MediaBatchWriteResult>
+  withImportTransaction<T>(
+    run: () => Promise<T>,
+    options?: ImportTransactionOptions,
+  ): Promise<T>
   listMedia(query: CatalogQuery): Promise<MediaItem[]>
   getMediaByIds(ids: string[]): Promise<MediaItem[]>
   getGeoPoints(range: TimeRange): Promise<GeoIndexPoint[]>
@@ -142,6 +207,7 @@ type ImportGeoFilePayload = {
   source: MediaSource
   duplicateSourceIds: string[]
   file: File
+  traceId?: string
 }
 
 type DebugParseGeoFilePayload = {
@@ -1078,18 +1144,24 @@ function placeholders(rowCount: number, columnCount: number): string {
   return Array.from({ length: rowCount }, () => row).join(', ')
 }
 
-type SqliteUpsertTiming = {
-  label: string
-  rows: number
-  columnCount: number
-  chunks: number
-  bindValues: number
-  sqlChars: number
-  placeholderMs: number
-  sqlBuildMs: number
-  bindFlattenMs: number
-  execMs: number
-  totalMs: number
+function emptySqliteUpsertTiming(
+  label: string,
+  columnCount: number,
+): SqliteUpsertTiming {
+  return {
+    label,
+    rows: 0,
+    columnCount,
+    chunks: 0,
+    bindValues: 0,
+    sqlChars: 0,
+    placeholderMs: 0,
+    sqlBuildMs: 0,
+    bindFlattenMs: 0,
+    execMs: 0,
+    totalMs: 0,
+    chunkTimings: [],
+  }
 }
 
 function execMultiRowUpsert(
@@ -1101,19 +1173,8 @@ function execMultiRowUpsert(
   columnCount: number,
 ): SqliteUpsertTiming {
   const startedAt = performance.now()
-  const timing: SqliteUpsertTiming = {
-    label,
-    rows: rows.length,
-    columnCount,
-    chunks: 0,
-    bindValues: 0,
-    sqlChars: 0,
-    placeholderMs: 0,
-    sqlBuildMs: 0,
-    bindFlattenMs: 0,
-    execMs: 0,
-    totalMs: 0,
-  }
+  const timing = emptySqliteUpsertTiming(label, columnCount)
+  timing.rows = rows.length
   if (rows.length === 0) return timing
 
   const maxRows = Math.max(1, Math.floor(SQLITE_BIND_CHUNK_LIMIT / columnCount))
@@ -1149,18 +1210,16 @@ function execMultiRowUpsert(
     timing.bindValues += bind.length
     timing.sqlChars += sql.length
 
-    console.log('[sqlite-write-timing]', {
-      phase: 'chunk executed',
-      label,
+    timing.chunkTimings.push({
       offset,
       rows: chunk.length,
       columnCount,
       bindValues: bind.length,
       sqlChars: sql.length,
-      placeholderMs: roundedMs(placeholderMs),
-      sqlBuildMs: roundedMs(sqlBuildMs),
-      bindFlattenMs: roundedMs(bindFlattenMs),
-      execMs: roundedMs(execMs),
+      placeholderMs,
+      sqlBuildMs,
+      bindFlattenMs,
+      execMs,
     })
   }
 
@@ -1168,8 +1227,26 @@ function execMultiRowUpsert(
   return timing
 }
 
-function upsertMediaIntoSqlite(activeDb: SqliteDb, items: MediaItem[]): void {
-  if (items.length === 0) return
+function upsertMediaIntoSqlite(
+  activeDb: SqliteDb,
+  items: MediaItem[],
+): SqliteMediaWriteTiming {
+  if (items.length === 0) {
+    return {
+      items: 0,
+      locations: 0,
+      totalMs: 0,
+      assetRowsMs: 0,
+      locationRowsMs: 0,
+      asset: emptySqliteUpsertTiming('media_assets', ASSET_BIND_COLUMNS),
+      location: emptySqliteUpsertTiming(
+        'media_locations',
+        LOCATION_BIND_COLUMNS,
+      ),
+      accountedMs: 0,
+      unaccountedMs: 0,
+    }
+  }
 
   const startedAt = performance.now()
   const assetRowsStartedAt = performance.now()
@@ -1242,28 +1319,24 @@ function upsertMediaIntoSqlite(activeDb: SqliteDb, items: MediaItem[]): void {
     LOCATION_BIND_COLUMNS,
   )
 
-  console.log('[sqlite-write-timing]', {
-    phase: 'upsert media batch complete',
+  const totalMs = performance.now() - startedAt
+  const accountedMs =
+    assetRowsMs +
+    assetTiming.totalMs +
+    locationRowsMs +
+    locationTiming.totalMs
+
+  return {
     items: items.length,
     locations: locationRows.length,
-    totalMs: roundedMs(performance.now() - startedAt),
-    assetRowsMs: roundedMs(assetRowsMs),
-    assetPlaceholderMs: roundedMs(assetTiming.placeholderMs),
-    assetSqlBuildMs: roundedMs(assetTiming.sqlBuildMs),
-    assetBindFlattenMs: roundedMs(assetTiming.bindFlattenMs),
-    assetExecMs: roundedMs(assetTiming.execMs),
-    assetChunks: assetTiming.chunks,
-    assetBindValues: assetTiming.bindValues,
-    assetSqlChars: assetTiming.sqlChars,
-    locationRowsMs: roundedMs(locationRowsMs),
-    locationPlaceholderMs: roundedMs(locationTiming.placeholderMs),
-    locationSqlBuildMs: roundedMs(locationTiming.sqlBuildMs),
-    locationBindFlattenMs: roundedMs(locationTiming.bindFlattenMs),
-    locationExecMs: roundedMs(locationTiming.execMs),
-    locationChunks: locationTiming.chunks,
-    locationBindValues: locationTiming.bindValues,
-    locationSqlChars: locationTiming.sqlChars,
-  })
+    totalMs,
+    assetRowsMs,
+    locationRowsMs,
+    asset: assetTiming,
+    location: locationTiming,
+    accountedMs,
+    unaccountedMs: totalMs - accountedMs,
+  }
 }
 
 function timeWhere(
@@ -1337,36 +1410,6 @@ async function upsertMedia(items: MediaItem[]): Promise<number> {
   }
 
   return items.length
-}
-
-function upsertMediaBatch(activeDb: SqliteDb, items: MediaItem[]): number {
-  if (items.length === 0) return 0
-
-  activeDb.exec('BEGIN')
-  try {
-    upsertMediaIntoSqlite(activeDb, items)
-    activeDb.exec('COMMIT')
-  } catch (error) {
-    activeDb.exec('ROLLBACK')
-    throw error
-  }
-
-  return items.length
-}
-
-async function withSqliteTransaction<T>(
-  activeDb: SqliteDb,
-  run: () => Promise<T>,
-): Promise<T> {
-  activeDb.exec('BEGIN')
-  try {
-    const result = await run()
-    activeDb.exec('COMMIT')
-    return result
-  } catch (error) {
-    activeDb.exec('ROLLBACK')
-    throw error
-  }
 }
 
 function removeSourcesFromSqlite(activeDb: SqliteDb, sourceIds: string[]): void {
@@ -1854,9 +1897,11 @@ type GeoPointItemTiming = {
 }
 
 type GeoImportTimingMetrics = GeoPointItemTiming & {
+  traceId: string
   sourceLabel: string
   startedAt: number
   lastLogAt: number
+  batchSequence: number
   bytesRead: number
   parsedPoints: number
   skippedPoints: number
@@ -1875,12 +1920,96 @@ function roundedMs(value: number): number {
   return Math.round(value * 10) / 10
 }
 
-function createGeoImportTiming(sourceLabel: string): GeoImportTimingMetrics {
+let importTraceCounter = 1
+
+function createImportTraceId(sourceLabel: string): string {
+  const sanitized = sourceLabel.replace(/[^a-z0-9]+/gi, '-').slice(0, 32)
+  return `import-${Date.now().toString(36)}-${importTraceCounter++}-${sanitized}`
+}
+
+function logImportTrace(
+  traceId: string,
+  phase: string,
+  data: Record<string, unknown>,
+): void {
+  console.log('[import-trace]', {
+    traceId,
+    phase,
+    ...data,
+  })
+}
+
+function roundedChunkTimings(
+  chunks: SqliteUpsertChunkTiming[],
+): SqliteUpsertChunkTiming[] {
+  return chunks.map((chunk) => ({
+    ...chunk,
+    placeholderMs: roundedMs(chunk.placeholderMs),
+    sqlBuildMs: roundedMs(chunk.sqlBuildMs),
+    bindFlattenMs: roundedMs(chunk.bindFlattenMs),
+    execMs: roundedMs(chunk.execMs),
+  }))
+}
+
+function roundedSqliteUpsertTiming(
+  timing: SqliteUpsertTiming,
+): Record<string, unknown> {
+  return {
+    label: timing.label,
+    rows: timing.rows,
+    columnCount: timing.columnCount,
+    chunks: timing.chunks,
+    bindValues: timing.bindValues,
+    sqlChars: timing.sqlChars,
+    placeholderMs: roundedMs(timing.placeholderMs),
+    sqlBuildMs: roundedMs(timing.sqlBuildMs),
+    bindFlattenMs: roundedMs(timing.bindFlattenMs),
+    execMs: roundedMs(timing.execMs),
+    totalMs: roundedMs(timing.totalMs),
+    chunkTimings: roundedChunkTimings(timing.chunkTimings),
+  }
+}
+
+function roundedMediaBatchWriteTiming(
+  timing: MediaBatchWriteTiming,
+): Record<string, unknown> {
+  return {
+    storageMode: timing.storageMode,
+    items: timing.items,
+    transactionActive: timing.transactionActive,
+    totalMs: roundedMs(timing.totalMs),
+    ensureDbMs: roundedMs(timing.ensureDbMs),
+    requireDbMs: roundedMs(timing.requireDbMs),
+    writeMs: roundedMs(timing.writeMs),
+    accountedMs: roundedMs(timing.accountedMs),
+    unaccountedMs: roundedMs(timing.unaccountedMs),
+    sqlite: timing.sqlite
+      ? {
+          items: timing.sqlite.items,
+          locations: timing.sqlite.locations,
+          totalMs: roundedMs(timing.sqlite.totalMs),
+          assetRowsMs: roundedMs(timing.sqlite.assetRowsMs),
+          locationRowsMs: roundedMs(timing.sqlite.locationRowsMs),
+          accountedMs: roundedMs(timing.sqlite.accountedMs),
+          unaccountedMs: roundedMs(timing.sqlite.unaccountedMs),
+          asset: roundedSqliteUpsertTiming(timing.sqlite.asset),
+          location: roundedSqliteUpsertTiming(timing.sqlite.location),
+        }
+      : undefined,
+  }
+}
+
+function createGeoImportTiming(
+  sourceLabel: string,
+  traceId: string,
+): GeoImportTimingMetrics {
   const now = performance.now()
   return {
+    traceId,
     sourceLabel,
     startedAt: now,
     lastLogAt: now,
+    batchSequence: 0,
     bytesRead: 0,
     parsedPoints: 0,
     skippedPoints: 0,
@@ -1904,6 +2033,7 @@ function geoImportTimingSnapshot(
 ): Record<string, unknown> {
   const elapsedMs = performance.now() - timing.startedAt
   return {
+    traceId: timing.traceId,
     sourceLabel: timing.sourceLabel,
     elapsedMs: roundedMs(elapsedMs),
     bytesRead: timing.bytesRead,
@@ -1931,8 +2061,7 @@ function logGeoImportTiming(
   phase: string,
   extra: Record<string, unknown> = {},
 ): void {
-  console.log('[geo-import-timing]', {
-    phase,
+  logImportTrace(timing.traceId, phase, {
     ...geoImportTimingSnapshot(timing),
     ...extra,
   })
@@ -2154,9 +2283,10 @@ async function importGoogleTakeoutIntoCatalog(
   source: MediaSource,
   store: CatalogStore,
   postProgress: (progress: ImportProgress) => void,
+  traceId: string,
 ): Promise<{ acceptedMedia: number; skippedFiles: number }> {
   const sourceLabel = source.label
-  const timing = createGeoImportTiming(sourceLabel)
+  const timing = createGeoImportTiming(sourceLabel, traceId)
   const parser = new GoogleTakeoutLocationStreamParser()
   const reader = file.stream().getReader()
   const decoder = new TextDecoder()
@@ -2196,18 +2326,31 @@ async function importGoogleTakeoutIntoCatalog(
   const flushBatch = async (phase: ImportProgress['phase']) => {
     if (batch.length === 0) return
     const flushedItems = batch.length
+    const batchId = `${timing.traceId}:batch-${++timing.batchSequence}`
     const writeStartedAt = performance.now()
-    await store.writeMediaBatch(batch, { transactionActive: true })
+    const writeResult = await store.writeMediaBatch(batch, {
+      transactionActive: true,
+    })
     const writeMs = performance.now() - writeStartedAt
     timing.dbWriteMs += writeMs
     timing.dbWriteBatches += 1
     timing.dbWritten += flushedItems
     acceptedMedia += flushedItems
     batch.length = 0
+    const storageTiming = writeResult.timing
+    const storageTotalMs = storageTiming.totalMs
     logGeoImportTiming(timing, 'database batch written', {
+      batchId,
       batchItems: flushedItems,
       batchWriteMs: roundedMs(writeMs),
-      phase,
+      storageWritten: writeResult.written,
+      storageWrite: roundedMediaBatchWriteTiming(storageTiming),
+      batchAccounting: {
+        outerWriteMs: roundedMs(writeMs),
+        storageTotalMs: roundedMs(storageTotalMs),
+        outerMinusStorageMs: roundedMs(writeMs - storageTotalMs),
+      },
+      importPhase: phase,
     })
     emitProgress(phase)
     await yieldToEventLoop()
@@ -2283,34 +2426,37 @@ async function importGoogleTakeoutIntoCatalog(
 
   emitProgress('scanning')
 
-  await store.withImportTransaction(async () => {
-    while (true) {
-      const readStartedAt = performance.now()
-      const { done, value } = await reader.read()
-      timing.readMs += performance.now() - readStartedAt
-      if (done) break
+  await store.withImportTransaction(
+    async () => {
+      while (true) {
+        const readStartedAt = performance.now()
+        const { done, value } = await reader.read()
+        timing.readMs += performance.now() - readStartedAt
+        if (done) break
 
-      bytesRead += value.byteLength
-      timing.bytesRead = bytesRead
-      const decodeStartedAt = performance.now()
-      const text = decoder.decode(value, { stream: true })
-      timing.decodeMs += performance.now() - decodeStartedAt
-      await consumeText(text)
-    }
+        bytesRead += value.byteLength
+        timing.bytesRead = bytesRead
+        const decodeStartedAt = performance.now()
+        const text = decoder.decode(value, { stream: true })
+        timing.decodeMs += performance.now() - decodeStartedAt
+        await consumeText(text)
+      }
 
-    const finalDecodeStartedAt = performance.now()
-    const finalChunk = decoder.decode()
-    timing.decodeMs += performance.now() - finalDecodeStartedAt
-    if (finalChunk) {
-      await consumeText(finalChunk)
-    }
+      const finalDecodeStartedAt = performance.now()
+      const finalChunk = decoder.decode()
+      timing.decodeMs += performance.now() - finalDecodeStartedAt
+      if (finalChunk) {
+        await consumeText(finalChunk)
+      }
 
-    const final = parser.finish()
-    skippedFiles = final.skippedPoints
-    timing.skippedPoints = final.skippedPoints
-    await consumePoints()
-    await flushBatch('storing')
-  })
+      const final = parser.finish()
+      skippedFiles = final.skippedPoints
+      timing.skippedPoints = final.skippedPoints
+      await consumePoints()
+      await flushBatch('storing')
+    },
+    { traceId: timing.traceId, sourceLabel },
+  )
   emitProgress('storing')
   logGeoImportTiming(timing, 'takeout import complete', {
     acceptedMedia,
@@ -2328,9 +2474,9 @@ async function importGeoFileIntoCatalog(
   const { source, duplicateSourceIds, file } = payload
   const sourceLabel = source.label
   const startedAt = performance.now()
+  const traceId = payload.traceId ?? createImportTraceId(sourceLabel)
 
-  console.log('[geo-import-timing]', {
-    phase: 'geo import envelope start',
+  logImportTrace(traceId, 'geo import envelope start', {
     sourceLabel,
     sizeBytes: file.size,
     duplicateSourceIds: duplicateSourceIds.length,
@@ -2351,8 +2497,7 @@ async function importGeoFileIntoCatalog(
 
   const prepareStartedAt = performance.now()
   await store.prepareImportSource(source, duplicateSourceIds)
-  console.log('[geo-import-timing]', {
-    phase: 'source prepared',
+  logImportTrace(traceId, 'source prepared', {
     sourceLabel,
     phaseMs: roundedMs(performance.now() - prepareStartedAt),
     elapsedMs: roundedMs(performance.now() - startedAt),
@@ -2361,8 +2506,7 @@ async function importGeoFileIntoCatalog(
   const prefixStartedAt = performance.now()
   const prefix = await file.slice(0, GEO_IMPORT_PREFIX_BYTES).text()
   const prefixMs = performance.now() - prefixStartedAt
-  console.log('[geo-import-timing]', {
-    phase: 'format prefix read',
+  logImportTrace(traceId, 'format prefix read', {
     sourceLabel,
     phaseMs: roundedMs(prefixMs),
     prefixBytes: Math.min(file.size, GEO_IMPORT_PREFIX_BYTES),
@@ -2372,8 +2516,7 @@ async function importGeoFileIntoCatalog(
   const result = jsonLikePrefix(prefix)
     ? await (async () => {
         throwKnownUnsupportedJsonPrefix(prefix)
-        console.log('[geo-import-timing]', {
-          phase: 'format selected',
+        logImportTrace(traceId, 'format selected', {
           sourceLabel,
           format: 'google-takeout-json',
           elapsedMs: roundedMs(performance.now() - startedAt),
@@ -2383,11 +2526,11 @@ async function importGeoFileIntoCatalog(
           source,
           store,
           postProgress,
+          traceId,
         )
       })()
     : await (async () => {
-        console.log('[geo-import-timing]', {
-          phase: 'format selected',
+        logImportTrace(traceId, 'format selected', {
           sourceLabel,
           format: 'gpx',
           elapsedMs: roundedMs(performance.now() - startedAt),
@@ -2395,8 +2538,7 @@ async function importGeoFileIntoCatalog(
         return importGpxIntoCatalog(file, source, store, postProgress)
       })()
 
-  console.log('[geo-import-timing]', {
-    phase: 'geo import envelope complete',
+  logImportTrace(traceId, 'geo import envelope complete', {
     sourceLabel,
     acceptedMedia: result.acceptedMedia,
     skippedFiles: result.skippedFiles,
@@ -2712,17 +2854,119 @@ const sqliteCatalogStore: CatalogStore = {
     prepareImportSource(requireDb(), source, duplicateSourceIds)
   },
   async writeMediaBatch(items, options) {
+    const startedAt = performance.now()
+    const transactionActive = Boolean(options?.transactionActive)
+    const ensureStartedAt = performance.now()
     await ensureDb()
-    if (items.length === 0) return 0
-    if (options?.transactionActive) {
-      upsertMediaIntoSqlite(requireDb(), items)
-      return items.length
+    const ensureDbMs = performance.now() - ensureStartedAt
+    if (items.length === 0) {
+      const totalMs = performance.now() - startedAt
+      return {
+        written: 0,
+        timing: {
+          storageMode: 'sqlite',
+          items: 0,
+          transactionActive,
+          totalMs,
+          ensureDbMs,
+          requireDbMs: 0,
+          writeMs: 0,
+          accountedMs: ensureDbMs,
+          unaccountedMs: totalMs - ensureDbMs,
+        },
+      }
     }
-    return upsertMediaBatch(requireDb(), items)
+    const requireStartedAt = performance.now()
+    const activeDb = requireDb()
+    const requireDbMs = performance.now() - requireStartedAt
+    const writeStartedAt = performance.now()
+    let sqliteTiming: SqliteMediaWriteTiming
+    if (options?.transactionActive) {
+      sqliteTiming = upsertMediaIntoSqlite(activeDb, items)
+    } else {
+      const wrappedWriteStartedAt = performance.now()
+      activeDb.exec('BEGIN')
+      try {
+        sqliteTiming = upsertMediaIntoSqlite(activeDb, items)
+        activeDb.exec('COMMIT')
+      } catch (error) {
+        activeDb.exec('ROLLBACK')
+        throw error
+      }
+      sqliteTiming = {
+        ...sqliteTiming,
+        totalMs: performance.now() - wrappedWriteStartedAt,
+      }
+    }
+    const writeMs = performance.now() - writeStartedAt
+    const totalMs = performance.now() - startedAt
+    const accountedMs = ensureDbMs + requireDbMs + writeMs
+    return {
+      written: items.length,
+      timing: {
+        storageMode: 'sqlite',
+        items: items.length,
+        transactionActive,
+        totalMs,
+        ensureDbMs,
+        requireDbMs,
+        writeMs,
+        accountedMs,
+        unaccountedMs: totalMs - accountedMs,
+        sqlite: sqliteTiming,
+      },
+    }
   },
-  async withImportTransaction(run) {
+  async withImportTransaction(run, options) {
+    const startedAt = performance.now()
+    const ensureStartedAt = performance.now()
     await ensureDb()
-    return withSqliteTransaction(requireDb(), run)
+    const ensureDbMs = performance.now() - ensureStartedAt
+    const requireStartedAt = performance.now()
+    const activeDb = requireDb()
+    const requireDbMs = performance.now() - requireStartedAt
+    const beginStartedAt = performance.now()
+    activeDb.exec('BEGIN')
+    const beginMs = performance.now() - beginStartedAt
+    const runStartedAt = performance.now()
+    try {
+      const result = await run()
+      const runMs = performance.now() - runStartedAt
+      const commitStartedAt = performance.now()
+      activeDb.exec('COMMIT')
+      const commitMs = performance.now() - commitStartedAt
+      if (options?.traceId) {
+        const totalMs = performance.now() - startedAt
+        logImportTrace(options.traceId, 'sqlite import transaction complete', {
+          sourceLabel: options.sourceLabel,
+          totalMs: roundedMs(totalMs),
+          ensureDbMs: roundedMs(ensureDbMs),
+          requireDbMs: roundedMs(requireDbMs),
+          beginMs: roundedMs(beginMs),
+          runMs: roundedMs(runMs),
+          commitMs: roundedMs(commitMs),
+          accountedMs: roundedMs(
+            ensureDbMs + requireDbMs + beginMs + runMs + commitMs,
+          ),
+          unaccountedMs: roundedMs(
+            totalMs - (ensureDbMs + requireDbMs + beginMs + runMs + commitMs),
+          ),
+        })
+      }
+      return result
+    } catch (error) {
+      const rollbackStartedAt = performance.now()
+      activeDb.exec('ROLLBACK')
+      const rollbackMs = performance.now() - rollbackStartedAt
+      if (options?.traceId) {
+        logImportTrace(options.traceId, 'sqlite import transaction rollback', {
+          sourceLabel: options.sourceLabel,
+          rollbackMs: roundedMs(rollbackMs),
+          elapsedMs: roundedMs(performance.now() - startedAt),
+        })
+      }
+      throw error
+    }
   },
   listMedia,
   getMediaByIds,
@@ -2739,8 +2983,48 @@ const indexedDbCatalogStore: CatalogStore = {
   upsertSource: idbUpsertSource,
   upsertMedia: idbUpsertMedia,
   prepareImportSource: idbPrepareImportSource,
-  writeMediaBatch: idbUpsertMedia,
-  withImportTransaction: (run) => run(),
+  async writeMediaBatch(items, options) {
+    const startedAt = performance.now()
+    const writeStartedAt = performance.now()
+    const written = await idbUpsertMedia(items)
+    const writeMs = performance.now() - writeStartedAt
+    const totalMs = performance.now() - startedAt
+    return {
+      written,
+      timing: {
+        storageMode: 'indexeddb',
+        items: items.length,
+        transactionActive: Boolean(options?.transactionActive),
+        totalMs,
+        ensureDbMs: 0,
+        requireDbMs: 0,
+        writeMs,
+        accountedMs: writeMs,
+        unaccountedMs: totalMs - writeMs,
+      },
+    }
+  },
+  async withImportTransaction(run, options) {
+    const startedAt = performance.now()
+    try {
+      const result = await run()
+      if (options?.traceId) {
+        logImportTrace(options.traceId, 'indexeddb import transaction complete', {
+          sourceLabel: options.sourceLabel,
+          totalMs: roundedMs(performance.now() - startedAt),
+        })
+      }
+      return result
+    } catch (error) {
+      if (options?.traceId) {
+        logImportTrace(options.traceId, 'indexeddb import transaction failed', {
+          sourceLabel: options.sourceLabel,
+          elapsedMs: roundedMs(performance.now() - startedAt),
+        })
+      }
+      throw error
+    }
+  },
   listMedia: idbListMedia,
   getMediaByIds: idbGetMediaByIds,
   getGeoPoints: idbGetGeoPoints,

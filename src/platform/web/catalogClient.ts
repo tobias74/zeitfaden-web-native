@@ -29,6 +29,7 @@ type ImportGeoFilePayload = {
   source: MediaSource
   duplicateSourceIds: string[]
   file: File
+  traceId?: string
 }
 
 type WorkerResponse<T> =

@@ -14,6 +14,7 @@ import {
 } from './handleStore'
 import type {
   ImportBackend,
+  ImportOptions,
   GeoParseDebugSummary,
   ImportProgress,
   ImportSummary,
@@ -171,6 +172,7 @@ class WebImportBackend implements ImportBackend {
 
   async importGeoFile(
     onProgress?: (progress: ImportProgress) => void,
+    options: ImportOptions = {},
   ): Promise<ImportSummary> {
     if (!window.showOpenFilePicker) {
       throw new Error('This browser does not expose the File System Access API.')
@@ -211,6 +213,7 @@ class WebImportBackend implements ImportBackend {
         source: sourceFromRecord(sourceRecord),
         duplicateSourceIds: sourceRecord.duplicateSourceIds,
         file,
+        traceId: options.traceId,
       },
       onProgress,
     )

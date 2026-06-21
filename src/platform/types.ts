@@ -41,6 +41,10 @@ export type ImportSummary = {
   errors: string[]
 }
 
+export type ImportOptions = {
+  traceId?: string
+}
+
 export type GeoParseDebugSummary = {
   sourceLabel: string
   sizeBytes: number
@@ -107,7 +111,10 @@ export interface CatalogBackend {
 
 export interface ImportBackend {
   importFolder(onProgress?: (progress: ImportProgress) => void): Promise<ImportSummary>
-  importGeoFile(onProgress?: (progress: ImportProgress) => void): Promise<ImportSummary>
+  importGeoFile(
+    onProgress?: (progress: ImportProgress) => void,
+    options?: ImportOptions,
+  ): Promise<ImportSummary>
   debugParseGeoFile?(): Promise<GeoParseDebugSummary>
   dispose(): void
 }

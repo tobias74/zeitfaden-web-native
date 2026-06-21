@@ -669,11 +669,16 @@ function App() {
     }
   }, [catalog, registry.indexes.length, selectedIndexId])
 
-  const refreshAll = useCallback(async (timingLabel?: string) => {
+  const refreshAll = useCallback(async (
+    timingLabel?: string,
+    traceId?: string,
+  ) => {
     const startedAt = performance.now()
     const logTiming = (phase: string, extra: Record<string, unknown> = {}) => {
       if (!timingLabel) return
-      console.log('[app-import-timing]', {
+      console.log('[import-trace]', {
+        traceId,
+        scope: 'app',
         label: timingLabel,
         phase,
         elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
@@ -862,22 +867,32 @@ function App() {
 
     setBusy(true)
     const startedAt = performance.now()
-    console.log('[app-import-timing]', {
+    const traceId = `app-${Date.now().toString(36)}-${crypto.randomUUID()}`
+    console.log('[import-trace]', {
+      traceId,
+      scope: 'app',
       phase: 'geo import action start',
     })
     try {
-      const summary = await platform.importer.importGeoFile((progress) => {
-        setImportProgress(progress)
-      })
-      console.log('[app-import-timing]', {
+      const summary = await platform.importer.importGeoFile(
+        (progress) => {
+          setImportProgress(progress)
+        },
+        { traceId },
+      )
+      console.log('[import-trace]', {
+        traceId,
+        scope: 'app',
         phase: 'worker geo import complete',
         elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
         acceptedMedia: summary.acceptedMedia,
         skippedFiles: summary.skippedFiles,
       })
       setResultPage(0)
-      await refreshAll('geo import post-refresh')
-      console.log('[app-import-timing]', {
+      await refreshAll('geo import post-refresh', traceId)
+      console.log('[import-trace]', {
+        traceId,
+        scope: 'app',
         phase: 'geo import action complete',
         elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
       })
