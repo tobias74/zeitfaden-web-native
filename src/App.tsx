@@ -32,6 +32,14 @@ import { Thumbnail } from './components/Thumbnail'
 import { sampleMedia, sampleSource } from './demo/sampleData'
 import { formatDistance } from './lib/distance'
 import {
+  buildSearchUrlParams,
+  parseSearchUrlState,
+} from './lib/searchUrl'
+import type {
+  SearchUrlDefaults,
+  SearchUrlState,
+} from './lib/searchUrl'
+import {
   dateInputEndToMillis,
   dateInputToMillis,
   formatDateTime,
@@ -81,6 +89,10 @@ const RESULT_METADATA_KEY = 'geo-media-index-lab:result-metadata'
 const RESULT_PAGE_SIZE_KEY = 'geo-media-index-lab:result-page-size'
 const RESULT_PAGE_SIZE_OPTIONS = [50, 100, 250, 500] as const
 const DEFAULT_RESULT_PAGE_SIZE = 100
+const DEFAULT_QUERY_POINT = {
+  lat: 47.3769,
+  lon: 8.5417,
+} as const
 const DEFAULT_LEFT_WIDTH = 440
 const DEFAULT_MAP_HEIGHT = 430
 const MIN_LEFT_WIDTH = 340
@@ -217,29 +229,70 @@ function mediaItemsToGeoIndexPoints(items: MediaItem[]): GeoIndexPoint[] {
   })
 }
 
+function pathWithSearchParams(params: URLSearchParams): string {
+  const search = params.toString()
+  return `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`
+}
+
 function App() {
   const platform = useMemo(() => createPlatformBackend(), [])
   const catalog = platform.catalog
   const registry = useMemo(() => new GeoIndexRegistry(), [])
+  const allowedIndexIds = useMemo(
+    () => registry.indexes.map((index) => index.id),
+    [registry],
+  )
+  const searchUrlDefaults = useMemo<SearchUrlDefaults>(
+    () => ({
+      resultPageSize: DEFAULT_RESULT_PAGE_SIZE,
+      selectedIndexId: registry.indexes[0]?.id ?? 'brute-force',
+      queryPoint: DEFAULT_QUERY_POINT,
+    }),
+    [registry],
+  )
+  const initialSearchUrlDefaults = useMemo<SearchUrlDefaults>(
+    () => ({
+      ...searchUrlDefaults,
+      resultPageSize: storedPageSize(),
+    }),
+    [searchUrlDefaults],
+  )
+  const initialSearchState = useMemo(
+    () =>
+      parseSearchUrlState(
+        window.location.search,
+        initialSearchUrlDefaults,
+        allowedIndexIds,
+        RESULT_PAGE_SIZE_OPTIONS,
+      ),
+    [allowedIndexIds, initialSearchUrlDefaults],
+  )
 
   const [catalogInfo, setCatalogInfo] = useState<CatalogInfo>()
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([])
   const [sources, setSources] = useState<MediaSource[]>([])
   const [geoPointCount, setGeoPointCount] = useState(0)
   const [geoIndexVersion, setGeoIndexVersion] = useState(0)
-  const [selectedIndexId, setSelectedIndexId] = useState('brute-force')
-  const [queryPoint, setQueryPoint] = useState<QueryPoint>({
-    lat: 47.3769,
-    lon: 8.5417,
-  })
-  const [startDate, setStartDate] = useState('')
-  const [endDate, setEndDate] = useState('')
-  const [sort, setSort] = useState<SortMode>('captured_at_desc')
-  const [kindFilter, setKindFilter] = useState<MediaKind | 'all'>('all')
-  const [geoBounds, setGeoBounds] = useState<GeoBounds>()
+  const [selectedIndexId, setSelectedIndexId] = useState(
+    initialSearchState.selectedIndexId,
+  )
+  const [queryPoint, setQueryPoint] = useState<QueryPoint>(
+    initialSearchState.queryPoint,
+  )
+  const [startDate, setStartDate] = useState(initialSearchState.startDate)
+  const [endDate, setEndDate] = useState(initialSearchState.endDate)
+  const [sort, setSort] = useState<SortMode>(initialSearchState.sort)
+  const [kindFilter, setKindFilter] = useState<MediaKind | 'all'>(
+    initialSearchState.kindFilter,
+  )
+  const [geoBounds, setGeoBounds] = useState<GeoBounds | undefined>(
+    initialSearchState.geoBounds,
+  )
   const [boundsDrawing, setBoundsDrawing] = useState(false)
-  const [resultPage, setResultPage] = useState(0)
-  const [resultPageSize, setResultPageSize] = useState(storedPageSize)
+  const [resultPage, setResultPage] = useState(initialSearchState.resultPage)
+  const [resultPageSize, setResultPageSize] = useState(
+    initialSearchState.resultPageSize,
+  )
   const [searchResults, setSearchResults] = useState<EnrichedSearchResult[]>([])
   const [viewerIndex, setViewerIndex] = useState<number>()
   const [indexStats, setIndexStats] = useState<GeoIndexStats>(defaultStats)
@@ -305,6 +358,47 @@ function App() {
       timeRange,
     ],
   )
+  const searchUrlState = useMemo<SearchUrlState>(
+    () => ({
+      startDate,
+      endDate,
+      sort,
+      kindFilter,
+      geoBounds,
+      resultPage,
+      resultPageSize,
+      selectedIndexId,
+      queryPoint,
+    }),
+    [
+      endDate,
+      geoBounds,
+      kindFilter,
+      queryPoint,
+      resultPage,
+      resultPageSize,
+      selectedIndexId,
+      sort,
+      startDate,
+    ],
+  )
+  const hasSyncedSearchUrlRef = useRef(false)
+
+  const applySearchUrlState = useCallback((nextState: SearchUrlState) => {
+    setSelectedIndexId(nextState.selectedIndexId)
+    setQueryPoint(nextState.queryPoint)
+    setStartDate(nextState.startDate)
+    setEndDate(nextState.endDate)
+    setSort(nextState.sort)
+    setKindFilter(nextState.kindFilter)
+    setGeoBounds(nextState.geoBounds)
+    setBoundsDrawing(false)
+    setResultPage(nextState.resultPage)
+    setResultPageSize(nextState.resultPageSize)
+    setSearchResults([])
+    setValidation(undefined)
+    setViewerIndex(undefined)
+  }, [])
 
   const refreshMedia = useCallback(async () => {
     const [items, nextSources] = await Promise.all([
@@ -357,6 +451,37 @@ function App() {
   useEffect(() => {
     return () => platform.dispose()
   }, [platform])
+
+  useEffect(() => {
+    const params = buildSearchUrlParams(searchUrlState, searchUrlDefaults)
+    const nextUrl = pathWithSearchParams(params)
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`
+
+    if (nextUrl === currentUrl) {
+      hasSyncedSearchUrlRef.current = true
+      return
+    }
+
+    const method = hasSyncedSearchUrlRef.current ? 'pushState' : 'replaceState'
+    window.history[method](null, '', nextUrl)
+    hasSyncedSearchUrlRef.current = true
+  }, [searchUrlDefaults, searchUrlState])
+
+  useEffect(() => {
+    function onPopState() {
+      applySearchUrlState(
+        parseSearchUrlState(
+          window.location.search,
+          initialSearchUrlDefaults,
+          allowedIndexIds,
+          RESULT_PAGE_SIZE_OPTIONS,
+        ),
+      )
+    }
+
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [allowedIndexIds, applySearchUrlState, initialSearchUrlDefaults])
 
   useEffect(() => {
     if (!catalogInfo) return
