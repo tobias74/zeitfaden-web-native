@@ -28,6 +28,7 @@ type MapViewProps = {
   results: EnrichedSearchResult[]
   geoBounds?: GeoBounds
   boundsDrawing: boolean
+  label: string
   onQueryPointChange: (point: QueryPoint) => void
   onGeoBoundsChange: (bounds: GeoBounds) => void
 }
@@ -171,6 +172,7 @@ export function MapView({
   results,
   geoBounds,
   boundsDrawing,
+  label,
   onQueryPointChange,
   onGeoBoundsChange,
 }: MapViewProps) {
@@ -331,5 +333,5 @@ export function MapView({
     )
   }, [geoBounds])
 
-  return <div ref={targetRef} className="map-view" aria-label="Search map" />
+  return <div ref={targetRef} className="map-view" aria-label={label} />
 }

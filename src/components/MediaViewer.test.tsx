@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { MediaViewer } from './MediaViewer'
+import { translate } from '../i18n'
 import type { PlatformBackend } from '../platform/types'
 import type { EnrichedSearchResult, MediaItem } from '../types'
 
@@ -67,6 +68,8 @@ describe('MediaViewer', () => {
         absoluteIndex={49}
         canNavigatePrevious={true}
         canNavigateNext={true}
+        locale="en-US"
+        t={(key, values) => translate('en', key, values)}
         onClose={vi.fn()}
         onNavigate={onNavigate}
       />,

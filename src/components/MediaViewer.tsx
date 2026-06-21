@@ -5,6 +5,7 @@ import {
   X,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
+import type { TranslationKey, TranslationValues } from '../i18n'
 import { formatDistance } from '../lib/distance'
 import { formatDateTime } from '../lib/time'
 import type { PlatformBackend } from '../platform/types'
@@ -19,6 +20,8 @@ type MediaViewerProps = {
   canNavigatePrevious: boolean
   canNavigateNext: boolean
   navigationPending?: boolean
+  locale: string
+  t: (key: TranslationKey, values?: TranslationValues) => string
   onClose: () => void
   onNavigate: (index: number) => void
 }
@@ -75,6 +78,8 @@ export function MediaViewer({
   canNavigatePrevious,
   canNavigateNext,
   navigationPending = false,
+  locale,
+  t,
   onClose,
   onNavigate,
 }: MediaViewerProps) {
@@ -207,21 +212,21 @@ export function MediaViewer({
           <div>
             <h2>{item.displayName}</h2>
             <p>
-              {(absoluteIndex + 1).toLocaleString()}
+              {(absoluteIndex + 1).toLocaleString(locale)}
               {typeof totalItems === 'number'
-                ? ` / ${totalItems.toLocaleString()}`
+                ? ` / ${totalItems.toLocaleString(locale)}`
                 : ''}
-              {navigationPending ? ' · Loading' : ''}
+              {navigationPending ? ` · ${t('loading')}` : ''}
             </p>
           </div>
           <div className="media-viewer-actions">
             {canReveal && (
               <button type="button" onClick={revealOriginal}>
                 <ExternalLink size={17} />
-                Reveal
+                {t('reveal')}
               </button>
             )}
-            <button type="button" onClick={onClose} title="Close viewer">
+            <button type="button" onClick={onClose} title={t('closeViewer')}>
               <X size={18} />
             </button>
           </div>
@@ -233,14 +238,14 @@ export function MediaViewer({
             className="media-viewer-nav media-viewer-nav-prev"
             onClick={() => onNavigate(absoluteIndex - 1)}
             disabled={!canNavigatePrevious || navigationPending}
-            title="Previous item"
+            title={t('previousItem')}
           >
             <ChevronLeft size={26} />
           </button>
 
           <figure className="media-viewer-stage">
             {mediaUrl.loading && (
-              <div className="media-viewer-placeholder">Loading</div>
+              <div className="media-viewer-placeholder">{t('loading')}</div>
             )}
             {!mediaUrl.loading && mediaUrl.url && item.kind === 'image' && (
               <img src={mediaUrl.url} alt={item.displayName} />
@@ -254,7 +259,13 @@ export function MediaViewer({
               </div>
             )}
             {!mediaUrl.loading && mediaUrl.source !== 'none' && (
-              <figcaption>{mediaUrl.source}</figcaption>
+              <figcaption>
+                {t(
+                  mediaUrl.source === 'original'
+                    ? 'mediaSourceOriginal'
+                    : 'mediaSourceThumbnail',
+                )}
+              </figcaption>
             )}
           </figure>
 
@@ -263,7 +274,7 @@ export function MediaViewer({
             className="media-viewer-nav media-viewer-nav-next"
             onClick={() => onNavigate(absoluteIndex + 1)}
             disabled={!canNavigateNext || navigationPending}
-            title="Next item"
+            title={t('nextItem')}
           >
             <ChevronRight size={26} />
           </button>
@@ -271,16 +282,18 @@ export function MediaViewer({
           <aside className="media-viewer-details">
             <dl>
               <div>
-                <dt>Captured</dt>
-                <dd>{formatDateTime(item.capturedAt)}</dd>
+                <dt>{t('captured')}</dt>
+                <dd>
+                  {formatDateTime(item.capturedAt, locale, t('noTimestamp'))}
+                </dd>
               </div>
               <div>
-                <dt>Kind</dt>
-                <dd>{item.kind}</dd>
+                <dt>{t('kind')}</dt>
+                <dd>{t(item.kind)}</dd>
               </div>
               {dimensions && (
                 <div>
-                  <dt>Size</dt>
+                  <dt>{t('size')}</dt>
                   <dd>{dimensions}</dd>
                 </div>
               )}
@@ -292,16 +305,16 @@ export function MediaViewer({
               )}
               {Number.isFinite(result.distanceMeters) && (
                 <div>
-                  <dt>Distance</dt>
+                  <dt>{t('distance')}</dt>
                   <dd>{formatDistance(result.distanceMeters)}</dd>
                 </div>
               )}
               <div>
-                <dt>Locations</dt>
-                <dd>{item.locations.length.toLocaleString()}</dd>
+                <dt>{t('locations')}</dt>
+                <dd>{item.locations.length.toLocaleString(locale)}</dd>
               </div>
               <div>
-                <dt>Path</dt>
+                <dt>{t('path')}</dt>
                 <dd>{path}</dd>
               </div>
             </dl>

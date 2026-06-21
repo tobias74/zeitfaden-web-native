@@ -7,6 +7,7 @@ import {
   FolderOpen,
   Images,
   Image as ImageIcon,
+  Languages,
   List,
   MapPin,
   Settings2,
@@ -28,6 +29,16 @@ import { MapView } from './components/MapView'
 import { MediaViewer } from './components/MediaViewer'
 import { Thumbnail } from './components/Thumbnail'
 import { formatDistance } from './lib/distance'
+import {
+  LANGUAGES,
+  LANGUAGE_STORAGE_KEY,
+  type Language,
+  type TranslationKey,
+  type TranslationValues,
+  isLanguage,
+  languageLocale,
+  translate,
+} from './i18n'
 import {
   buildSearchUrlParams,
   parseSearchUrlState,
@@ -67,7 +78,8 @@ type ResultDisplayMode = 'images' | 'cards' | 'list'
 type ResultThumbnailSize = 'small' | 'medium' | 'large'
 type ActivityLogEntry = {
   id: number
-  message: string
+  key: TranslationKey
+  values?: TranslationValues
   createdAt: number
 }
 type ViewerSession = {
@@ -137,6 +149,11 @@ function storedBoolean(key: string, fallback: boolean): boolean {
   return fallback
 }
 
+function storedLanguage(): Language {
+  const stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY)
+  return isLanguage(stored) ? stored : 'en'
+}
+
 function storedPageSize(): number {
   const stored = storedNumber(RESULT_PAGE_SIZE_KEY, DEFAULT_RESULT_PAGE_SIZE)
   return RESULT_PAGE_SIZE_OPTIONS.includes(
@@ -150,8 +167,8 @@ function filterValueToKind(value: string): MediaKind | 'all' {
   return value === 'image' || value === 'video' ? value : 'all'
 }
 
-function statsNumber(value: number | undefined): string {
-  return typeof value === 'number' ? value.toLocaleString() : '0'
+function statsNumber(value: number | undefined, locale: string): string {
+  return typeof value === 'number' ? value.toLocaleString(locale) : '0'
 }
 
 function importProgressPercent(progress: ImportProgress): number | undefined {
@@ -161,22 +178,34 @@ function importProgressPercent(progress: ImportProgress): number | undefined {
   return Math.min(100, (progress.scannedFiles / progress.totalFiles) * 100)
 }
 
-function importProgressLabel(progress: ImportProgress): string {
+function importProgressLabel(
+  progress: ImportProgress,
+  t: (key: TranslationKey, values?: TranslationValues) => string,
+  locale: string,
+): string {
   if (progress.phase === 'counting') {
-    return `Counting files in ${progress.sourceLabel}`
+    return t('countingFilesIn', { sourceLabel: progress.sourceLabel })
   }
   if (progress.phase === 'storing') {
-    return `Saving ${progress.acceptedMedia.toLocaleString()} media files`
+    return t('savingMediaFiles', {
+      count: progress.acceptedMedia.toLocaleString(locale),
+    })
   }
-  return `Scanning ${progress.sourceLabel}`
+  return t('scanningSource', { sourceLabel: progress.sourceLabel })
 }
 
-function importProgressDetail(progress: ImportProgress): string {
+function importProgressDetail(
+  progress: ImportProgress,
+  t: (key: TranslationKey, values?: TranslationValues) => string,
+  locale: string,
+): string {
   if (progress.phase === 'counting') {
-    return `${progress.totalFiles.toLocaleString()} files found`
+    return t('filesFound', {
+      count: progress.totalFiles.toLocaleString(locale),
+    })
   }
 
-  return `${progress.scannedFiles.toLocaleString()} / ${progress.totalFiles.toLocaleString()} files`
+  return `${progress.scannedFiles.toLocaleString(locale)} / ${progress.totalFiles.toLocaleString(locale)}`
 }
 
 function formatDimensions(item: MediaItem): string | undefined {
@@ -234,6 +263,13 @@ function App() {
   const platform = useMemo(() => createPlatformBackend(), [])
   const catalog = platform.catalog
   const registry = useMemo(() => new GeoIndexRegistry(), [])
+  const [language, setLanguage] = useState<Language>(() => storedLanguage())
+  const locale = languageLocale(language)
+  const t = useCallback(
+    (key: TranslationKey, values?: TranslationValues) =>
+      translate(language, key, values),
+    [language],
+  )
   const allowedIndexIds = useMemo(
     () => registry.indexes.map((index) => index.id),
     [registry],
@@ -297,7 +333,7 @@ function App() {
   const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>(() => [
     {
       id: 0,
-      message: 'Initializing catalog',
+      key: 'activityInitializingCatalog',
       createdAt: Date.now(),
     },
   ])
@@ -388,17 +424,27 @@ function App() {
   )
   const hasSyncedSearchUrlRef = useRef(false)
 
-  const recordActivity = useCallback((message: string) => {
+  const recordActivity = useCallback((
+    key: TranslationKey,
+    values?: TranslationValues,
+  ) => {
     setActivityLog((entries) =>
       [
         {
           id: activityLogIdRef.current++,
-          message,
+          key,
+          values,
           createdAt: Date.now(),
         },
         ...entries,
       ].slice(0, 30),
     )
+  }, [])
+
+  const changeLanguage = useCallback((value: string) => {
+    if (!isLanguage(value)) return
+    setLanguage(value)
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, value)
   }, [])
 
   const applySearchUrlState = useCallback((nextState: SearchUrlState) => {
@@ -452,7 +498,7 @@ function App() {
       } catch (caught) {
         if (!cancelled) {
           setError(caught instanceof Error ? caught.message : String(caught))
-          recordActivity('Catalog failed to initialize')
+          recordActivity('activityCatalogFailedToInitialize')
         }
       }
     }
@@ -521,20 +567,25 @@ function App() {
       })
       setResultPage(0)
       await refreshAll()
-      recordActivity(
-        `Imported ${summary.acceptedMedia.toLocaleString()} media files from ${summary.sourceLabel}`,
-      )
+      recordActivity('activityImportedMediaFilesFrom', {
+        count: summary.acceptedMedia.toLocaleString(locale),
+        sourceLabel: summary.sourceLabel,
+      })
       if (summary.errors.length > 0) {
-        setError(`${summary.errors.length} files could not be read.`)
+        setError(
+          t('filesCouldNotBeRead', {
+            count: summary.errors.length.toLocaleString(locale),
+          }),
+        )
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught))
-      recordActivity('Import stopped')
+      recordActivity('activityImportStopped')
     } finally {
       setImportProgress(undefined)
       setBusy(false)
     }
-  }, [platform, recordActivity, refreshAll])
+  }, [locale, platform, recordActivity, refreshAll, t])
 
   const clearCatalog = useCallback(async () => {
     setBusy(true)
@@ -549,7 +600,7 @@ function App() {
       setViewerSession(undefined)
       setViewerNavigationPending(false)
       await refreshAll()
-      recordActivity('Catalog cleared')
+      recordActivity('activityCatalogCleared')
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught))
     } finally {
@@ -559,12 +610,10 @@ function App() {
 
   const confirmClearCatalog = useCallback(() => {
     if (busy || !catalogReady) return
-    const confirmed = window.confirm(
-      'Clear the catalog? This removes indexed media, sources, and generated thumbnails from this app. Original files stay on disk.',
-    )
+    const confirmed = window.confirm(t('clearCatalogConfirm'))
     if (!confirmed) return
     void clearCatalog()
-  }, [busy, catalogReady, clearCatalog])
+  }, [busy, catalogReady, clearCatalog, t])
 
   useEffect(() => {
     if (!catalogInfo || !distanceSortActive) return
@@ -621,7 +670,6 @@ function App() {
       } catch (caught) {
         if (!cancelled) {
           setError(caught instanceof Error ? caught.message : String(caught))
-          recordActivity('Distance sort failed')
         }
       }
     }
@@ -641,7 +689,6 @@ function App() {
     kindFilter,
     queryPoint.lat,
     queryPoint.lon,
-    recordActivity,
     registry,
     selectedIndex,
     timeRange,
@@ -661,10 +708,14 @@ function App() {
   const visibleStart = resultItems.length === 0 ? 0 : resultOffset + 1
   const visibleEnd = resultOffset + resultItems.length
   const visibleRange = distanceSortActive
-    ? `${visibleStart.toLocaleString()}-${visibleEnd.toLocaleString()} of ${allResultItems.length.toLocaleString()}`
+    ? t('resultRangeOf', {
+        start: visibleStart.toLocaleString(locale),
+        end: visibleEnd.toLocaleString(locale),
+        total: allResultItems.length.toLocaleString(locale),
+      })
     : resultItems.length === 0
       ? '0'
-      : `${visibleStart.toLocaleString()}-${visibleEnd.toLocaleString()}`
+      : `${visibleStart.toLocaleString(locale)}-${visibleEnd.toLocaleString(locale)}`
   const canPageBackward = resultPage > 0
   const canPageForward = distanceSortActive
     ? visibleEnd < allResultItems.length
@@ -969,7 +1020,7 @@ function App() {
           <p className="subtle">
             {catalogInfo
               ? `SQLite ${catalogInfo.sqliteVersion} · ${catalogInfo.storageMode.toUpperCase()} · ${catalogInfo.filename}`
-              : 'Starting local catalog'}
+              : t('catalogStatusStarting')}
           </p>
         </div>
         <div className="topbar-tools">
@@ -980,29 +1031,45 @@ function App() {
               disabled={busy || !catalogReady}
             >
               <FolderOpen size={17} />
-              Import folder
+              {t('importFolder')}
             </button>
+            <label className="language-control" title={t('language')}>
+              <span aria-hidden="true">
+                <Languages size={16} />
+              </span>
+              <select
+                aria-label={t('language')}
+                value={language}
+                onChange={(event) => changeLanguage(event.target.value)}
+              >
+                {LANGUAGES.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <details className="display-menu settings-menu">
               <summary>
                 <Settings2 size={17} />
-                Settings
+                {t('settings')}
               </summary>
               <div className="display-popover settings-popover">
                 <div className="display-section">
-                  <span>Activity log</span>
-                  <div className="activity-log" aria-label="Activity log">
+                  <span>{t('activityLog')}</span>
+                  <div className="activity-log" aria-label={t('activityLog')}>
                     {activityLog.map((entry) => (
                       <div key={entry.id} className="activity-log-entry">
                         <time dateTime={new Date(entry.createdAt).toISOString()}>
-                          {formatDateTime(entry.createdAt)}
+                          {formatDateTime(entry.createdAt, locale)}
                         </time>
-                        <p>{entry.message}</p>
+                        <p>{t(entry.key, entry.values)}</p>
                       </div>
                     ))}
                   </div>
                 </div>
                 <div className="display-section">
-                  <span>Catalog data</span>
+                  <span>{t('catalogData')}</span>
                   <button
                     type="button"
                     className="danger settings-clear-button"
@@ -1010,7 +1077,7 @@ function App() {
                     disabled={busy || !catalogReady}
                   >
                     <Trash2 size={16} />
-                    Clear catalog
+                    {t('clearCatalog')}
                   </button>
                 </div>
               </div>
@@ -1023,15 +1090,15 @@ function App() {
             {importProgress ? (
               <div className="import-progress-strip">
                 <div className="import-progress-header">
-                  <span>{importProgressLabel(importProgress)}</span>
-                  <strong>{importProgressDetail(importProgress)}</strong>
+                  <span>{importProgressLabel(importProgress, t, locale)}</span>
+                  <strong>{importProgressDetail(importProgress, t, locale)}</strong>
                 </div>
                 <div
                   className={`progress-track ${
                     importProgress.phase === 'counting' ? 'indeterminate' : ''
                   }`}
                   role="progressbar"
-                  aria-label="Import progress"
+                  aria-label={t('importProgress')}
                   aria-valuemax={importProgress.totalFiles || undefined}
                   aria-valuemin={0}
                   aria-valuenow={
@@ -1069,6 +1136,7 @@ function App() {
               results={searchResults}
               geoBounds={geoBounds}
               boundsDrawing={boundsDrawing}
+              label={t('searchMap')}
               onQueryPointChange={setMapQueryPoint}
               onGeoBoundsChange={setMapGeoBounds}
             />
@@ -1078,19 +1146,19 @@ function App() {
                 className={boundsDrawing ? 'active' : undefined}
                 aria-pressed={boundsDrawing}
                 onClick={toggleBoundsDrawing}
-                title="Area filter"
+                title={t('areaFilter')}
               >
                 <BoxSelect size={16} />
-                Area
+                {t('area')}
               </button>
               {geoBounds && (
                 <button
                   type="button"
                   onClick={clearMapGeoBounds}
-                  title="Clear area filter"
+                  title={t('clearAreaFilter')}
                 >
                   <Trash2 size={16} />
-                  Clear
+                  {t('clear')}
                 </button>
               )}
             </div>
@@ -1104,7 +1172,7 @@ function App() {
           </div>
 
           <div
-            aria-label="Resize map and query panels"
+            aria-label={t('resizeMapAndQueryPanels')}
             aria-orientation="horizontal"
             aria-valuemax={resizeControls.map.max}
             aria-valuemin={resizeControls.map.min}
@@ -1112,7 +1180,7 @@ function App() {
             className="resize-handle resize-handle-horizontal"
             role="separator"
             tabIndex={0}
-            title="Resize map and query panels"
+            title={t('resizeMapAndQueryPanels')}
             onKeyDown={nudgeMapPane}
             onPointerDown={startHorizontalResize}
             onPointerMove={handleHorizontalResizeMove}
@@ -1122,11 +1190,11 @@ function App() {
             <section className="panel">
               <div className="panel-title">
                 <Calendar size={17} />
-                <h2>Catalog</h2>
+                <h2>{t('catalog')}</h2>
               </div>
               <div className="time-range-row">
                 <label>
-                  From
+                  {t('from')}
                   <input
                     type="datetime-local"
                     value={startDate}
@@ -1137,7 +1205,7 @@ function App() {
                   />
                 </label>
                 <label>
-                  To
+                  {t('to')}
                   <input
                     type="datetime-local"
                     value={endDate}
@@ -1149,35 +1217,37 @@ function App() {
                 </label>
               </div>
               <label>
-                Kind
+                {t('kind')}
                 <select
                   value={kindFilter}
                   onChange={(event) =>
                     setFilterKind(filterValueToKind(event.target.value))
                   }
                 >
-                  <option value="all">All</option>
-                  <option value="image">Images</option>
-                  <option value="video">Videos</option>
+                  <option value="all">{t('all')}</option>
+                  <option value="image">{t('images')}</option>
+                  <option value="video">{t('videos')}</option>
                 </select>
               </label>
               <label>
-                Sort
+                {t('sort')}
                 <select
                   value={sort}
                   onChange={(event) =>
                     setSortMode(event.target.value as SortMode)
                   }
                 >
-                  <option value="captured_at_desc">Newest first</option>
-                  <option value="captured_at_asc">Oldest first</option>
-                  <option value="distance">Distance from map point</option>
+                  <option value="captured_at_desc">{t('newestFirst')}</option>
+                  <option value="captured_at_asc">{t('oldestFirst')}</option>
+                  <option value="distance">
+                    {t('distanceFromMapPoint')}
+                  </option>
                 </select>
               </label>
               {distanceSortActive && (
                 <div className="distance-sort-controls">
                   <label>
-                    Engine
+                    {t('engine')}
                     <select
                       value={selectedIndexId}
                       onChange={(event) => {
@@ -1199,34 +1269,35 @@ function App() {
             <section className="panel metrics-panel">
               <div className="panel-title">
                 <Activity size={17} />
-                <h2>Metrics</h2>
+                <h2>{t('metrics')}</h2>
               </div>
               <dl className="metrics-grid">
                 <div>
-                  <dt>Geo points</dt>
-                  <dd>{geoPointCount.toLocaleString()}</dd>
+                  <dt>{t('geoPoints')}</dt>
+                  <dd>{geoPointCount.toLocaleString(locale)}</dd>
                 </div>
                 <div>
-                  <dt>Query</dt>
+                  <dt>{t('query')}</dt>
                   <dd>{indexStats.lastQueryTimeMs?.toFixed(2) ?? '0'} ms</dd>
                 </div>
                 <div>
-                  <dt>Distances</dt>
-                  <dd>{statsNumber(indexStats.distanceComputations)}</dd>
+                  <dt>{t('distances')}</dt>
+                  <dd>{statsNumber(indexStats.distanceComputations, locale)}</dd>
                 </div>
                 <div>
-                  <dt>Nodes</dt>
-                  <dd>{statsNumber(indexStats.nodesVisited)}</dd>
+                  <dt>{t('nodes')}</dt>
+                  <dd>{statsNumber(indexStats.nodesVisited, locale)}</dd>
                 </div>
                 <div>
-                  <dt>Visited</dt>
-                  <dd>{statsNumber(indexStats.candidatesInspected)}</dd>
+                  <dt>{t('visited')}</dt>
+                  <dd>{statsNumber(indexStats.candidatesInspected, locale)}</dd>
                 </div>
                 <div>
-                  <dt>Pruned</dt>
+                  <dt>{t('pruned')}</dt>
                   <dd>
                     {statsNumber(
                       indexStats.prunedByGeo + indexStats.prunedByTime,
+                      locale,
                     )}
                   </dd>
                 </div>
@@ -1245,7 +1316,7 @@ function App() {
         </section>
 
         <div
-          aria-label="Resize left tools and results"
+          aria-label={t('resizeLeftToolsAndResults')}
           aria-orientation="vertical"
           aria-valuemax={resizeControls.left.max}
           aria-valuemin={resizeControls.left.min}
@@ -1253,7 +1324,7 @@ function App() {
           className="resize-handle resize-handle-vertical"
           role="separator"
           tabIndex={0}
-          title="Resize left tools and results"
+          title={t('resizeLeftToolsAndResults')}
           onKeyDown={nudgeLeftPane}
           onPointerDown={startVerticalResize}
           onPointerMove={handleVerticalResizeMove}
@@ -1262,15 +1333,17 @@ function App() {
         <section className="library-strip">
           <div className="library-header">
             <div>
-              <h2>{visibleResults ? 'Nearest results' : 'Catalog results'}</h2>
+              <h2>
+                {visibleResults ? t('nearestResults') : t('catalogResults')}
+              </h2>
               <p className="subtle">
-                {visibleRange} visible · {sources.length.toLocaleString()}{' '}
-                sources
+                {visibleRange} {t('visible')} ·{' '}
+                {sources.length.toLocaleString(locale)} {t('sources')}
               </p>
             </div>
             <div className="library-actions">
               <label className="pagination-size">
-                Page
+                {t('page')}
                 <select
                   value={resultPageSize}
                   onChange={(event) => setPageSize(Number(event.target.value))}
@@ -1282,12 +1355,12 @@ function App() {
                   ))}
                 </select>
               </label>
-              <div className="pagination-buttons" aria-label="Result pages">
+              <div className="pagination-buttons" aria-label={t('resultPages')}>
                 <button
                   type="button"
                   onClick={() => setResultPage((page) => Math.max(0, page - 1))}
                   disabled={!canPageBackward}
-                  title="Previous page"
+                  title={t('previousPage')}
                 >
                   <ChevronLeft size={17} />
                 </button>
@@ -1295,7 +1368,7 @@ function App() {
                   type="button"
                   onClick={() => setResultPage((page) => page + 1)}
                   disabled={!canPageForward}
-                  title="Next page"
+                  title={t('nextPage')}
                 >
                   <ChevronRight size={17} />
                 </button>
@@ -1303,19 +1376,19 @@ function App() {
               <details className="display-menu">
                 <summary>
                   <Settings2 size={17} />
-                  Display
+                  {t('display')}
                 </summary>
                 <div className="display-popover">
                   <div className="display-section">
-                    <span>Mode</span>
-                    <div className="segmented-control" role="group" aria-label="Result display mode">
+                    <span>{t('mode')}</span>
+                    <div className="segmented-control" role="group" aria-label={t('resultDisplayMode')}>
                       <button
                         type="button"
                         className={resultDisplayMode === 'images' ? 'active' : ''}
                         onClick={() => setDisplayMode('images')}
                       >
                         <Images size={16} />
-                        Images
+                        {t('images')}
                       </button>
                       <button
                         type="button"
@@ -1323,7 +1396,7 @@ function App() {
                         onClick={() => setDisplayMode('cards')}
                       >
                         <ImageIcon size={16} />
-                        Cards
+                        {t('cards')}
                       </button>
                       <button
                         type="button"
@@ -1331,13 +1404,13 @@ function App() {
                         onClick={() => setDisplayMode('list')}
                       >
                         <List size={16} />
-                        List
+                        {t('list')}
                       </button>
                     </div>
                   </div>
                   <div className="display-section">
-                    <span>Thumbnail size</span>
-                    <div className="segmented-control compact" role="group" aria-label="Thumbnail size">
+                    <span>{t('thumbnailSize')}</span>
+                    <div className="segmented-control compact" role="group" aria-label={t('thumbnailSize')}>
                       {(['small', 'medium', 'large'] as const).map((size) => (
                         <button
                           key={size}
@@ -1345,7 +1418,7 @@ function App() {
                           className={resultThumbnailSize === size ? 'active' : ''}
                           onClick={() => setThumbnailSize(size)}
                         >
-                          {size}
+                          {t(size)}
                         </button>
                       ))}
                     </div>
@@ -1356,13 +1429,13 @@ function App() {
                       checked={showResultMetadata}
                       onChange={(event) => toggleMetadata(event.target.checked)}
                     />
-                    Show metadata
+                    {t('showMetadata')}
                   </label>
                 </div>
               </details>
               <button type="button" onClick={clearSearch} disabled={busy}>
                 <Trash2 size={17} />
-                Clear search
+                {t('clearSearch')}
               </button>
             </div>
           </div>
@@ -1403,7 +1476,13 @@ function App() {
                   </div>
                   {showResultMetadata && (
                     <>
-                      <p>{formatDateTime(result.item.capturedAt)}</p>
+                      <p>
+                        {formatDateTime(
+                          result.item.capturedAt,
+                          locale,
+                          t('noTimestamp'),
+                        )}
+                      </p>
                       <p>{result.item.relativePath}</p>
                       <p className="metadata-extra">
                         {[
@@ -1431,14 +1510,20 @@ function App() {
               )}
               {resultDisplayMode === 'list' && (
                 <div className="media-list-columns">
-                  <span>{result.item.kind}</span>
-                  <span>{formatDateTime(result.item.capturedAt)}</span>
+                  <span>{t(result.item.kind)}</span>
+                  <span>
+                    {formatDateTime(
+                      result.item.capturedAt,
+                      locale,
+                      t('noTimestamp'),
+                    )}
+                  </span>
                   <span>{formatDimensions(result.item) ?? 'n/a'}</span>
-                  <span>{formatGeo(result.item) ?? 'no GPS'}</span>
+                  <span>{formatGeo(result.item) ?? t('metadataNoGps')}</span>
                   {Number.isFinite(result.distanceMeters) ? (
                     <strong>{formatDistance(result.distanceMeters)}</strong>
                   ) : (
-                    <span>catalog</span>
+                    <span>{t('metadataCatalog')}</span>
                   )}
                 </div>
               )}
@@ -1458,6 +1543,8 @@ function App() {
           canNavigatePrevious={viewerSession.absoluteIndex > 0}
           canNavigateNext={viewerSession.canNavigateNext}
           navigationPending={viewerNavigationPending}
+          locale={locale}
+          t={t}
           onClose={closeViewer}
           onNavigate={(index) => {
             void openViewerAtIndex(index)

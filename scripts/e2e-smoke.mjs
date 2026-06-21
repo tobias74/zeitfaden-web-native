@@ -47,6 +47,10 @@ async function main() {
   await waitForText(page, 'Geo Media Index Lab')
   await waitForText(page, 'SQLite')
   await waitForText(page, 'OPFS')
+  await page.locator('.language-control select').selectOption('de')
+  await waitForText(page, 'Ordner importieren')
+  await page.locator('.language-control select').selectOption('en')
+  await waitForText(page, 'Import folder')
 
   const verticalHandle = page.getByRole('separator', {
     name: /resize left tools and results/i,

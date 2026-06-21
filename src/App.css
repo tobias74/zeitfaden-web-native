@@ -59,6 +59,40 @@
   justify-content: flex-end;
 }
 
+.topbar-actions button,
+.topbar-actions summary {
+  white-space: nowrap;
+}
+
+.language-control {
+  width: auto;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 1px solid #bcc7c2;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #4e5a55;
+  font-size: 12px;
+}
+
+.language-control span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.language-control select {
+  width: 104px;
+  min-height: 28px;
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+}
+
 .topbar-progress-slot {
   grid-column: 1;
   grid-row: 1;
@@ -1037,6 +1071,11 @@
 
   .topbar-actions .display-menu summary {
     width: 100%;
+  }
+
+  .language-control {
+    flex: 1 1 150px;
+    justify-content: space-between;
   }
 
   .workspace {

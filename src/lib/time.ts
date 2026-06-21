@@ -59,9 +59,13 @@ export function dateInputEndToMillis(value: string): number | undefined {
   return Number.isFinite(millis) ? millis : undefined
 }
 
-export function formatDateTime(millis: number | undefined): string {
-  if (typeof millis !== 'number') return 'No timestamp'
-  return new Intl.DateTimeFormat(undefined, {
+export function formatDateTime(
+  millis: number | undefined,
+  locale?: string,
+  fallback = 'No timestamp',
+): string {
+  if (typeof millis !== 'number') return fallback
+  return new Intl.DateTimeFormat(locale, {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(new Date(millis))
