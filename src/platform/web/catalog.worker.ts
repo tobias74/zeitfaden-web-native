@@ -185,7 +185,7 @@ const PROGRESS_HEARTBEAT_MS = 1000
 const GEO_POINT_ITEM_BUILD_CHUNK_SIZE = 250
 const GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE = 250
 const GEO_IMPORT_INDEXEDDB_WRITE_BATCH_SIZE = 2000
-const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb-v3'
+const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb'
 const INDEXED_DB_VERSION = 1
 const IMPORT_TRACE_ENABLED = false
 
@@ -366,16 +366,6 @@ function iterateIdbCursor(
   })
 }
 
-function ensureIdbIndex(
-  store: IDBObjectStore,
-  name: string,
-  keyPath: string | string[],
-): void {
-  if (!store.indexNames.contains(name)) {
-    store.createIndex(name, keyPath)
-  }
-}
-
 async function ensureIndexedDb(): Promise<InitResult> {
   if (indexedDb && indexedDbInitResult) return indexedDbInitResult
   if (typeof indexedDB === 'undefined') {
@@ -389,15 +379,9 @@ async function ensureIndexedDb(): Promise<InitResult> {
       const database = request.result
 
       if (!database.objectStoreNames.contains('assets')) {
-        const assets = database.createObjectStore('assets', {
+        database.createObjectStore('assets', {
           keyPath: 'contentHash',
         })
-        assets.createIndex('capturedAt', 'capturedAt')
-      } else {
-        const assets = request.transaction?.objectStore('assets')
-        if (assets) {
-          ensureIdbIndex(assets, 'capturedAt', 'capturedAt')
-        }
       }
 
       if (!database.objectStoreNames.contains('locations')) {
@@ -405,13 +389,6 @@ async function ensureIndexedDb(): Promise<InitResult> {
           keyPath: 'id',
         })
         locations.createIndex('contentHash', 'contentHash')
-        locations.createIndex('sourceId', 'sourceId')
-      } else {
-        const locations = request.transaction?.objectStore('locations')
-        if (locations) {
-          ensureIdbIndex(locations, 'contentHash', 'contentHash')
-          ensureIdbIndex(locations, 'sourceId', 'sourceId')
-        }
       }
     }
 
@@ -593,18 +570,21 @@ async function idbRemoveSources(sourceIds: string[]): Promise<void> {
   if (sourceIds.length === 0) return
 
   const database = await requireIndexedDb()
-  const locationsBySource = await Promise.all(
-    sourceIds.map(async (sourceId) => {
-      const transaction = database.transaction('locations', 'readonly')
-      const done = idbTransactionDone(transaction)
-      const rows = await idbRequest<IdbLocation[]>(
-        transaction.objectStore('locations').index('sourceId').getAll(sourceId),
-      )
-      await done
-      return rows
-    }),
+  const sourceIdSet = new Set(sourceIds)
+  const locationsToDelete: IdbLocation[] = []
+  const sourceTransaction = database.transaction('locations', 'readonly')
+  const sourceDone = idbTransactionDone(sourceTransaction)
+  await iterateIdbCursor(
+    sourceTransaction.objectStore('locations').openCursor(),
+    (cursor) => {
+      const location = cursor.value as IdbLocation
+      if (sourceIdSet.has(location.sourceId)) {
+        locationsToDelete.push(location)
+      }
+    },
   )
-  const locationsToDelete = locationsBySource.flat()
+  await sourceDone
+
   const affectedHashes = Array.from(
     new Set(locationsToDelete.map((location) => location.contentHash)),
   )
@@ -691,20 +671,37 @@ async function idbSourceContentHashes(
 
   const transaction = database.transaction('locations', 'readonly')
   const done = idbTransactionDone(transaction)
-  const rows = await idbRequest<IdbLocation[]>(
-    transaction.objectStore('locations').index('sourceId').getAll(sourceId),
+  const hashes = new Set<string>()
+  await iterateIdbCursor(
+    transaction.objectStore('locations').openCursor(),
+    (cursor) => {
+      const location = cursor.value as IdbLocation
+      if (location.sourceId === sourceId) {
+        hashes.add(location.contentHash)
+      }
+    },
   )
   await done
-  return new Set(rows.map((location) => location.contentHash))
+  return hashes
 }
 
-function capturedAtRange(query: TimeRange): IDBKeyRange | undefined {
-  if (query.startTime !== undefined && query.endTime !== undefined) {
-    return IDBKeyRange.bound(query.startTime, query.endTime)
+function compareIdbAssetsByCapturedAt(
+  sort: CatalogQuery['sort'],
+  a: IdbAsset,
+  b: IdbAsset,
+): number {
+  const aTime = a.capturedAt
+  const bTime = b.capturedAt
+  const aMissing = aTime === undefined
+  const bMissing = bTime === undefined
+
+  if (aMissing && !bMissing) return 1
+  if (!aMissing && bMissing) return -1
+  if (!aMissing && !bMissing && aTime !== bTime) {
+    return sort === 'captured_at_asc' ? aTime - bTime : bTime - aTime
   }
-  if (query.startTime !== undefined) return IDBKeyRange.lowerBound(query.startTime)
-  if (query.endTime !== undefined) return IDBKeyRange.upperBound(query.endTime)
-  return undefined
+
+  return a.contentHash.localeCompare(b.contentHash)
 }
 
 async function idbListMedia(query: CatalogQuery): Promise<MediaItem[]> {
@@ -712,28 +709,22 @@ async function idbListMedia(query: CatalogQuery): Promise<MediaItem[]> {
   const sourceHashes = await idbSourceContentHashes(database, query.sourceId)
   const limit = Math.max(1, Math.min(query.limit ?? 500, 10_000))
   const offset = Math.max(0, query.offset ?? 0)
-  const results: IdbAsset[] = []
-  let skipped = 0
+  const matches: IdbAsset[] = []
 
   const transaction = database.transaction('assets', 'readonly')
   const done = idbTransactionDone(transaction)
-  const index = transaction.objectStore('assets').index('capturedAt')
-  const direction = query.sort === 'captured_at_asc' ? 'next' : 'prev'
   await iterateIdbCursor(
-    index.openCursor(capturedAtRange(query), direction),
+    transaction.objectStore('assets').openCursor(),
     (cursor) => {
       const asset = cursor.value as IdbAsset
       if (!idbAssetMatchesQuery(asset, query, sourceHashes)) return
-      if (skipped < offset) {
-        skipped += 1
-        return
-      }
-      results.push(asset)
-      return results.length < limit
+      matches.push(asset)
     },
   )
   await done
 
+  matches.sort((a, b) => compareIdbAssetsByCapturedAt(query.sort, a, b))
+  const results = matches.slice(offset, offset + limit)
   return idbMediaItemsFromAssets(database, results, query.sourceId)
 }
 
@@ -799,7 +790,7 @@ async function idbListSources(): Promise<MediaSource[]> {
   const done = idbTransactionDone(transaction)
   const sourcesById = new Map<string, MediaSource>()
   await iterateIdbCursor(
-    transaction.objectStore('locations').index('sourceId').openCursor(),
+    transaction.objectStore('locations').openCursor(),
     (cursor) => {
       const location = cursor.value as IdbLocation
       const current = sourcesById.get(location.sourceId)
