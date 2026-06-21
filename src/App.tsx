@@ -14,6 +14,7 @@ import {
   Settings2,
   Trash2,
   Video,
+  X,
 } from 'lucide-react'
 import {
   type CSSProperties,
@@ -586,8 +587,10 @@ function App() {
   const {
     busy: importBusy,
     importProgress,
+    cancelling: cancellingImport,
     importFolder,
     importGeoFile,
+    cancelImport,
   } = useImports({
     platform,
     locale,
@@ -1189,7 +1192,18 @@ function App() {
               <div className="import-progress-strip">
                 <div className="import-progress-header">
                   <span>{importProgressLabel(importProgress, t, locale)}</span>
-                  <strong>{importProgressDetail(importProgress, t, locale)}</strong>
+                  <div className="import-progress-actions">
+                    <strong>{importProgressDetail(importProgress, t, locale)}</strong>
+                    <button
+                      type="button"
+                      className="import-cancel-button"
+                      onClick={cancelImport}
+                      disabled={cancellingImport}
+                    >
+                      <X size={13} />
+                      {t('cancelImport')}
+                    </button>
+                  </div>
                 </div>
                 <div
                   className={`progress-track ${

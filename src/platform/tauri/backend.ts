@@ -18,6 +18,7 @@ import type {
   GeoIndexBuildProgress,
   GeoIndexBuildSummary,
   ImportBackend,
+  ImportOptions,
   ImportProgress,
   ImportSummary,
   PlatformBackend,
@@ -106,20 +107,30 @@ class TauriCatalogBackend implements CatalogBackend {
 class TauriImportBackend implements ImportBackend {
   async importFolder(
     onProgress?: (progress: ImportProgress) => void,
+    options?: ImportOptions,
   ): Promise<ImportSummary> {
-    return this.importWithProgress('import_folder', onProgress)
+    return this.importWithProgress('import_folder', onProgress, options)
   }
 
   async importGeoFile(
     onProgress?: (progress: ImportProgress) => void,
+    options?: ImportOptions,
   ): Promise<ImportSummary> {
-    return this.importWithProgress('import_geo_file', onProgress)
+    return this.importWithProgress('import_geo_file', onProgress, options)
   }
 
   private async importWithProgress(
     command: string,
     onProgress?: (progress: ImportProgress) => void,
+    options?: ImportOptions,
   ): Promise<ImportSummary> {
+    if (options?.signal?.aborted) {
+      throw new DOMException('Import cancelled', 'AbortError')
+    }
+    const cancelImport = () => {
+      void invoke('cancel_import')
+    }
+    options?.signal?.addEventListener('abort', cancelImport, { once: true })
     const unlisten = await listen<ImportProgress>('import-progress', (event) => {
       onProgress?.(event.payload)
     })
@@ -127,6 +138,7 @@ class TauriImportBackend implements ImportBackend {
     try {
       return await invoke(command)
     } finally {
+      options?.signal?.removeEventListener('abort', cancelImport)
       unlisten()
     }
   }

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, Window};
@@ -25,6 +26,7 @@ const ASSET_BIND_COLUMNS: usize = 14;
 const LOCATION_BIND_COLUMNS: usize = 9;
 const GEO_IMPORT_PREFIX_BYTES: usize = 512 * 1024;
 const PROGRESS_HEARTBEAT_MS: u128 = 1000;
+static IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -210,6 +212,8 @@ struct ImportSummary {
     accepted_media: i64,
     skipped_files: i64,
     errors: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cancelled: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2347,6 +2351,23 @@ fn emit_progress(window: &Window, progress: ImportProgress) {
     let _ = window.emit("import-progress", progress);
 }
 
+fn reset_import_cancel() {
+    IMPORT_CANCELLED.store(false, Ordering::SeqCst);
+}
+
+fn request_import_cancel() {
+    IMPORT_CANCELLED.store(true, Ordering::SeqCst);
+}
+
+fn import_cancelled() -> bool {
+    IMPORT_CANCELLED.load(Ordering::SeqCst)
+}
+
+#[tauri::command]
+fn cancel_import() {
+    request_import_cancel();
+}
+
 fn import_progress(
     phase: &str,
     source_label: &str,
@@ -2443,7 +2464,7 @@ fn import_google_takeout_streaming(
     total_bytes: i64,
     conn: &mut Connection,
     window: &Window,
-) -> AppResult<(i64, i64)> {
+) -> AppResult<(i64, i64, bool)> {
     let source_label = source.label.clone();
     let mut file = BufReader::new(File::open(path).map_err(|error| error.to_string())?);
     let mut parser = GoogleTakeoutLocationStreamParser::new();
@@ -2452,8 +2473,13 @@ fn import_google_takeout_streaming(
     let mut accepted_media = 0_i64;
     let mut scanned_bytes = 0_i64;
     let mut last_progress = Instant::now() - std::time::Duration::from_millis(1000);
+    let mut cancelled = false;
 
     loop {
+        if import_cancelled() {
+            cancelled = true;
+            break;
+        }
         let read = file
             .read(&mut read_buffer)
             .map_err(|error| error.to_string())?;
@@ -2465,6 +2491,10 @@ fn import_google_takeout_streaming(
         let points = parser.feed(&chunk)?;
 
         for point in points {
+            if import_cancelled() {
+                cancelled = true;
+                break;
+            }
             batch.push(geo_point_item_from_parsed_point(
                 source,
                 absolute_path,
@@ -2486,6 +2516,10 @@ fn import_google_takeout_streaming(
                     ),
                 );
                 flush_media_batch(conn, &mut batch)?;
+                if import_cancelled() {
+                    cancelled = true;
+                    break;
+                }
                 emit_progress(
                     window,
                     import_progress_bytes(
@@ -2500,6 +2534,9 @@ fn import_google_takeout_streaming(
                 );
             }
         }
+        if cancelled {
+            break;
+        }
 
         maybe_emit_byte_progress(
             window,
@@ -2513,7 +2550,9 @@ fn import_google_takeout_streaming(
         );
     }
 
-    parser.finish()?;
+    if !cancelled {
+        parser.finish()?;
+    }
     emit_progress(
         window,
         import_progress_bytes(
@@ -2527,7 +2566,7 @@ fn import_google_takeout_streaming(
         ),
     );
     flush_media_batch(conn, &mut batch)?;
-    Ok((accepted_media, parser.skipped_points))
+    Ok((accepted_media, parser.skipped_points, cancelled))
 }
 
 fn import_gpx_streaming(
@@ -2537,14 +2576,19 @@ fn import_gpx_streaming(
     total_bytes: i64,
     conn: &mut Connection,
     window: &Window,
-) -> AppResult<(i64, i64)> {
+) -> AppResult<(i64, i64, bool)> {
     let source_label = source.label.clone();
     let mut batch = Vec::<MediaItem>::new();
     let mut accepted_media = 0_i64;
     let mut skipped_files = 0_i64;
     let mut last_progress = Instant::now() - std::time::Duration::from_millis(1000);
+    let mut cancelled = false;
 
-    let final_skipped = stream_gpx_points(path, |event| {
+    let stream_result = stream_gpx_points(path, |event| {
+        if import_cancelled() {
+            cancelled = true;
+            return Err("Import cancelled".to_string());
+        }
         match event {
             GpxStreamEvent::Point(point, position) => {
                 batch.push(geo_point_item_from_parsed_point(
@@ -2568,6 +2612,10 @@ fn import_gpx_streaming(
                         ),
                     );
                     flush_media_batch(conn, &mut batch)?;
+                    if import_cancelled() {
+                        cancelled = true;
+                        return Err("Import cancelled".to_string());
+                    }
                     emit_progress(
                         window,
                         import_progress_bytes(
@@ -2607,9 +2655,17 @@ fn import_gpx_streaming(
             }
         }
         Ok(())
-    })?;
+    });
 
-    skipped_files = final_skipped;
+    match stream_result {
+        Ok(final_skipped) => {
+            skipped_files = final_skipped;
+        }
+        Err(error) if cancelled || error == "Import cancelled" => {
+            cancelled = true;
+        }
+        Err(error) => return Err(error),
+    }
     emit_progress(
         window,
         import_progress_bytes(
@@ -2623,7 +2679,7 @@ fn import_gpx_streaming(
         ),
     );
     flush_media_batch(conn, &mut batch)?;
-    Ok((accepted_media, skipped_files))
+    Ok((accepted_media, skipped_files, cancelled))
 }
 
 #[tauri::command]
@@ -2631,12 +2687,18 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
     let Some(root) = rfd::FileDialog::new().pick_folder() else {
         return Err("Import cancelled".to_string());
     };
+    reset_import_cancel();
     let root = root.canonicalize().unwrap_or(root);
     let source = source_from_root(&root);
     let source_label = source.label.clone();
 
     let mut total_files = 0_i64;
+    let mut cancelled = false;
     for entry in WalkDir::new(&root).follow_links(false).into_iter() {
+        if import_cancelled() {
+            cancelled = true;
+            break;
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(_) => continue,
@@ -2674,76 +2736,86 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
         ),
     );
 
-    for entry in WalkDir::new(&root).follow_links(false).into_iter() {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                errors.push(error.to_string());
+    if !cancelled {
+        for entry in WalkDir::new(&root).follow_links(false).into_iter() {
+            if import_cancelled() {
+                cancelled = true;
+                break;
+            }
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    errors.push(error.to_string());
+                    continue;
+                }
+            };
+            if !entry.file_type().is_file() {
                 continue;
             }
-        };
-        if !entry.file_type().is_file() {
-            continue;
-        }
 
-        scanned_files += 1;
-        let path = entry.path().to_path_buf();
-        let current_path = relative_path(&root, &path);
+            scanned_files += 1;
+            let path = entry.path().to_path_buf();
+            let current_path = relative_path(&root, &path);
 
-        match media_from_path(&app, &source, &root, &path) {
-            Ok(Some(item)) => {
-                batch.push(item);
-                accepted_media += 1;
-                if batch.len() >= IMPORT_BATCH_SIZE {
-                    emit_progress(
-                        &window,
-                        import_progress(
-                            "scanning",
-                            &source_label,
-                            scanned_files,
-                            total_files,
-                            accepted_media,
-                            skipped_files,
-                            Some(current_path.clone()),
-                        ),
-                    );
-                    flush_media_batch(&mut conn, &mut batch)?;
-                    emit_progress(
-                        &window,
-                        import_progress(
-                            "scanning",
-                            &source_label,
-                            scanned_files,
-                            total_files,
-                            accepted_media,
-                            skipped_files,
-                            Some(current_path.clone()),
-                        ),
-                    );
+            match media_from_path(&app, &source, &root, &path) {
+                Ok(Some(item)) => {
+                    batch.push(item);
+                    accepted_media += 1;
+                    if batch.len() >= IMPORT_BATCH_SIZE {
+                        emit_progress(
+                            &window,
+                            import_progress(
+                                "scanning",
+                                &source_label,
+                                scanned_files,
+                                total_files,
+                                accepted_media,
+                                skipped_files,
+                                Some(current_path.clone()),
+                            ),
+                        );
+                        flush_media_batch(&mut conn, &mut batch)?;
+                        if import_cancelled() {
+                            cancelled = true;
+                            break;
+                        }
+                        emit_progress(
+                            &window,
+                            import_progress(
+                                "scanning",
+                                &source_label,
+                                scanned_files,
+                                total_files,
+                                accepted_media,
+                                skipped_files,
+                                Some(current_path.clone()),
+                            ),
+                        );
+                    }
+                }
+                Ok(None) => {
+                    skipped_files += 1;
+                }
+                Err(error) => {
+                    skipped_files += 1;
+                    errors.push(format!("{current_path}: {error}"));
                 }
             }
-            Ok(None) => {
-                skipped_files += 1;
-            }
-            Err(error) => {
-                skipped_files += 1;
-                errors.push(format!("{current_path}: {error}"));
-            }
-        }
 
-        if scanned_files % 20 == 0 {
-            emit_progress(
-                &window,
-                import_progress(
-                    "scanning",
-                    &source_label,
-                    scanned_files,
-                    total_files,
-                    accepted_media,
-                    skipped_files,
-                    Some(current_path),
-                ),
-            );
+            if scanned_files % 20 == 0 {
+                emit_progress(
+                    &window,
+                    import_progress(
+                        "scanning",
+                        &source_label,
+                        scanned_files,
+                        total_files,
+                        accepted_media,
+                        skipped_files,
+                        Some(current_path),
+                    ),
+                );
+            }
         }
     }
 
@@ -2769,6 +2841,7 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
         accepted_media,
         skipped_files,
         errors,
+        cancelled: cancelled.then_some(true),
     })
 }
 
@@ -2780,6 +2853,7 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
     else {
         return Err("Import cancelled".to_string());
     };
+    reset_import_cancel();
     let path = path.canonicalize().unwrap_or(path);
     let absolute_path = path.to_string_lossy().to_string();
     let source = source_from_file(&path);
@@ -2807,23 +2881,27 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
     let format = detect_geo_file_format_from_prefix(&path, &prefix)?;
     let mut conn = connect(&app)?;
     upsert_source_tx(&conn, &source)?;
-    let (accepted_media, skipped_files) = match format {
-        GeoFileFormat::GoogleTakeoutJson => import_google_takeout_streaming(
-            &path,
-            &source,
-            &absolute_path,
-            total_bytes,
-            &mut conn,
-            &window,
-        )?,
-        GeoFileFormat::Gpx => import_gpx_streaming(
-            &path,
-            &source,
-            &absolute_path,
-            total_bytes,
-            &mut conn,
-            &window,
-        )?,
+    let (accepted_media, skipped_files, cancelled) = if import_cancelled() {
+        (0, 0, true)
+    } else {
+        match format {
+            GeoFileFormat::GoogleTakeoutJson => import_google_takeout_streaming(
+                &path,
+                &source,
+                &absolute_path,
+                total_bytes,
+                &mut conn,
+                &window,
+            )?,
+            GeoFileFormat::Gpx => import_gpx_streaming(
+                &path,
+                &source,
+                &absolute_path,
+                total_bytes,
+                &mut conn,
+                &window,
+            )?,
+        }
     };
 
     Ok(ImportSummary {
@@ -2834,6 +2912,7 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
         accepted_media,
         skipped_files,
         errors: Vec::new(),
+        cancelled: cancelled.then_some(true),
     })
 }
 
@@ -2872,6 +2951,7 @@ pub fn run() {
             remove_sources,
             count_media,
             clear_catalog,
+            cancel_import,
             import_folder,
             import_geo_file,
             resolve_thumbnail_path,

@@ -139,8 +139,26 @@ class WebImportBackend implements ImportBackend {
     this.catalog = catalog
   }
 
+  private cancelledSummary(sourceRecord: {
+    id: string
+    label: string
+    addedAt: number
+  }): ImportSummary {
+    return {
+      source: sourceFromRecord(sourceRecord),
+      sourceLabel: sourceRecord.label,
+      scannedFiles: 0,
+      totalFiles: 0,
+      acceptedMedia: 0,
+      skippedFiles: 0,
+      errors: [],
+      cancelled: true,
+    }
+  }
+
   async importFolder(
     onProgress?: (progress: ImportProgress) => void,
+    options: ImportOptions = {},
   ): Promise<ImportSummary> {
     if (!window.showDirectoryPicker) {
       throw new Error('This browser does not expose the File System Access API.')
@@ -148,6 +166,9 @@ class WebImportBackend implements ImportBackend {
 
     const handle = await window.showDirectoryPicker({ mode: 'read' })
     const sourceRecord = await sourceRecordForHandle(handle)
+    if (options.signal?.aborted) {
+      return this.cancelledSummary(sourceRecord)
+    }
 
     await putDirectoryHandle({
       id: sourceRecord.id,
@@ -166,6 +187,7 @@ class WebImportBackend implements ImportBackend {
         handle,
       },
       onProgress,
+      options.signal,
     )
   }
 
@@ -196,6 +218,9 @@ class WebImportBackend implements ImportBackend {
 
     const sourceRecord = await sourceRecordForGeoFileHandle(handle)
     const file = await handle.getFile()
+    if (options.signal?.aborted) {
+      return this.cancelledSummary(sourceRecord)
+    }
 
     await putGeoFileHandle({
       id: sourceRecord.id,
@@ -215,6 +240,7 @@ class WebImportBackend implements ImportBackend {
         traceId: options.traceId,
       },
       onProgress,
+      options.signal,
     )
   }
 

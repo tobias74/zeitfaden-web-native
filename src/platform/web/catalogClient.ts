@@ -40,6 +40,7 @@ type PendingRequest<T> = {
   resolve: (value: T) => void
   reject: (reason?: unknown) => void
   onProgress?: (progress: unknown) => void
+  cleanup?: () => void
 }
 
 export class CatalogClient {
@@ -67,19 +68,21 @@ export class CatalogClient {
   importFolder(
     payload: ImportFolderPayload,
     onProgress?: (progress: ImportProgress) => void,
+    signal?: AbortSignal,
   ): Promise<ImportSummary> {
     return this.request('importFolder', payload, (progress) => {
       onProgress?.(progress as ImportProgress)
-    })
+    }, signal)
   }
 
   importGeoFile(
     payload: ImportGeoFilePayload,
     onProgress?: (progress: ImportProgress) => void,
+    signal?: AbortSignal,
   ): Promise<ImportSummary> {
     return this.request('importGeoFile', payload, (progress) => {
       onProgress?.(progress as ImportProgress)
-    })
+    }, signal)
   }
 
   listMedia(query: CatalogQuery): Promise<MediaItem[]> {
@@ -161,6 +164,7 @@ export class CatalogClient {
       }
 
       this.pending.delete(response.id)
+      pending.cleanup?.()
       if ('ok' in response && response.ok) {
         pending.resolve(response.result)
       } else if ('ok' in response) {
@@ -186,6 +190,7 @@ export class CatalogClient {
 
   private rejectAll(error: Error): void {
     for (const pending of this.pending.values()) {
+      pending.cleanup?.()
       pending.reject(error)
     }
     this.pending.clear()
@@ -195,24 +200,38 @@ export class CatalogClient {
     type: string,
     payload?: unknown,
     onProgress?: (progress: unknown) => void,
+    signal?: AbortSignal,
   ): Promise<T> {
     const id = this.nextId++
 
     return new Promise<T>((resolve, reject) => {
+      const cancelRequest = () => {
+        this.worker?.postMessage({ id, type: 'cancel' })
+      }
+      const cleanup = signal
+        ? () => signal.removeEventListener('abort', cancelRequest)
+        : undefined
+      signal?.addEventListener('abort', cancelRequest, { once: true })
       this.pending.set(id, {
         resolve: resolve as (value: unknown) => void,
         reject,
         onProgress,
+        cleanup,
       })
       try {
-        this.ensureWorker().postMessage({
+        const worker = this.ensureWorker()
+        worker.postMessage({
           id,
           type,
           payload,
           storageMode: this.storageMode,
         })
+        if (signal?.aborted) {
+          worker.postMessage({ id, type: 'cancel' })
+        }
       } catch (error) {
         this.pending.delete(id)
+        cleanup?.()
         reject(error)
       }
     })

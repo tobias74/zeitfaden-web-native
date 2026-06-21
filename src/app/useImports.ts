@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import type {
   ImportProgress,
   ImportSummary,
@@ -15,6 +15,12 @@ export type UseImportsOptions = {
   onImported(summary: ImportSummary): void
 }
 
+function isAbortError(caught: unknown): boolean {
+  return caught instanceof DOMException
+    ? caught.name === 'AbortError'
+    : caught instanceof Error && caught.name === 'AbortError'
+}
+
 export function useImports({
   platform,
   locale,
@@ -25,15 +31,25 @@ export function useImports({
 }: UseImportsOptions): {
   busy: boolean
   importProgress: ImportProgress | undefined
+  cancelling: boolean
   importFolder(): Promise<void>
   importGeoFile(): Promise<void>
+  cancelImport(): void
 } {
   const [busy, setBusy] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
   const [importProgress, setImportProgress] = useState<ImportProgress>()
+  const activeImportControllerRef = useRef<AbortController | undefined>(
+    undefined,
+  )
 
   const finishImport = useCallback(
     (summary: ImportSummary) => {
       onImported(summary)
+      if (summary.cancelled) {
+        recordActivity('activityImportStopped')
+        return
+      }
       recordActivity('activityImportedMediaFilesFrom', {
         count: summary.acceptedMedia.toLocaleString(locale),
         sourceLabel: summary.sourceLabel,
@@ -49,20 +65,36 @@ export function useImports({
     [locale, onError, onImported, recordActivity, t],
   )
 
+  const cancelImport = useCallback(() => {
+    if (!activeImportControllerRef.current) return
+    setCancelling(true)
+    activeImportControllerRef.current.abort()
+  }, [])
+
   const importFolder = useCallback(async () => {
     onError('')
     setImportProgress(undefined)
     setBusy(true)
+    setCancelling(false)
+    const controller = new AbortController()
+    activeImportControllerRef.current = controller
     try {
-      const summary = await platform.importer.importFolder((progress) => {
-        setImportProgress(progress)
-      })
+      const summary = await platform.importer.importFolder(
+        (progress) => {
+          setImportProgress(progress)
+        },
+        { signal: controller.signal },
+      )
       finishImport(summary)
     } catch (caught) {
-      onError(caught instanceof Error ? caught.message : String(caught))
+      if (!isAbortError(caught)) {
+        onError(caught instanceof Error ? caught.message : String(caught))
+      }
       recordActivity('activityImportStopped')
     } finally {
+      activeImportControllerRef.current = undefined
       setImportProgress(undefined)
+      setCancelling(false)
       setBusy(false)
     }
   }, [finishImport, onError, platform, recordActivity])
@@ -71,6 +103,9 @@ export function useImports({
     onError('')
     setImportProgress(undefined)
     setBusy(true)
+    setCancelling(false)
+    const controller = new AbortController()
+    activeImportControllerRef.current = controller
     const startedAt = performance.now()
     const traceId = `app-${Date.now().toString(36)}-${crypto.randomUUID()}`
     console.log('[import-trace]', {
@@ -83,7 +118,7 @@ export function useImports({
         (progress) => {
           setImportProgress(progress)
         },
-        { traceId },
+        { traceId, signal: controller.signal },
       )
       console.log('[import-trace]', {
         traceId,
@@ -101,13 +136,24 @@ export function useImports({
         elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
       })
     } catch (caught) {
-      onError(caught instanceof Error ? caught.message : String(caught))
+      if (!isAbortError(caught)) {
+        onError(caught instanceof Error ? caught.message : String(caught))
+      }
       recordActivity('activityImportStopped')
     } finally {
+      activeImportControllerRef.current = undefined
       setImportProgress(undefined)
+      setCancelling(false)
       setBusy(false)
     }
   }, [finishImport, onError, platform, recordActivity])
 
-  return { busy, importProgress, importFolder, importGeoFile }
+  return {
+    busy,
+    importProgress,
+    cancelling,
+    importFolder,
+    importGeoFile,
+    cancelImport,
+  }
 }

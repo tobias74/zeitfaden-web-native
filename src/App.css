@@ -566,6 +566,36 @@
   font-size: 12px;
 }
 
+.import-progress-actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.import-cancel-button {
+  height: 22px;
+  min-height: 0;
+  padding: 0 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #c5d0cb;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #55625d;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.import-cancel-button:hover:not(:disabled),
+.import-cancel-button:focus-visible {
+  border-color: #6f7d77;
+  color: #17221e;
+}
+
 .progress-track {
   height: 4px;
   overflow: hidden;

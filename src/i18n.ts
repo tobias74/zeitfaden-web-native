@@ -54,6 +54,7 @@ const en = {
   image: 'image',
   images: 'Images',
   imprint: 'Imprint',
+  cancelImport: 'Cancel',
   importFolder: 'Import folder',
   importGeoFile: 'Import geo file',
   importItemsAcceptedSkipped: '{accepted} accepted · {skipped} skipped',
@@ -163,6 +164,7 @@ const de: Record<TranslationKey, string> = {
   image: 'Bild',
   images: 'Bilder',
   imprint: 'Impressum',
+  cancelImport: 'Abbrechen',
   importFolder: 'Ordner importieren',
   importGeoFile: 'Geo importieren',
   importItemsAcceptedSkipped:

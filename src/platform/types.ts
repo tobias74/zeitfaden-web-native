@@ -39,10 +39,12 @@ export type ImportSummary = {
   acceptedMedia: number
   skippedFiles: number
   errors: string[]
+  cancelled?: boolean
 }
 
 export type ImportOptions = {
   traceId?: string
+  signal?: AbortSignal
 }
 
 export type GeoIndexBuildProgress = {
@@ -95,7 +97,10 @@ export interface CatalogBackend {
 }
 
 export interface ImportBackend {
-  importFolder(onProgress?: (progress: ImportProgress) => void): Promise<ImportSummary>
+  importFolder(
+    onProgress?: (progress: ImportProgress) => void,
+    options?: ImportOptions,
+  ): Promise<ImportSummary>
   importGeoFile(
     onProgress?: (progress: ImportProgress) => void,
     options?: ImportOptions,

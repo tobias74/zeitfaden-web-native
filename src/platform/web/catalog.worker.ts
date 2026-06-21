@@ -200,6 +200,9 @@ const ctx = self as unknown as {
     listener: (event: MessageEvent<WorkerRequest>) => void,
   ) => void
 }
+const cancelledRequests = new Set<number>()
+
+type CancellationSignal = () => boolean
 
 type ImportFolderPayload = {
   source: MediaSource
@@ -1463,6 +1466,7 @@ async function importFolderIntoCatalog(
   payload: ImportFolderPayload,
   store: CatalogStore,
   postProgress: (progress: ImportProgress) => void,
+  isCancelled: CancellationSignal,
 ): Promise<ImportSummary> {
   const { source, duplicateSourceIds, handle } = payload
   const sourceLabel = source.label
@@ -1472,6 +1476,18 @@ async function importFolderIntoCatalog(
   let scannedFiles = 0
   let acceptedMedia = 0
   let skippedFiles = 0
+  let cancelled = false
+
+  const summary = (): ImportSummary => ({
+    source,
+    sourceLabel,
+    scannedFiles,
+    totalFiles,
+    acceptedMedia,
+    skippedFiles,
+    errors,
+    cancelled,
+  })
 
   const flushBatch = async (phase: ImportProgress['phase']) => {
     if (batch.length === 0) return
@@ -1497,8 +1513,13 @@ async function importFolderIntoCatalog(
 
   async function countFiles(directoryHandle: FileSystemDirectoryHandle): Promise<void> {
     for await (const [, entry] of directoryHandle.entries()) {
+      if (isCancelled()) {
+        cancelled = true
+        return
+      }
       if (entry.kind === 'directory') {
         await countFiles(entry as FileSystemDirectoryHandle)
+        if (cancelled) return
         continue
       }
 
@@ -1521,10 +1542,15 @@ async function importFolderIntoCatalog(
     prefix: string,
   ): Promise<void> {
     for await (const [name, entry] of directoryHandle.entries()) {
+      if (isCancelled()) {
+        cancelled = true
+        return
+      }
       const relativePath = prefix ? `${prefix}/${name}` : name
 
       if (entry.kind === 'directory') {
         await walk(entry as FileSystemDirectoryHandle, relativePath)
+        if (cancelled) return
         continue
       }
 
@@ -1578,7 +1604,12 @@ async function importFolderIntoCatalog(
     skippedFiles: 0,
   })
   await countFiles(handle)
+  if (cancelled) return summary()
   await store.prepareImportSource(source, duplicateSourceIds)
+  if (isCancelled()) {
+    cancelled = true
+    return summary()
+  }
 
   postProgress({
     phase: 'scanning',
@@ -1596,22 +1627,15 @@ async function importFolderIntoCatalog(
     { sourceLabel },
   )
 
-  return {
-    source,
-    sourceLabel,
-    scannedFiles,
-    totalFiles,
-    acceptedMedia,
-    skippedFiles,
-    errors,
-  }
+  return summary()
 }
 
 async function readFileTextWithProgress(
   file: File,
   sourceLabel: string,
   postProgress: (progress: ImportProgress) => void,
-): Promise<string> {
+  isCancelled: CancellationSignal,
+): Promise<{ text: string; cancelled: boolean }> {
   const reader = file.stream().getReader()
   const decoder = new TextDecoder()
   const chunks: string[] = []
@@ -1619,6 +1643,10 @@ async function readFileTextWithProgress(
   let lastProgressAt = 0
 
   while (true) {
+    if (isCancelled()) {
+      await reader.cancel()
+      return { text: '', cancelled: true }
+    }
     const { done, value } = await reader.read()
     if (done) break
 
@@ -1643,7 +1671,7 @@ async function readFileTextWithProgress(
 
   const finalChunk = decoder.decode()
   if (finalChunk) chunks.push(finalChunk)
-  return chunks.join('')
+  return { text: chunks.join(''), cancelled: false }
 }
 
 function jsonLikePrefix(prefix: string): boolean {
@@ -1863,11 +1891,22 @@ async function importGpxIntoCatalog(
   source: MediaSource,
   store: CatalogStore,
   postProgress: (progress: ImportProgress) => void,
-): Promise<{ acceptedMedia: number; skippedFiles: number }> {
+  isCancelled: CancellationSignal,
+): Promise<{ acceptedMedia: number; skippedFiles: number; cancelled: boolean }> {
   const sourceLabel = source.label
-  const text = await readFileTextWithProgress(file, sourceLabel, postProgress)
+  const readResult = await readFileTextWithProgress(
+    file,
+    sourceLabel,
+    postProgress,
+    isCancelled,
+  )
+  if (readResult.cancelled) {
+    return { acceptedMedia: 0, skippedFiles: 0, cancelled: true }
+  }
+  const text = readResult.text
   const parsed = parseGeoFilePoints(file.name || sourceLabel, text)
   let acceptedMedia = 0
+  let cancelled = false
   const batch: MediaItem[] = []
 
   const flushBatch = async (phase: ImportProgress['phase']) => {
@@ -1897,6 +1936,10 @@ async function importGpxIntoCatalog(
       offset < parsed.points.length;
       offset += GEO_POINT_ITEM_BUILD_CHUNK_SIZE
     ) {
+      if (isCancelled()) {
+        cancelled = true
+        break
+      }
       const itemChunk = geoPointItemsFromParsedPoints(
         source.id,
         sourceLabel,
@@ -1909,8 +1952,13 @@ async function importGpxIntoCatalog(
         batch.push(item)
         if (batch.length >= store.geoImportWriteBatchSize) {
           await flushBatch('storing')
+          if (isCancelled()) {
+            cancelled = true
+            break
+          }
         }
       }
+      if (cancelled) break
 
       postProgress({
         phase: 'scanning',
@@ -1929,7 +1977,7 @@ async function importGpxIntoCatalog(
     await flushBatch('storing')
   })
 
-  return { acceptedMedia, skippedFiles: parsed.skippedPoints }
+  return { acceptedMedia, skippedFiles: parsed.skippedPoints, cancelled }
 }
 
 async function importGoogleTakeoutIntoCatalog(
@@ -1938,7 +1986,8 @@ async function importGoogleTakeoutIntoCatalog(
   store: CatalogStore,
   postProgress: (progress: ImportProgress) => void,
   traceId: string,
-): Promise<{ acceptedMedia: number; skippedFiles: number }> {
+  isCancelled: CancellationSignal,
+): Promise<{ acceptedMedia: number; skippedFiles: number; cancelled: boolean }> {
   const sourceLabel = source.label
   const timing = createGeoImportTiming(sourceLabel, traceId)
   const parser = new GoogleTakeoutLocationStreamParser()
@@ -1950,6 +1999,7 @@ async function importGoogleTakeoutIntoCatalog(
   let acceptedMedia = 0
   let skippedFiles = 0
   let lastProgressAt = 0
+  let cancelled = false
 
   logGeoImportTiming(timing, 'takeout import start', {
     sizeBytes: file.size,
@@ -2008,6 +2058,9 @@ async function importGoogleTakeoutIntoCatalog(
     }
     emitProgress(phase)
     await yieldToEventLoop()
+    if (isCancelled()) {
+      cancelled = true
+    }
   }
 
   const consumePoints = async () => {
@@ -2018,6 +2071,10 @@ async function importGoogleTakeoutIntoCatalog(
       offset < points.length;
       offset += GEO_POINT_ITEM_BUILD_CHUNK_SIZE
     ) {
+      if (isCancelled()) {
+        cancelled = true
+        break
+      }
       const pointChunk = points.slice(
         offset,
         offset + GEO_POINT_ITEM_BUILD_CHUNK_SIZE,
@@ -2038,9 +2095,11 @@ async function importGoogleTakeoutIntoCatalog(
         if (batch.length >= store.geoImportWriteBatchSize) {
           timing.batchQueueMs += performance.now() - batchQueueStartedAt
           await flushBatch('scanning')
+          if (cancelled) break
           batchQueueStartedAt = performance.now()
         }
       }
+      if (cancelled) break
       timing.batchQueueMs += performance.now() - batchQueueStartedAt
 
       maybeEmitProgress()
@@ -2055,6 +2114,10 @@ async function importGoogleTakeoutIntoCatalog(
   const consumeText = async (text: string) => {
     let chunk = text
     while (true) {
+      if (isCancelled()) {
+        cancelled = true
+        break
+      }
       const feedStartedAt = performance.now()
       const result = parser.feed(chunk, {
         maxDurationMs: GEO_IMPORT_PARSE_SLICE_MS,
@@ -2074,7 +2137,7 @@ async function importGoogleTakeoutIntoCatalog(
         resultPoints: result.points.length,
       })
 
-      if (!result.paused) break
+      if (cancelled || !result.paused) break
       await yieldToEventLoop()
     }
   }
@@ -2084,6 +2147,11 @@ async function importGoogleTakeoutIntoCatalog(
   await store.withImportTransaction(
     async () => {
       while (true) {
+        if (isCancelled()) {
+          cancelled = true
+          await reader.cancel()
+          break
+        }
         const readStartedAt = performance.now()
         const { done, value } = await reader.read()
         timing.readMs += performance.now() - readStartedAt
@@ -2095,19 +2163,22 @@ async function importGoogleTakeoutIntoCatalog(
         const text = decoder.decode(value, { stream: true })
         timing.decodeMs += performance.now() - decodeStartedAt
         await consumeText(text)
+        if (cancelled) break
       }
 
-      const finalDecodeStartedAt = performance.now()
-      const finalChunk = decoder.decode()
-      timing.decodeMs += performance.now() - finalDecodeStartedAt
-      if (finalChunk) {
-        await consumeText(finalChunk)
-      }
+      if (!cancelled) {
+        const finalDecodeStartedAt = performance.now()
+        const finalChunk = decoder.decode()
+        timing.decodeMs += performance.now() - finalDecodeStartedAt
+        if (finalChunk) {
+          await consumeText(finalChunk)
+        }
 
-      const final = parser.finish()
-      skippedFiles = final.skippedPoints
-      timing.skippedPoints = final.skippedPoints
-      await consumePoints()
+        const final = parser.finish()
+        skippedFiles = final.skippedPoints
+        timing.skippedPoints = final.skippedPoints
+        await consumePoints()
+      }
       await flushBatch('storing')
     },
     { traceId: timing.traceId, sourceLabel },
@@ -2116,20 +2187,33 @@ async function importGoogleTakeoutIntoCatalog(
   logGeoImportTiming(timing, 'takeout import complete', {
     acceptedMedia,
     skippedFiles,
+    cancelled,
   })
 
-  return { acceptedMedia, skippedFiles }
+  return { acceptedMedia, skippedFiles, cancelled }
 }
 
 async function importGeoFileIntoCatalog(
   payload: ImportGeoFilePayload,
   store: CatalogStore,
   postProgress: (progress: ImportProgress) => void,
+  isCancelled: CancellationSignal,
 ): Promise<ImportSummary> {
   const { source, duplicateSourceIds, file } = payload
   const sourceLabel = source.label
   const startedAt = performance.now()
   const traceId = payload.traceId ?? createImportTraceId(sourceLabel)
+
+  const cancelledSummary = (): ImportSummary => ({
+    source,
+    sourceLabel,
+    scannedFiles: 0,
+    totalFiles: 1,
+    acceptedMedia: 0,
+    skippedFiles: 0,
+    errors: [],
+    cancelled: true,
+  })
 
   logImportTrace(traceId, 'geo import envelope start', {
     sourceLabel,
@@ -2150,6 +2234,8 @@ async function importGeoFileIntoCatalog(
     totalBytes: file.size,
   })
 
+  if (isCancelled()) return cancelledSummary()
+
   const prepareStartedAt = performance.now()
   await store.prepareImportSource(source, duplicateSourceIds)
   logImportTrace(traceId, 'source prepared', {
@@ -2157,6 +2243,7 @@ async function importGeoFileIntoCatalog(
     phaseMs: roundedMs(performance.now() - prepareStartedAt),
     elapsedMs: roundedMs(performance.now() - startedAt),
   })
+  if (isCancelled()) return cancelledSummary()
 
   const prefixStartedAt = performance.now()
   const prefix = await file.slice(0, GEO_IMPORT_PREFIX_BYTES).text()
@@ -2168,6 +2255,7 @@ async function importGeoFileIntoCatalog(
     jsonLike: jsonLikePrefix(prefix),
     elapsedMs: roundedMs(performance.now() - startedAt),
   })
+  if (isCancelled()) return cancelledSummary()
   const result = jsonLikePrefix(prefix)
     ? await (async () => {
         throwKnownUnsupportedJsonPrefix(prefix)
@@ -2182,6 +2270,7 @@ async function importGeoFileIntoCatalog(
           store,
           postProgress,
           traceId,
+          isCancelled,
         )
       })()
     : await (async () => {
@@ -2190,13 +2279,14 @@ async function importGeoFileIntoCatalog(
           format: 'gpx',
           elapsedMs: roundedMs(performance.now() - startedAt),
         })
-        return importGpxIntoCatalog(file, source, store, postProgress)
+        return importGpxIntoCatalog(file, source, store, postProgress, isCancelled)
       })()
 
   logImportTrace(traceId, 'geo import envelope complete', {
     sourceLabel,
     acceptedMedia: result.acceptedMedia,
     skippedFiles: result.skippedFiles,
+    cancelled: result.cancelled,
     elapsedMs: roundedMs(performance.now() - startedAt),
   })
 
@@ -2208,6 +2298,7 @@ async function importGeoFileIntoCatalog(
     acceptedMedia: result.acceptedMedia,
     skippedFiles: result.skippedFiles,
     errors: [],
+    cancelled: result.cancelled,
   }
 }
 
@@ -2773,12 +2864,14 @@ async function handleRequest(
         request.payload as ImportFolderPayload,
         store,
         postProgress as (progress: ImportProgress) => void,
+        () => cancelledRequests.has(request.id),
       )
     case 'importGeoFile':
       return importGeoFileIntoCatalog(
         request.payload as ImportGeoFilePayload,
         store,
         postProgress as (progress: ImportProgress) => void,
+        () => cancelledRequests.has(request.id),
       )
     case 'listMedia':
       return store.listMedia(request.payload as CatalogQuery)
@@ -2812,6 +2905,11 @@ async function handleRequest(
 }
 
 ctx.addEventListener('message', async (event: MessageEvent<WorkerRequest>) => {
+  if (event.data.type === 'cancel') {
+    cancelledRequests.add(event.data.id)
+    return
+  }
+
   try {
     const postProgress = (progress: GeoIndexBuildProgress | ImportProgress) => {
       ctx.postMessage({ id: event.data.id, type: 'progress', progress })
@@ -2824,5 +2922,7 @@ ctx.addEventListener('message', async (event: MessageEvent<WorkerRequest>) => {
       ok: false,
       error: error instanceof Error ? error.message : String(error),
     })
+  } finally {
+    cancelledRequests.delete(event.data.id)
   }
 })
