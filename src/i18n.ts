@@ -48,6 +48,7 @@ const en = {
   imprint: 'Imprint',
   importFolder: 'Import folder',
   importGeoFile: 'Import geo file',
+  importItemsAcceptedSkipped: '{accepted} accepted · {skipped} skipped',
   importProgress: 'Import progress',
   kind: 'Kind',
   language: 'Language',
@@ -143,6 +144,8 @@ const de: Record<TranslationKey, string> = {
   imprint: 'Impressum',
   importFolder: 'Ordner importieren',
   importGeoFile: 'Geo importieren',
+  importItemsAcceptedSkipped:
+    '{accepted} akzeptiert · {skipped} übersprungen',
   importProgress: 'Importfortschritt',
   kind: 'Typ',
   language: 'Sprache',

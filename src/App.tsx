@@ -178,11 +178,49 @@ function statsNumber(value: number | undefined, locale: string): string {
   return typeof value === 'number' ? value.toLocaleString(locale) : '0'
 }
 
+function formatBytes(value: number, locale: string): string {
+  const units = ['B', 'KB', 'MB', 'GB'] as const
+  let size = value
+  let unitIndex = 0
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+
+  return `${new Intl.NumberFormat(locale, {
+    maximumFractionDigits: unitIndex === 0 ? 0 : 1,
+  }).format(size)} ${units[unitIndex]}`
+}
+
+function importProgressCurrent(progress: ImportProgress): number | undefined {
+  if (
+    typeof progress.scannedBytes === 'number' &&
+    typeof progress.totalBytes === 'number'
+  ) {
+    return progress.scannedBytes
+  }
+  if (progress.phase === 'counting') return undefined
+  return progress.scannedFiles
+}
+
+function importProgressMax(progress: ImportProgress): number | undefined {
+  if (
+    typeof progress.scannedBytes === 'number' &&
+    typeof progress.totalBytes === 'number'
+  ) {
+    return progress.totalBytes
+  }
+  return progress.totalFiles || undefined
+}
+
 function importProgressPercent(progress: ImportProgress): number | undefined {
-  if (progress.phase === 'counting' || progress.totalFiles === 0) {
+  const current = importProgressCurrent(progress)
+  const max = importProgressMax(progress)
+  if (current === undefined || max === undefined || max === 0) {
     return undefined
   }
-  return Math.min(100, (progress.scannedFiles / progress.totalFiles) * 100)
+  return Math.min(100, (current / max) * 100)
 }
 
 function importProgressLabel(
@@ -210,6 +248,19 @@ function importProgressDetail(
     return t('filesFound', {
       count: progress.totalFiles.toLocaleString(locale),
     })
+  }
+
+  if (
+    typeof progress.scannedBytes === 'number' &&
+    typeof progress.totalBytes === 'number'
+  ) {
+    return `${formatBytes(progress.scannedBytes, locale)} / ${formatBytes(
+      progress.totalBytes,
+      locale,
+    )} · ${t('importItemsAcceptedSkipped', {
+      accepted: progress.acceptedMedia.toLocaleString(locale),
+      skipped: progress.skippedFiles.toLocaleString(locale),
+    })}`
   }
 
   return `${progress.scannedFiles.toLocaleString(locale)} / ${progress.totalFiles.toLocaleString(locale)}`
@@ -1315,13 +1366,9 @@ function App() {
                   }`}
                   role="progressbar"
                   aria-label={t('importProgress')}
-                  aria-valuemax={importProgress.totalFiles || undefined}
+                  aria-valuemax={importProgressMax(importProgress)}
                   aria-valuemin={0}
-                  aria-valuenow={
-                    importProgress.phase === 'counting'
-                      ? undefined
-                      : importProgress.scannedFiles
-                  }
+                  aria-valuenow={importProgressCurrent(importProgress)}
                 >
                   <div
                     className="progress-fill"

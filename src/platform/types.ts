@@ -23,6 +23,8 @@ export type ImportProgress = {
   acceptedMedia: number
   skippedFiles: number
   currentPath?: string
+  scannedBytes?: number
+  totalBytes?: number
 }
 
 export type ImportSummary = {

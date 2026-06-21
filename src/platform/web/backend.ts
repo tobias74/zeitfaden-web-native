@@ -44,6 +44,7 @@ type ImportGeoFileRecord = {
 const GEO_IMPORT_LOG_PREFIX = '[geo-import]'
 const GEO_IMPORT_BATCH_SIZE = 1000
 const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
+const GEO_IMPORT_UI_PROGRESS_BYTES = 10 * 1024 * 1024
 const GEO_IMPORT_READ_PROGRESS_BYTES = 100 * 1024 * 1024
 
 function textReadSummary(text: string): Record<string, unknown> {
@@ -350,6 +351,7 @@ class WebImportBackend implements ImportBackend {
     let bytesRead = 0
     let acceptedMedia = 0
     let skippedFiles = 0
+    let nextUiProgressAt = GEO_IMPORT_UI_PROGRESS_BYTES
     let nextProgressAt = GEO_IMPORT_READ_PROGRESS_BYTES
 
     const emitScanProgress = (scannedFiles: number) => {
@@ -361,6 +363,8 @@ class WebImportBackend implements ImportBackend {
         acceptedMedia: acceptedMedia + pendingPoints.length,
         skippedFiles,
         currentPath: sourceLabel,
+        scannedBytes: bytesRead,
+        totalBytes: file.size,
       })
     }
 
@@ -399,6 +403,13 @@ class WebImportBackend implements ImportBackend {
 
       bytesRead += value.byteLength
       await consumeText(decoder.decode(value, { stream: true }))
+
+      if (bytesRead >= nextUiProgressAt) {
+        emitScanProgress(0)
+        while (nextUiProgressAt <= bytesRead) {
+          nextUiProgressAt += GEO_IMPORT_UI_PROGRESS_BYTES
+        }
+      }
 
       if (bytesRead >= nextProgressAt) {
         console.log(GEO_IMPORT_LOG_PREFIX, {
@@ -446,6 +457,8 @@ class WebImportBackend implements ImportBackend {
       acceptedMedia,
       skippedFiles,
       currentPath: sourceLabel,
+      scannedBytes: file.size,
+      totalBytes: file.size,
     })
 
     return {
