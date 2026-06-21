@@ -75,6 +75,7 @@ export type CatalogQuery = TimeRange & {
 
 export type GeoIndexPoint = {
   mediaId: string
+  kind?: MediaKind
   lat: number
   lon: number
   capturedAt?: number
@@ -84,6 +85,9 @@ export type GeoSearchQuery = TimeRange & {
   lat: number
   lon: number
   k: number
+  offset?: number
+  kind?: KindFilter
+  geoBounds?: GeoBounds
 }
 
 export type GeoSearchResult = {

@@ -13,7 +13,21 @@ import type {
   CatalogInfo,
   GeoIndexBuildProgress,
   GeoIndexBuildSummary,
+  ImportProgress,
+  ImportSummary,
 } from '../types'
+
+type ImportFolderPayload = {
+  source: MediaSource
+  duplicateSourceIds: string[]
+  handle: FileSystemDirectoryHandle
+}
+
+type ImportGeoFilePayload = {
+  source: MediaSource
+  duplicateSourceIds: string[]
+  file: File
+}
 
 type WorkerResponse<T> =
   | { id: number; ok: true; result: T }
@@ -41,6 +55,24 @@ export class CatalogClient {
 
   upsertMedia(items: MediaItem[]): Promise<number> {
     return this.request('upsertMedia', items)
+  }
+
+  importFolder(
+    payload: ImportFolderPayload,
+    onProgress?: (progress: ImportProgress) => void,
+  ): Promise<ImportSummary> {
+    return this.request('importFolder', payload, (progress) => {
+      onProgress?.(progress as ImportProgress)
+    })
+  }
+
+  importGeoFile(
+    payload: ImportGeoFilePayload,
+    onProgress?: (progress: ImportProgress) => void,
+  ): Promise<ImportSummary> {
+    return this.request('importGeoFile', payload, (progress) => {
+      onProgress?.(progress as ImportProgress)
+    })
   }
 
   listMedia(query: CatalogQuery): Promise<MediaItem[]> {

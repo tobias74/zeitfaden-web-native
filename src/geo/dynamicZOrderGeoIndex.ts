@@ -43,6 +43,35 @@ const EARTH_RADIUS_METERS = 6_371_008.8
 const DEFAULT_RESOLUTION = 10
 const DISTANCE_TIE_EPSILON_METERS = 1e-6
 
+function matchesKind(point: GeoIndexPoint, query: GeoSearchQuery): boolean {
+  if (!query.kind || query.kind === 'all') return true
+  if (query.kind === 'media') {
+    return point.kind === 'image' || point.kind === 'video'
+  }
+  return point.kind === query.kind
+}
+
+function matchesGeoBounds(point: GeoIndexPoint, query: GeoSearchQuery): boolean {
+  if (!query.geoBounds) return true
+  return (
+    point.lat >= query.geoBounds.minLat &&
+    point.lat <= query.geoBounds.maxLat &&
+    point.lon >= query.geoBounds.minLon &&
+    point.lon <= query.geoBounds.maxLon
+  )
+}
+
+function matchesSearchQuery(
+  point: GeoIndexPoint,
+  query: GeoSearchQuery,
+): boolean {
+  return (
+    matchesTimeRange(point.capturedAt, query) &&
+    matchesKind(point, query) &&
+    matchesGeoBounds(point, query)
+  )
+}
+
 function toRadians(degrees: number): number {
   return (degrees * Math.PI) / 180
 }
@@ -186,7 +215,9 @@ export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
       prunedByTime: 0,
     }
 
+    const offset = Math.max(0, Math.trunc(query.offset ?? 0))
     const limit = Math.max(0, Math.trunc(query.k))
+    const retainedLimit = offset + limit
     if (limit <= 0 || this.cells.size === 0) {
       this.lastStats = {
         ...this.emptyStats(),
@@ -216,9 +247,11 @@ export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
     for (let index = 0; index < candidates.length; index += 1) {
       const candidate = candidates[index]
       const worst =
-        topK.length === limit ? topK[topK.length - 1].distanceMeters : Infinity
+        topK.length === retainedLimit
+          ? topK[topK.length - 1].distanceMeters
+          : Infinity
 
-      if (topK.length === limit && candidate.lowerBound > worst) {
+      if (topK.length === retainedLimit && candidate.lowerBound > worst) {
         metrics.prunedByGeo += candidates.length - index
         break
       }
@@ -231,15 +264,15 @@ export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
       )
       for (const point of points) {
         metrics.candidatesInspected += 1
-        if (!matchesTimeRange(point.capturedAt, query)) continue
+        if (!matchesSearchQuery(point, query)) continue
 
         metrics.distanceComputations += 1
         topK.push({
           mediaId: point.mediaId,
           distanceMeters: distanceToQueryMeters(point, query),
         })
-        if (topK.length >= limit) {
-          trimResultsInPlace(topK, limit)
+        if (topK.length >= retainedLimit) {
+          trimResultsInPlace(topK, retainedLimit)
         }
       }
     }
@@ -252,7 +285,7 @@ export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
       ...metrics,
     }
 
-    return sortResults(topK)
+    return sortResults(topK).slice(offset, offset + limit)
   }
 
   async stats(): Promise<GeoIndexStats> {

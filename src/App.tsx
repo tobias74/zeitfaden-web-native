@@ -181,12 +181,6 @@ function filterValueToKind(value: string): KindFilter {
     : 'all'
 }
 
-function itemMatchesKindFilter(item: MediaItem, filter: KindFilter): boolean {
-  if (filter === 'all') return true
-  if (filter === 'media') return item.kind === 'image' || item.kind === 'video'
-  return item.kind === filter
-}
-
 function statsNumber(value: number | undefined, locale: string): string {
   return typeof value === 'number' ? value.toLocaleString(locale) : '0'
 }
@@ -353,20 +347,6 @@ function formatGeo(item: MediaItem): string | undefined {
     return undefined
   }
   return `${item.latitude.toFixed(5)}, ${item.longitude.toFixed(5)}`
-}
-
-function itemWithinGeoBounds(item: MediaItem, bounds?: GeoBounds): boolean {
-  if (!bounds) return true
-  if (typeof item.latitude !== 'number' || typeof item.longitude !== 'number') {
-    return false
-  }
-
-  return (
-    item.latitude >= bounds.minLat &&
-    item.latitude <= bounds.maxLat &&
-    item.longitude >= bounds.minLon &&
-    item.longitude <= bounds.maxLon
-  )
 }
 
 function timeRangeFromInputs(startDate: string, endDate: string): TimeRange {
@@ -842,14 +822,33 @@ function App() {
       setError(undefined)
 
       try {
-        const query = {
+        const baseQuery = {
           ...timeRange,
           lat: queryPoint.lat,
           lon: queryPoint.lon,
-          k: geoPointCount,
         }
-        const results = await catalog.searchGeoIndex(selectedIndex.id, query)
-        const resultIds = results.map((result) => result.mediaId)
+        const pageQuery = {
+          ...baseQuery,
+          k: resultPageSize,
+          offset: resultOffset,
+          kind: kindFilter,
+          geoBounds,
+        }
+        const mapQuery = {
+          ...baseQuery,
+          k: MAP_POINT_LIMIT,
+          offset: 0,
+          kind: kindFilter,
+        }
+        const [pageResults, mapResults] = await Promise.all([
+          catalog.searchGeoIndex(selectedIndex.id, pageQuery),
+          catalog.searchGeoIndex(selectedIndex.id, mapQuery),
+        ])
+        const resultIds = Array.from(
+          new Set(
+            [...pageResults, ...mapResults].map((result) => result.mediaId),
+          ),
+        )
         const mediaLookupBatchSize = 500
         const itemChunks = await Promise.all(
           Array.from(
@@ -865,34 +864,31 @@ function App() {
         )
         const items = itemChunks.flat()
         const byId = new Map(items.map((item) => [item.id, item]))
-        const unboundedEnriched = results
+        const pageEnriched = pageResults
           .flatMap((result) => {
             const item = byId.get(result.mediaId)
             if (!item) return []
-            if (!itemMatchesKindFilter(item, kindFilter)) return []
             return [{ ...result, item }]
           })
-        const enriched = geoBounds
-          ? unboundedEnriched.filter((result) =>
-              itemWithinGeoBounds(result.item, geoBounds),
-            )
-          : unboundedEnriched
+        const mapEnriched = mapResults.flatMap((result) => {
+          const item = byId.get(result.mediaId)
+          if (!item) return []
+          return [{ ...result, item }]
+        })
         const [nextValidation, nextStats] = await Promise.all([
           kindFilter === 'all'
-            ? catalog.validateGeoIndex(selectedIndex.id, query)
+            ? catalog.validateGeoIndex(selectedIndex.id, pageQuery)
             : Promise.resolve(undefined),
           catalog.getGeoIndexStats(selectedIndex.id),
         ])
 
         if (cancelled) return
 
-        setSearchResults(enriched)
-        setMapItems(
-          unboundedEnriched
-            .slice(0, MAP_POINT_LIMIT)
-            .map((result) => result.item),
+        setSearchResults(pageEnriched)
+        setMapItems(mapEnriched.map((result) => result.item))
+        setMapPointLimitReached(
+          mapResults.length >= MAP_POINT_LIMIT && geoPointCount > MAP_POINT_LIMIT,
         )
-        setMapPointLimitReached(unboundedEnriched.length > MAP_POINT_LIMIT)
         setValidation(nextValidation)
         setIndexStats(nextStats)
       } catch (caught) {
@@ -917,6 +913,8 @@ function App() {
     kindFilter,
     queryPoint.lat,
     queryPoint.lon,
+    resultOffset,
+    resultPageSize,
     selectedIndex,
     timeRange,
   ])
@@ -930,7 +928,7 @@ function App() {
     ? searchResults
     : catalogPageResultItems
   const resultItems = distanceSortActive
-    ? allResultItems.slice(resultOffset, resultOffset + resultPageSize)
+    ? allResultItems
     : allResultItems
   const visibleStart = resultItems.length === 0 ? 0 : resultOffset + 1
   const visibleEnd = resultOffset + resultItems.length
@@ -938,14 +936,14 @@ function App() {
     ? t('resultRangeOf', {
         start: visibleStart.toLocaleString(locale),
         end: visibleEnd.toLocaleString(locale),
-        total: allResultItems.length.toLocaleString(locale),
+        total: geoPointCount.toLocaleString(locale),
       })
     : resultItems.length === 0
       ? '0'
       : `${visibleStart.toLocaleString(locale)}-${visibleEnd.toLocaleString(locale)}`
   const canPageBackward = resultPage > 0
   const canPageForward = distanceSortActive
-    ? visibleEnd < allResultItems.length
+    ? resultItems.length === resultPageSize && visibleEnd < geoPointCount
     : resultItems.length === resultPageSize
 
   const setFilterKind = useCallback((kind: KindFilter) => {
@@ -1015,14 +1013,46 @@ function App() {
       setViewerNavigationPending(true)
       try {
         if (distanceSortActive) {
-          if (absoluteIndex >= searchResults.length) return
+          const windowOffset =
+            Math.floor(absoluteIndex / resultPageSize) * resultPageSize
+          const localIndex = absoluteIndex - windowOffset
+          let windowItems = searchResults
+
+          if (windowOffset !== resultOffset) {
+            const results = await catalog.searchGeoIndex(selectedIndex.id, {
+              ...timeRange,
+              lat: queryPoint.lat,
+              lon: queryPoint.lon,
+              k: resultPageSize,
+              offset: windowOffset,
+              kind: kindFilter,
+              geoBounds,
+            })
+            const items = await catalog.getMediaByIds(
+              results.map((result) => result.mediaId),
+            )
+            const byId = new Map(items.map((item) => [item.id, item]))
+            windowItems = results
+              .flatMap((result) => {
+                const item = byId.get(result.mediaId)
+                if (!item) return []
+                return [{ ...result, item }]
+              })
+            setResultPage(windowOffset / resultPageSize)
+            setSearchResults(windowItems)
+          }
+
+          if (!windowItems[localIndex]) return
 
           setViewerSession({
             absoluteIndex,
-            windowOffset: 0,
-            items: searchResults,
-            canNavigateNext: absoluteIndex < searchResults.length - 1,
-            totalItems: searchResults.length,
+            windowOffset,
+            items: windowItems,
+            canNavigateNext:
+              localIndex < windowItems.length - 1 ||
+              (windowItems.length === resultPageSize &&
+                windowOffset + windowItems.length < geoPointCount),
+            totalItems: geoPointCount,
           })
           return
         }
@@ -1077,10 +1107,14 @@ function App() {
       catalogSort,
       distanceSortActive,
       geoBounds,
+      geoPointCount,
       kindFilter,
+      queryPoint.lat,
+      queryPoint.lon,
       resultOffset,
       resultPageSize,
       searchResults,
+      selectedIndex.id,
       timeRange,
     ],
   )

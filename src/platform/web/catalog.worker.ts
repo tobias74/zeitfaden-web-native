@@ -1,7 +1,17 @@
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm'
+import * as exifr from 'exifr'
 import { GeoIndexRegistry } from '../../geo/registry'
+import {
+  geoPointContentHash,
+  parseGeoFilePoints,
+  type ParsedGeoPoint,
+} from '../../lib/geoPoint'
+import { GoogleTakeoutLocationStreamParser } from '../../lib/googleTakeoutStream'
+import { detectMediaKind, pathDisplayName } from '../../lib/media'
 import type {
+  CapturedAtSource,
   CatalogQuery,
+  GeoSource,
   GeoIndexPoint,
   GeoIndexStats,
   GeoSearchQuery,
@@ -15,6 +25,8 @@ import type {
 import type {
   GeoIndexBuildProgress,
   GeoIndexBuildSummary,
+  ImportProgress,
+  ImportSummary,
 } from '../types'
 
 type WorkerRequest = {
@@ -49,12 +61,65 @@ let db: SqliteDb | undefined
 let initResult: InitResult | undefined
 const geoIndexRegistry = new GeoIndexRegistry()
 
+const IMPORT_BATCH_SIZE = 1000
+const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
+const GEO_IMPORT_PARSE_SLICE_MS = 250
+const PROGRESS_HEARTBEAT_MS = 1000
+
 const ctx = self as unknown as {
   postMessage: (message: unknown) => void
   addEventListener: (
     type: 'message',
     listener: (event: MessageEvent<WorkerRequest>) => void,
   ) => void
+}
+
+type ImportFolderPayload = {
+  source: MediaSource
+  duplicateSourceIds: string[]
+  handle: FileSystemDirectoryHandle
+}
+
+type ImportGeoFilePayload = {
+  source: MediaSource
+  duplicateSourceIds: string[]
+  file: File
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+async function stableId(...parts: string[]): Promise<string> {
+  const encoded = new TextEncoder().encode(parts.join('\n'))
+  const digest = await crypto.subtle.digest('SHA-256', encoded)
+  return bytesToHex(new Uint8Array(digest))
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function numeric(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function dateMillis(value: unknown): number | undefined {
+  if (value instanceof Date) return value.getTime()
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0)
+  })
 }
 
 async function ensureDb(): Promise<InitResult> {
@@ -537,6 +602,666 @@ async function upsertMedia(items: MediaItem[]): Promise<number> {
   return items.length
 }
 
+function upsertMediaBatch(activeDb: SqliteDb, items: MediaItem[]): number {
+  if (items.length === 0) return 0
+
+  activeDb.exec('BEGIN')
+  try {
+    upsertMediaIntoSqlite(activeDb, items)
+    activeDb.exec('COMMIT')
+  } catch (error) {
+    activeDb.exec('ROLLBACK')
+    throw error
+  }
+
+  return items.length
+}
+
+function removeSourcesFromSqlite(activeDb: SqliteDb, sourceIds: string[]): void {
+  if (sourceIds.length === 0) return
+
+  const placeholders = sourceIds.map(() => '?').join(', ')
+  activeDb.exec({
+    sql: `DELETE FROM media_items WHERE source_id IN (${placeholders})`,
+    bind: sourceIds,
+  })
+  activeDb.exec({
+    sql: `DELETE FROM media_locations WHERE source_id IN (${placeholders})`,
+    bind: sourceIds,
+  })
+  activeDb.exec(`
+    DELETE FROM media_assets
+    WHERE NOT EXISTS (
+      SELECT 1 FROM media_locations l
+      WHERE l.content_hash = media_assets.content_hash
+    )
+  `)
+  activeDb.exec({
+    sql: `DELETE FROM media_sources WHERE id IN (${placeholders})`,
+    bind: sourceIds,
+  })
+}
+
+function prepareImportSource(
+  activeDb: SqliteDb,
+  source: MediaSource,
+  duplicateSourceIds: string[],
+): void {
+  activeDb.exec('BEGIN')
+  try {
+    removeSourcesFromSqlite(activeDb, duplicateSourceIds)
+    upsertSourceIntoSqlite(activeDb, source)
+    activeDb.exec('COMMIT')
+  } catch (error) {
+    activeDb.exec('ROLLBACK')
+    throw error
+  }
+}
+
+export async function fileContentHash(file: File): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+  return bytesToHex(new Uint8Array(digest))
+}
+
+async function stableOccurrenceId(
+  sourceId: string,
+  relativePath: string,
+): Promise<string> {
+  return stableId(sourceId, relativePath)
+}
+
+async function writeThumbnail(id: string, file: File): Promise<string | undefined> {
+  if (
+    typeof createImageBitmap !== 'function' ||
+    typeof OffscreenCanvas === 'undefined'
+  ) {
+    return undefined
+  }
+
+  try {
+    const bitmap = await createImageBitmap(file)
+    const maxSide = 360
+    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height))
+    const width = Math.max(1, Math.round(bitmap.width * scale))
+    const height = Math.max(1, Math.round(bitmap.height * scale))
+    const canvas = new OffscreenCanvas(width, height)
+    const context = canvas.getContext('2d')
+    if (!context) return undefined
+
+    context.drawImage(bitmap, 0, 0, width, height)
+    bitmap.close()
+
+    const blob = await canvas.convertToBlob({
+      type: 'image/webp',
+      quality: 0.78,
+    })
+    const root = await navigator.storage.getDirectory()
+    const thumbs = await root.getDirectoryHandle('thumbs', { create: true })
+    const key = `${id}.webp`
+    const handle = await thumbs.getFileHandle(key, { create: true })
+    const writable = await handle.createWritable?.()
+    if (!writable) return undefined
+    await writable.write(blob)
+    await writable.close()
+    return `thumbs/${key}`
+  } catch {
+    return undefined
+  }
+}
+
+async function readImageMetadata(file: File): Promise<{
+  width?: number
+  height?: number
+  capturedAt?: number
+  capturedAtSource?: CapturedAtSource
+  latitude?: number
+  longitude?: number
+  geoSource?: GeoSource
+}> {
+  const metadata = await exifr
+    .parse(file, {
+      gps: true,
+      exif: true,
+      tiff: true,
+      xmp: true,
+      reviveValues: true,
+    })
+    .catch(() => undefined)
+
+  const record = isRecord(metadata) ? metadata : {}
+  const latitude = numeric(record.latitude) ?? numeric(record.GPSLatitude)
+  const longitude = numeric(record.longitude) ?? numeric(record.GPSLongitude)
+  const capturedAt =
+    dateMillis(record.DateTimeOriginal) ??
+    dateMillis(record.CreateDate) ??
+    dateMillis(record.DateCreated) ??
+    dateMillis(record.ModifyDate) ??
+    dateMillis(record.DateTime)
+
+  let width = numeric(record.ImageWidth) ?? numeric(record.ExifImageWidth)
+  let height = numeric(record.ImageHeight) ?? numeric(record.ExifImageHeight)
+
+  if ((!width || !height) && typeof createImageBitmap === 'function') {
+    try {
+      const bitmap = await createImageBitmap(file)
+      width = bitmap.width
+      height = bitmap.height
+      bitmap.close()
+    } catch {
+      // EXIF-less or browser-unsupported image formats are still valid media.
+    }
+  }
+
+  return {
+    width,
+    height,
+    capturedAt,
+    capturedAtSource: capturedAt ? 'exif' : undefined,
+    latitude,
+    longitude,
+    geoSource:
+      typeof latitude === 'number' && typeof longitude === 'number'
+        ? 'exif'
+        : undefined,
+  }
+}
+
+async function mediaFromFile(
+  sourceId: string,
+  relativePath: string,
+  fileHandle: FileSystemFileHandle,
+): Promise<MediaItem | undefined> {
+  const file = await fileHandle.getFile()
+  const kind = detectMediaKind(file)
+  if (!kind || kind === 'geo_point') return undefined
+
+  const contentHash = await fileContentHash(file)
+  const locationId = await stableOccurrenceId(sourceId, relativePath)
+  const lastSeenAt = Date.now()
+  const location = {
+    id: locationId,
+    sourceId,
+    relativePath,
+    displayName: pathDisplayName(relativePath),
+    lastSeenAt,
+  }
+  const base = {
+    id: contentHash,
+    contentHash,
+    sourceId,
+    relativePath,
+    displayName: location.displayName,
+    kind,
+    mimeType: file.type || (kind === 'image' ? 'image/*' : 'video/*'),
+    sizeBytes: file.size,
+    lastSeenAt,
+    locations: [location],
+  }
+
+  if (kind === 'video') {
+    return {
+      ...base,
+      capturedAt: file.lastModified || undefined,
+      capturedAtSource: file.lastModified ? 'filesystem' : undefined,
+    }
+  }
+
+  const imageMetadata = await readImageMetadata(file)
+  const thumbnailKey = await writeThumbnail(contentHash, file)
+
+  return {
+    ...base,
+    ...imageMetadata,
+    capturedAt: imageMetadata.capturedAt ?? file.lastModified ?? undefined,
+    capturedAtSource:
+      imageMetadata.capturedAtSource ??
+      (file.lastModified ? 'filesystem' : undefined),
+    thumbnailKey,
+  }
+}
+
+async function geoPointItemFromParsedPoint(
+  sourceId: string,
+  sourceLabel: string,
+  mimeType: string,
+  point: ParsedGeoPoint,
+): Promise<MediaItem> {
+  const contentHash = await geoPointContentHash(
+    point.latitude,
+    point.longitude,
+    point.capturedAt,
+  )
+  const lastSeenAt = Date.now()
+  const displayName = `${sourceLabel} #${point.index}`
+  const location: MediaLocation = {
+    id: await stableId(sourceId, sourceLabel, contentHash),
+    sourceId,
+    relativePath: sourceLabel,
+    displayName,
+    lastSeenAt,
+  }
+
+  return {
+    id: contentHash,
+    contentHash,
+    sourceId,
+    relativePath: sourceLabel,
+    displayName,
+    kind: 'geo_point',
+    mimeType,
+    sizeBytes: 0,
+    capturedAt: point.capturedAt,
+    capturedAtSource: 'geo-file',
+    latitude: point.latitude,
+    longitude: point.longitude,
+    geoSource: 'geo-file',
+    lastSeenAt,
+    locations: [location],
+  }
+}
+
+async function importFolderIntoCatalog(
+  payload: ImportFolderPayload,
+  postProgress: (progress: ImportProgress) => void,
+): Promise<ImportSummary> {
+  await ensureDb()
+  const activeDb = requireDb()
+  const { source, duplicateSourceIds, handle } = payload
+  const sourceLabel = source.label
+  const errors: string[] = []
+  const batch: MediaItem[] = []
+  let totalFiles = 0
+  let scannedFiles = 0
+  let acceptedMedia = 0
+  let skippedFiles = 0
+
+  const flushBatch = () => {
+    if (batch.length === 0) return
+    postProgress({
+      phase: 'storing',
+      sourceLabel,
+      scannedFiles,
+      totalFiles,
+      acceptedMedia,
+      skippedFiles,
+    })
+    upsertMediaBatch(activeDb, batch)
+    batch.length = 0
+  }
+
+  async function countFiles(directoryHandle: FileSystemDirectoryHandle): Promise<void> {
+    for await (const [, entry] of directoryHandle.entries()) {
+      if (entry.kind === 'directory') {
+        await countFiles(entry as FileSystemDirectoryHandle)
+        continue
+      }
+
+      totalFiles += 1
+      if (totalFiles % 200 === 0) {
+        postProgress({
+          phase: 'counting',
+          sourceLabel,
+          scannedFiles: 0,
+          totalFiles,
+          acceptedMedia: 0,
+          skippedFiles: 0,
+        })
+      }
+    }
+  }
+
+  async function walk(
+    directoryHandle: FileSystemDirectoryHandle,
+    prefix: string,
+  ): Promise<void> {
+    for await (const [name, entry] of directoryHandle.entries()) {
+      const relativePath = prefix ? `${prefix}/${name}` : name
+
+      if (entry.kind === 'directory') {
+        await walk(entry as FileSystemDirectoryHandle, relativePath)
+        continue
+      }
+
+      scannedFiles += 1
+      try {
+        const item = await mediaFromFile(
+          source.id,
+          relativePath,
+          entry as FileSystemFileHandle,
+        )
+        if (item) {
+          batch.push(item)
+          acceptedMedia += 1
+          if (batch.length >= IMPORT_BATCH_SIZE) {
+            flushBatch()
+          }
+        } else {
+          skippedFiles += 1
+        }
+      } catch (error) {
+        skippedFiles += 1
+        errors.push(
+          `${relativePath}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        )
+      }
+
+      if (scannedFiles % 20 === 0) {
+        postProgress({
+          phase: 'scanning',
+          sourceLabel,
+          scannedFiles,
+          totalFiles,
+          acceptedMedia,
+          skippedFiles,
+          currentPath: relativePath,
+        })
+      }
+    }
+  }
+
+  postProgress({
+    phase: 'counting',
+    sourceLabel,
+    scannedFiles: 0,
+    totalFiles,
+    acceptedMedia: 0,
+    skippedFiles: 0,
+  })
+  await countFiles(handle)
+  prepareImportSource(activeDb, source, duplicateSourceIds)
+
+  postProgress({
+    phase: 'scanning',
+    sourceLabel,
+    scannedFiles,
+    totalFiles,
+    acceptedMedia,
+    skippedFiles,
+  })
+  await walk(handle, '')
+  flushBatch()
+
+  return {
+    source,
+    sourceLabel,
+    scannedFiles,
+    totalFiles,
+    acceptedMedia,
+    skippedFiles,
+    errors,
+  }
+}
+
+async function readFileTextWithProgress(
+  file: File,
+  sourceLabel: string,
+  postProgress: (progress: ImportProgress) => void,
+): Promise<string> {
+  const reader = file.stream().getReader()
+  const decoder = new TextDecoder()
+  const chunks: string[] = []
+  let bytesRead = 0
+  let lastProgressAt = 0
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    bytesRead += value.byteLength
+    chunks.push(decoder.decode(value, { stream: true }))
+    const now = performance.now()
+    if (now - lastProgressAt >= PROGRESS_HEARTBEAT_MS) {
+      lastProgressAt = now
+      postProgress({
+        phase: 'scanning',
+        sourceLabel,
+        scannedFiles: 0,
+        totalFiles: 1,
+        acceptedMedia: 0,
+        skippedFiles: 0,
+        currentPath: sourceLabel,
+        scannedBytes: bytesRead,
+        totalBytes: file.size,
+      })
+    }
+  }
+
+  const finalChunk = decoder.decode()
+  if (finalChunk) chunks.push(finalChunk)
+  return chunks.join('')
+}
+
+function jsonLikePrefix(prefix: string): boolean {
+  const trimmed = prefix.trimStart()
+  return trimmed.startsWith('{') || trimmed.startsWith('[')
+}
+
+function throwKnownUnsupportedJsonPrefix(prefix: string): void {
+  if (/"timelineObjects"\s*:/.test(prefix)) {
+    throw new Error(
+      'This looks like Google Semantic Location History JSON. That is valid Google Takeout data, but this importer currently supports only the raw Records.json location export.',
+    )
+  }
+  if (/"type"\s*:\s*"(FeatureCollection|Feature|Point)"/.test(prefix)) {
+    throw new Error(
+      'GeoJSON files are not supported yet. Supported formats are GPX and Google Takeout Location History JSON.',
+    )
+  }
+}
+
+async function importGpxIntoCatalog(
+  file: File,
+  source: MediaSource,
+  activeDb: SqliteDb,
+  postProgress: (progress: ImportProgress) => void,
+): Promise<{ acceptedMedia: number; skippedFiles: number }> {
+  const sourceLabel = source.label
+  const text = await readFileTextWithProgress(file, sourceLabel, postProgress)
+  const parsed = parseGeoFilePoints(file.name || sourceLabel, text)
+  let acceptedMedia = 0
+  const batch: MediaItem[] = []
+
+  for (const point of parsed.points) {
+    batch.push(
+      await geoPointItemFromParsedPoint(
+        source.id,
+        sourceLabel,
+        parsed.mimeType,
+        point,
+      ),
+    )
+    acceptedMedia += 1
+    if (batch.length >= IMPORT_BATCH_SIZE) {
+      postProgress({
+        phase: 'storing',
+        sourceLabel,
+        scannedFiles: 1,
+        totalFiles: 1,
+        acceptedMedia,
+        skippedFiles: parsed.skippedPoints,
+        currentPath: sourceLabel,
+        scannedBytes: file.size,
+        totalBytes: file.size,
+      })
+      upsertMediaBatch(activeDb, batch)
+      batch.length = 0
+      await yieldToEventLoop()
+    }
+  }
+
+  if (batch.length > 0) {
+    postProgress({
+      phase: 'storing',
+      sourceLabel,
+      scannedFiles: 1,
+      totalFiles: 1,
+      acceptedMedia,
+      skippedFiles: parsed.skippedPoints,
+      currentPath: sourceLabel,
+      scannedBytes: file.size,
+      totalBytes: file.size,
+    })
+    upsertMediaBatch(activeDb, batch)
+  }
+
+  return { acceptedMedia, skippedFiles: parsed.skippedPoints }
+}
+
+async function importGoogleTakeoutIntoCatalog(
+  file: File,
+  source: MediaSource,
+  activeDb: SqliteDb,
+  postProgress: (progress: ImportProgress) => void,
+): Promise<{ acceptedMedia: number; skippedFiles: number }> {
+  const sourceLabel = source.label
+  const parser = new GoogleTakeoutLocationStreamParser()
+  const reader = file.stream().getReader()
+  const decoder = new TextDecoder()
+  const pendingPoints: ParsedGeoPoint[] = []
+  const batch: MediaItem[] = []
+  let bytesRead = 0
+  let acceptedMedia = 0
+  let skippedFiles = 0
+  let lastProgressAt = 0
+
+  const emitProgress = (phase: ImportProgress['phase']) => {
+    postProgress({
+      phase,
+      sourceLabel,
+      scannedFiles: phase === 'storing' && bytesRead >= file.size ? 1 : 0,
+      totalFiles: 1,
+      acceptedMedia: acceptedMedia + pendingPoints.length + batch.length,
+      skippedFiles,
+      currentPath: sourceLabel,
+      scannedBytes: bytesRead,
+      totalBytes: file.size,
+    })
+  }
+
+  const maybeEmitProgress = () => {
+    const now = performance.now()
+    if (now - lastProgressAt < PROGRESS_HEARTBEAT_MS) return
+    lastProgressAt = now
+    emitProgress('scanning')
+  }
+
+  const flushBatch = async () => {
+    if (batch.length === 0) return
+    emitProgress('storing')
+    upsertMediaBatch(activeDb, batch)
+    acceptedMedia += batch.length
+    batch.length = 0
+    await yieldToEventLoop()
+  }
+
+  const consumePoints = async () => {
+    while (pendingPoints.length > 0) {
+      const point = pendingPoints.shift()
+      if (!point) continue
+      batch.push(
+        await geoPointItemFromParsedPoint(
+          source.id,
+          sourceLabel,
+          'application/json',
+          point,
+        ),
+      )
+      if (batch.length >= IMPORT_BATCH_SIZE) {
+        await flushBatch()
+      }
+    }
+  }
+
+  const consumeText = async (text: string) => {
+    let chunk = text
+    while (true) {
+      const result = parser.feed(chunk, {
+        maxDurationMs: GEO_IMPORT_PARSE_SLICE_MS,
+      })
+      chunk = ''
+      skippedFiles += result.skippedPoints
+      pendingPoints.push(...result.points)
+      await consumePoints()
+      maybeEmitProgress()
+
+      if (!result.paused) break
+      await yieldToEventLoop()
+    }
+  }
+
+  emitProgress('scanning')
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    bytesRead += value.byteLength
+    await consumeText(decoder.decode(value, { stream: true }))
+  }
+
+  const finalChunk = decoder.decode()
+  if (finalChunk) {
+    await consumeText(finalChunk)
+  }
+
+  const final = parser.finish()
+  skippedFiles = final.skippedPoints
+  await consumePoints()
+  await flushBatch()
+  emitProgress('storing')
+
+  return { acceptedMedia, skippedFiles }
+}
+
+async function importGeoFileIntoCatalog(
+  payload: ImportGeoFilePayload,
+  postProgress: (progress: ImportProgress) => void,
+): Promise<ImportSummary> {
+  await ensureDb()
+  const activeDb = requireDb()
+  const { source, duplicateSourceIds, file } = payload
+  const sourceLabel = source.label
+
+  postProgress({
+    phase: 'counting',
+    sourceLabel,
+    scannedFiles: 0,
+    totalFiles: 1,
+    acceptedMedia: 0,
+    skippedFiles: 0,
+    currentPath: sourceLabel,
+    scannedBytes: 0,
+    totalBytes: file.size,
+  })
+
+  prepareImportSource(activeDb, source, duplicateSourceIds)
+
+  const prefix = await file.slice(0, GEO_IMPORT_PREFIX_BYTES).text()
+  const result = jsonLikePrefix(prefix)
+    ? await (async () => {
+        throwKnownUnsupportedJsonPrefix(prefix)
+        return importGoogleTakeoutIntoCatalog(
+          file,
+          source,
+          activeDb,
+          postProgress,
+        )
+      })()
+    : await importGpxIntoCatalog(file, source, activeDb, postProgress)
+
+  return {
+    source,
+    sourceLabel,
+    scannedFiles: 1,
+    totalFiles: 1,
+    acceptedMedia: result.acceptedMedia,
+    skippedFiles: result.skippedFiles,
+    errors: [],
+  }
+}
+
 async function listMedia(query: CatalogQuery): Promise<MediaItem[]> {
   await ensureDb()
   const activeDb = requireDb()
@@ -640,6 +1365,7 @@ async function getGeoPoints(range: {
   const rows = requireDb().selectObjects(
     `
       SELECT a.content_hash, a.latitude, a.longitude, a.captured_at
+        , a.kind
       FROM media_assets a
       WHERE ${where.join(' AND ')}
       ORDER BY a.content_hash ASC
@@ -649,6 +1375,10 @@ async function getGeoPoints(range: {
 
   return rows.map((row) => ({
     mediaId: String(row.content_hash),
+    kind:
+      row.kind === 'image' || row.kind === 'video' || row.kind === 'geo_point'
+        ? row.kind
+        : undefined,
     lat: toNumber(row.latitude) ?? 0,
     lon: toNumber(row.longitude) ?? 0,
     capturedAt: toNumber(row.captured_at),
@@ -821,7 +1551,7 @@ async function clearCatalog(): Promise<void> {
 
 async function handleRequest(
   request: WorkerRequest,
-  postProgress: (progress: GeoIndexBuildProgress) => void,
+  postProgress: (progress: GeoIndexBuildProgress | ImportProgress) => void,
 ): Promise<unknown> {
   switch (request.type) {
     case 'init':
@@ -830,6 +1560,16 @@ async function handleRequest(
       return upsertSource(request.payload as MediaSource)
     case 'upsertMedia':
       return upsertMedia(request.payload as MediaItem[])
+    case 'importFolder':
+      return importFolderIntoCatalog(
+        request.payload as ImportFolderPayload,
+        postProgress as (progress: ImportProgress) => void,
+      )
+    case 'importGeoFile':
+      return importGeoFileIntoCatalog(
+        request.payload as ImportGeoFilePayload,
+        postProgress as (progress: ImportProgress) => void,
+      )
     case 'listMedia':
       return listMedia(request.payload as CatalogQuery)
     case 'getMediaByIds':
@@ -863,7 +1603,7 @@ async function handleRequest(
 
 ctx.addEventListener('message', async (event: MessageEvent<WorkerRequest>) => {
   try {
-    const postProgress = (progress: GeoIndexBuildProgress) => {
+    const postProgress = (progress: GeoIndexBuildProgress | ImportProgress) => {
       ctx.postMessage({ id: event.data.id, type: 'progress', progress })
     }
     const result = await handleRequest(event.data, postProgress)

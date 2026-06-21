@@ -8,14 +8,6 @@ import {
   removeDirectoryHandle,
   removeGeoFileHandle,
 } from './handleStore'
-import { GeoImportClient } from './geoImportClient'
-import { ScannerClient } from './scannerClient'
-import type { ScanProgress } from './scanner.worker'
-import {
-  geoPointContentHash,
-  parseGeoFilePoints,
-  type ParsedGeoPoint,
-} from '../../lib/geoPoint'
 import type {
   ImportBackend,
   ImportProgress,
@@ -39,135 +31,6 @@ type ImportGeoFileRecord = {
   addedAt: number
   handle: FileSystemFileHandle
   duplicateSourceIds: string[]
-}
-
-const GEO_IMPORT_LOG_PREFIX = '[geo-import]'
-const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
-const GEO_IMPORT_READ_PROGRESS_BYTES = 100 * 1024 * 1024
-
-function textReadSummary(text: string): Record<string, unknown> {
-  const trimmed = text.trimStart()
-  const firstCharacter = trimmed[0]
-  return {
-    textLength: text.length,
-    trimmedLength: trimmed.length,
-    leadingWhitespaceCharacters: text.length - trimmed.length,
-    firstCodePointHex:
-      firstCharacter === undefined
-        ? undefined
-        : firstCharacter.codePointAt(0)?.toString(16),
-    firstCharacters: trimmed.slice(0, 120),
-  }
-}
-
-function logGeoFileRead(file: File, sourceLabel: string, text: string): void {
-  const summary = textReadSummary(text)
-  console.log(GEO_IMPORT_LOG_PREFIX, {
-    phase: 'file read',
-    fileName: file.name,
-    sourceLabel,
-    sizeBytes: file.size,
-    sizeKiB: Math.round(file.size / 1024),
-    mimeType: file.type || undefined,
-    lastModified: file.lastModified,
-    ...summary,
-    readEmptyButFileHasBytes: file.size > 0 && text.length === 0,
-  })
-  console.log(
-    `${GEO_IMPORT_LOG_PREFIX} file-read-summary file=${JSON.stringify(
-      file.name,
-    )} sizeBytes=${file.size} textLength=${String(
-      summary.textLength,
-    )} trimmedLength=${String(
-      summary.trimmedLength,
-    )} firstCodePointHex=${String(summary.firstCodePointHex)}`,
-  )
-}
-
-async function readGeoFilePrefix(file: File, sourceLabel: string): Promise<string> {
-  const prefix = await file.slice(0, GEO_IMPORT_PREFIX_BYTES).text()
-  console.log(GEO_IMPORT_LOG_PREFIX, {
-    phase: 'file prefix read',
-    fileName: file.name,
-    sourceLabel,
-    prefixBytes: Math.min(file.size, GEO_IMPORT_PREFIX_BYTES),
-    ...textReadSummary(prefix),
-  })
-  return prefix
-}
-
-function jsonLikePrefix(prefix: string): boolean {
-  const trimmed = prefix.trimStart()
-  return trimmed.startsWith('{') || trimmed.startsWith('[')
-}
-
-function throwKnownUnsupportedJsonPrefix(prefix: string): void {
-  if (/"timelineObjects"\s*:/.test(prefix)) {
-    throw new Error(
-      'This looks like Google Semantic Location History JSON. That is valid Google Takeout data, but this importer currently supports only the raw Records.json location export.',
-    )
-  }
-  if (/"type"\s*:\s*"(FeatureCollection|Feature|Point)"/.test(prefix)) {
-    throw new Error(
-      'GeoJSON files are not supported yet. Supported formats are GPX and Google Takeout Location History JSON.',
-    )
-  }
-}
-
-async function readGeoFileText(file: File, sourceLabel: string): Promise<string> {
-  const reader = file.stream().getReader()
-  const decoder = new TextDecoder()
-  const chunks: string[] = []
-  let bytesRead = 0
-  let nextProgressAt = GEO_IMPORT_READ_PROGRESS_BYTES
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-
-    bytesRead += value.byteLength
-    chunks.push(decoder.decode(value, { stream: true }))
-
-    if (bytesRead >= nextProgressAt) {
-      console.log(GEO_IMPORT_LOG_PREFIX, {
-        phase: 'file read progress',
-        fileName: file.name,
-        sourceLabel,
-        bytesRead,
-        sizeBytes: file.size,
-      })
-      while (nextProgressAt <= bytesRead) {
-        nextProgressAt += GEO_IMPORT_READ_PROGRESS_BYTES
-      }
-    }
-  }
-
-  const finalChunk = decoder.decode()
-  if (finalChunk) chunks.push(finalChunk)
-
-  const text = chunks.join('')
-  console.log(GEO_IMPORT_LOG_PREFIX, {
-    phase: 'file stream read complete',
-    fileName: file.name,
-    sourceLabel,
-    bytesRead,
-    sizeBytes: file.size,
-    bytesReadMatchesFileSize: bytesRead === file.size,
-  })
-  logGeoFileRead(file, sourceLabel, text)
-  return text
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('')
-}
-
-async function stableId(...parts: string[]): Promise<string> {
-  const encoded = new TextEncoder().encode(parts.join('\n'))
-  const digest = await crypto.subtle.digest('SHA-256', encoded)
-  return bytesToHex(new Uint8Array(digest))
 }
 
 async function sourceRecordForHandle(
@@ -252,122 +115,23 @@ async function sourceRecordForGeoFileHandle(
   }
 }
 
-function webProgress(
-  sourceLabel: string,
-  progress: ScanProgress,
-): ImportProgress {
-  return { ...progress, sourceLabel }
-}
-
-async function geoPointItemFromParsedPoint(
-  sourceId: string,
-  sourceLabel: string,
-  mimeType: string,
-  point: ParsedGeoPoint,
-): Promise<MediaItem> {
-  const contentHash = await geoPointContentHash(
-    point.latitude,
-    point.longitude,
-    point.capturedAt,
-  )
-  const lastSeenAt = Date.now()
-  const displayName = `${sourceLabel} #${point.index}`
-  const location: MediaLocation = {
-    id: await stableId(sourceId, sourceLabel, contentHash),
-    sourceId,
-    relativePath: sourceLabel,
-    displayName,
-    lastSeenAt,
-  }
-
+function sourceFromRecord(record: {
+  id: string
+  label: string
+  addedAt: number
+}): MediaSource {
   return {
-    id: contentHash,
-    contentHash,
-    sourceId,
-    relativePath: sourceLabel,
-    displayName,
-    kind: 'geo_point',
-    mimeType,
-    sizeBytes: 0,
-    capturedAt: point.capturedAt,
-    capturedAtSource: 'geo-file',
-    latitude: point.latitude,
-    longitude: point.longitude,
-    geoSource: 'geo-file',
-    lastSeenAt,
-    locations: [location],
+    id: record.id,
+    label: record.label,
+    addedAt: record.addedAt,
   }
 }
 
 class WebImportBackend implements ImportBackend {
   private readonly catalog: CatalogClient
-  private readonly scanner: ScannerClient
-  private readonly geoImporter: GeoImportClient
 
-  constructor(
-    catalog: CatalogClient,
-    scanner: ScannerClient,
-    geoImporter: GeoImportClient,
-  ) {
+  constructor(catalog: CatalogClient) {
     this.catalog = catalog
-    this.scanner = scanner
-    this.geoImporter = geoImporter
-  }
-
-  private async prepareGeoSource(
-    sourceRecord: ImportGeoFileRecord,
-  ): Promise<MediaSource> {
-    const source = {
-      id: sourceRecord.id,
-      label: sourceRecord.label,
-      addedAt: sourceRecord.addedAt,
-    }
-
-    await putGeoFileHandle({
-      id: sourceRecord.id,
-      label: sourceRecord.label,
-      addedAt: sourceRecord.addedAt,
-      handle: sourceRecord.handle,
-    })
-
-    if (sourceRecord.duplicateSourceIds.length > 0) {
-      await this.catalog.removeSources(sourceRecord.duplicateSourceIds)
-      await Promise.all(
-        sourceRecord.duplicateSourceIds.map((id) => removeGeoFileHandle(id)),
-      )
-    }
-
-    await this.catalog.upsertSource(source)
-    return source
-  }
-
-  private async importGoogleTakeoutGeoFileStream(
-    file: File,
-    sourceRecord: ImportGeoFileRecord,
-    sourceLabel: string,
-    onProgress?: (progress: ImportProgress) => void,
-  ): Promise<ImportSummary> {
-    const source = await this.prepareGeoSource(sourceRecord)
-
-    const result = await this.geoImporter.importGoogleTakeoutFile(
-      file,
-      sourceRecord.id,
-      sourceLabel,
-      async (items) => {
-        await this.catalog.upsertMedia(items)
-      },
-      onProgress,
-    )
-
-    return {
-      source,
-      sourceLabel,
-      scannedFiles: 1,
-      totalFiles: 1,
-      acceptedMedia: result.acceptedMedia,
-      skippedFiles: result.skippedFiles,
-      errors: [],
-    }
   }
 
   async importFolder(
@@ -379,7 +143,6 @@ class WebImportBackend implements ImportBackend {
 
     const handle = await window.showDirectoryPicker({ mode: 'read' })
     const sourceRecord = await sourceRecordForHandle(handle)
-    const sourceLabel = sourceRecord.label
 
     await putDirectoryHandle({
       id: sourceRecord.id,
@@ -387,51 +150,18 @@ class WebImportBackend implements ImportBackend {
       addedAt: sourceRecord.addedAt,
       handle: sourceRecord.handle,
     })
-
-    onProgress?.({
-      phase: 'counting',
-      sourceLabel,
-      scannedFiles: 0,
-      totalFiles: 0,
-      acceptedMedia: 0,
-      skippedFiles: 0,
-    })
-
-    const result = await this.scanner.scanDirectory(
-      sourceRecord.id,
-      sourceLabel,
-      handle,
-      (progress) => onProgress?.(webProgress(sourceLabel, progress)),
+    await Promise.all(
+      sourceRecord.duplicateSourceIds.map((id) => removeDirectoryHandle(id)),
     )
 
-    onProgress?.({
-      phase: 'storing',
-      sourceLabel,
-      scannedFiles: result.stats.scannedFiles,
-      totalFiles: result.stats.totalFiles,
-      acceptedMedia: result.stats.acceptedMedia,
-      skippedFiles: result.stats.skippedFiles,
-    })
-
-    if (sourceRecord.duplicateSourceIds.length > 0) {
-      await this.catalog.removeSources(sourceRecord.duplicateSourceIds)
-      await Promise.all(
-        sourceRecord.duplicateSourceIds.map((id) => removeDirectoryHandle(id)),
-      )
-    }
-
-    await this.catalog.upsertSource(result.source)
-    await this.catalog.upsertMedia(result.items)
-
-    return {
-      source: result.source,
-      sourceLabel,
-      scannedFiles: result.stats.scannedFiles,
-      totalFiles: result.stats.totalFiles,
-      acceptedMedia: result.stats.acceptedMedia,
-      skippedFiles: result.stats.skippedFiles,
-      errors: result.errors,
-    }
+    return this.catalog.importFolder(
+      {
+        source: sourceFromRecord(sourceRecord),
+        duplicateSourceIds: sourceRecord.duplicateSourceIds,
+        handle,
+      },
+      onProgress,
+    )
   }
 
   async importGeoFile(
@@ -459,90 +189,29 @@ class WebImportBackend implements ImportBackend {
     if (!handle) throw new Error('Import cancelled')
 
     const sourceRecord = await sourceRecordForGeoFileHandle(handle)
-    const sourceLabel = sourceRecord.label
-
-    onProgress?.({
-      phase: 'counting',
-      sourceLabel,
-      scannedFiles: 0,
-      totalFiles: 1,
-      acceptedMedia: 0,
-      skippedFiles: 0,
-      currentPath: sourceLabel,
-    })
-
     const file = await handle.getFile()
-    console.log(GEO_IMPORT_LOG_PREFIX, {
-      phase: 'file selected',
-      fileName: file.name,
-      sourceLabel,
-      sizeBytes: file.size,
-      sizeKiB: Math.round(file.size / 1024),
-      mimeType: file.type || undefined,
-      lastModified: file.lastModified,
+
+    await putGeoFileHandle({
+      id: sourceRecord.id,
+      label: sourceRecord.label,
+      addedAt: sourceRecord.addedAt,
+      handle: sourceRecord.handle,
     })
-
-    const filePrefix = await readGeoFilePrefix(file, sourceLabel)
-    if (jsonLikePrefix(filePrefix)) {
-      throwKnownUnsupportedJsonPrefix(filePrefix)
-      return this.importGoogleTakeoutGeoFileStream(
-        file,
-        sourceRecord,
-        sourceLabel,
-        onProgress,
-      )
-    }
-
-    const fileText = await readGeoFileText(file, sourceLabel)
-    const parsed = parseGeoFilePoints(file.name || sourceLabel, fileText)
-    const items = await Promise.all(
-      parsed.points.map((point) =>
-        geoPointItemFromParsedPoint(
-          sourceRecord.id,
-          sourceLabel,
-          parsed.mimeType,
-          point,
-        ),
-      ),
+    await Promise.all(
+      sourceRecord.duplicateSourceIds.map((id) => removeGeoFileHandle(id)),
     )
 
-    onProgress?.({
-      phase: 'scanning',
-      sourceLabel,
-      scannedFiles: 1,
-      totalFiles: 1,
-      acceptedMedia: items.length,
-      skippedFiles: parsed.skippedPoints,
-      currentPath: sourceLabel,
-    })
-    onProgress?.({
-      phase: 'storing',
-      sourceLabel,
-      scannedFiles: 1,
-      totalFiles: 1,
-      acceptedMedia: items.length,
-      skippedFiles: parsed.skippedPoints,
-      currentPath: sourceLabel,
-    })
-
-    const source = await this.prepareGeoSource(sourceRecord)
-    await this.catalog.upsertMedia(items)
-
-    return {
-      source,
-      sourceLabel,
-      scannedFiles: 1,
-      totalFiles: 1,
-      acceptedMedia: items.length,
-      skippedFiles: parsed.skippedPoints,
-      errors: [],
-    }
+    return this.catalog.importGeoFile(
+      {
+        source: sourceFromRecord(sourceRecord),
+        duplicateSourceIds: sourceRecord.duplicateSourceIds,
+        file,
+      },
+      onProgress,
+    )
   }
 
-  dispose(): void {
-    this.scanner.dispose()
-    this.geoImporter.dispose()
-  }
+  dispose(): void {}
 }
 
 class WebThumbnailBackend implements ThumbnailBackend {
@@ -634,8 +303,6 @@ class WebFileLocationBackend {
 
 export function createWebPlatformBackend(): PlatformBackend {
   const catalog = new CatalogClient()
-  const scanner = new ScannerClient()
-  const geoImporter = new GeoImportClient()
 
   return {
     kind: 'web',
@@ -646,13 +313,11 @@ export function createWebPlatformBackend(): PlatformBackend {
       nativeCatalog: false,
     },
     catalog,
-    importer: new WebImportBackend(catalog, scanner, geoImporter),
+    importer: new WebImportBackend(catalog),
     thumbnails: new WebThumbnailBackend(),
     files: new WebFileLocationBackend(),
     dispose() {
       catalog.dispose()
-      scanner.dispose()
-      geoImporter.dispose()
     },
   }
 }

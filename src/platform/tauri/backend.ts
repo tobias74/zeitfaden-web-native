@@ -1,12 +1,11 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { GeoIndexRegistry } from '../../geo/registry'
 import type {
   CatalogQuery,
+  GeoIndexPoint,
   GeoIndexStats,
   GeoSearchQuery,
   GeoSearchResult,
-  GeoIndexPoint,
   MediaItem,
   MediaLocation,
   MediaSource,
@@ -26,8 +25,6 @@ import type {
 } from '../types'
 
 class TauriCatalogBackend implements CatalogBackend {
-  private readonly geoIndexRegistry = new GeoIndexRegistry()
-
   init(): Promise<CatalogInfo> {
     return invoke('init_catalog')
   }
@@ -67,65 +64,17 @@ class TauriCatalogBackend implements CatalogBackend {
   async buildGeoIndexes(
     onProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<GeoIndexBuildSummary> {
-    const startedAt = performance.now()
-    const points = await this.getGeoPoints()
-    const totalIndexes = this.geoIndexRegistry.indexes.length
-    let builtIndexes = 0
+    const unlisten = await listen<GeoIndexBuildProgress>(
+      'geo-index-progress',
+      (event) => {
+        onProgress?.(event.payload)
+      },
+    )
 
-    onProgress?.({
-      phase: 'building',
-      pointCount: points.length,
-      builtIndexes,
-      totalIndexes,
-    })
-
-    for (const index of this.geoIndexRegistry.indexes) {
-      onProgress?.({
-        phase: 'building',
-        pointCount: points.length,
-        builtIndexes,
-        totalIndexes,
-        currentIndexId: index.id,
-        currentIndexLabel: index.label,
-        currentIndexProcessedPoints: 0,
-        currentIndexTotalPoints: points.length,
-      })
-      await index.build(points, {
-        yieldEvery: 2_000,
-        onProgress: (progress) => {
-          onProgress?.({
-            phase: 'building',
-            pointCount: points.length,
-            builtIndexes,
-            totalIndexes,
-            currentIndexId: progress.indexId,
-            currentIndexLabel: progress.indexLabel,
-            currentIndexProcessedPoints: progress.processedPoints,
-            currentIndexTotalPoints: progress.totalPoints,
-          })
-        },
-      })
-      builtIndexes += 1
-      onProgress?.({
-        phase: 'building',
-        pointCount: points.length,
-        builtIndexes,
-        totalIndexes,
-        currentIndexId: index.id,
-        currentIndexLabel: index.label,
-      })
-    }
-
-    onProgress?.({
-      phase: 'ready',
-      pointCount: points.length,
-      builtIndexes,
-      totalIndexes,
-    })
-
-    return {
-      pointCount: points.length,
-      buildTimeMs: performance.now() - startedAt,
+    try {
+      return await invoke('build_geo_indexes')
+    } finally {
+      unlisten()
     }
   }
 
@@ -133,20 +82,18 @@ class TauriCatalogBackend implements CatalogBackend {
     indexId: string,
     query: GeoSearchQuery,
   ): Promise<GeoSearchResult[]> {
-    return this.geoIndexRegistry.get(indexId).search(query)
+    return invoke('search_geo_index', { indexId, query })
   }
 
   getGeoIndexStats(indexId: string): Promise<GeoIndexStats> {
-    return this.geoIndexRegistry.get(indexId).stats()
+    return invoke('get_geo_index_stats', { indexId })
   }
 
   validateGeoIndex(
     indexId: string,
     query: GeoSearchQuery,
   ): Promise<ValidationReport> {
-    return this.geoIndexRegistry
-      .get(indexId)
-      .validateAgainstBruteForce(query)
+    return invoke('validate_geo_index', { indexId, query })
   }
 
   clear(): Promise<void> {

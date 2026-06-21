@@ -12,6 +12,35 @@ import type {
 
 const DISTANCE_TIE_EPSILON_METERS = 1e-6
 
+function matchesKind(point: GeoIndexPoint, query: GeoSearchQuery): boolean {
+  if (!query.kind || query.kind === 'all') return true
+  if (query.kind === 'media') {
+    return point.kind === 'image' || point.kind === 'video'
+  }
+  return point.kind === query.kind
+}
+
+function matchesGeoBounds(point: GeoIndexPoint, query: GeoSearchQuery): boolean {
+  if (!query.geoBounds) return true
+  return (
+    point.lat >= query.geoBounds.minLat &&
+    point.lat <= query.geoBounds.maxLat &&
+    point.lon >= query.geoBounds.minLon &&
+    point.lon <= query.geoBounds.maxLon
+  )
+}
+
+function matchesSearchQuery(
+  point: GeoIndexPoint,
+  query: GeoSearchQuery,
+): boolean {
+  return (
+    matchesTimeRange(point.capturedAt, query) &&
+    matchesKind(point, query) &&
+    matchesGeoBounds(point, query)
+  )
+}
+
 function compareSearchResults(
   a: GeoSearchResult,
   b: GeoSearchResult,
@@ -87,13 +116,15 @@ export class BruteForceGeoIndex implements GeoTemporalIndex {
 
   async search(query: GeoSearchQuery): Promise<GeoSearchResult[]> {
     const start = performance.now()
+    const offset = Math.max(0, Math.trunc(query.offset ?? 0))
+    const limit = Math.max(0, Math.trunc(query.k))
     let distanceComputations = 0
     let candidatesInspected = 0
 
     const results = this.points
       .filter((point) => {
         candidatesInspected += 1
-        return matchesTimeRange(point.capturedAt, query)
+        return matchesSearchQuery(point, query)
       })
       .map((point) => {
         distanceComputations += 1
@@ -103,7 +134,7 @@ export class BruteForceGeoIndex implements GeoTemporalIndex {
         }
       })
       .sort(compareSearchResults)
-      .slice(0, Math.max(0, query.k))
+      .slice(offset, offset + limit)
 
     this.lastStats = {
       ...this.emptyStats(),
