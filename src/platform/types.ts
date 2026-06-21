@@ -47,10 +47,13 @@ export type GeoParseDebugSummary = {
   bytesRead: number
   totalEntries: number
   parsedPoints: number
+  hashedPoints: number
   skippedPoints: number
   durationMs: number
+  hashDurationMs: number
   bytesPerSecond: number
   pointsPerSecond: number
+  hashesPerSecond: number
 }
 
 export type GeoIndexBuildProgress = {

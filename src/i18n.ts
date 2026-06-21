@@ -14,7 +14,7 @@ const en = {
   activityImportedMediaFilesFrom:
     'Imported {count} items from {sourceLabel}',
   activityDebugParsedGeoFile:
-    'Debug parsed {count} points from {sourceLabel} in {duration} ms ({skipped} skipped)',
+    'Debug parsed and hashed {count} points from {sourceLabel} in {duration} ms, hash work {hashDuration} ms ({skipped} skipped)',
   activityImportStopped: 'Import stopped',
   activityCatalogCleared: 'Catalog cleared',
   all: 'All',
@@ -40,7 +40,7 @@ const en = {
   countingFilesIn: 'Preparing import from {sourceLabel}',
   captured: 'Captured',
   display: 'Display',
-  debugParseTakeoutJson: 'Debug parse Takeout JSON',
+  debugParseTakeoutJson: 'Debug parse + hash Takeout JSON',
   debugTools: 'Debug tools',
   distance: 'Distance',
   distanceFromMapPoint: 'Distance from map point',
@@ -126,7 +126,7 @@ const de: Record<TranslationKey, string> = {
   activityImportedMediaFilesFrom:
     '{count} Elemente aus {sourceLabel} importiert',
   activityDebugParsedGeoFile:
-    'Debug: {count} Punkte aus {sourceLabel} in {duration} ms geparst ({skipped} übersprungen)',
+    'Debug: {count} Punkte aus {sourceLabel} in {duration} ms geparst und gehasht, Hash-Arbeit {hashDuration} ms ({skipped} übersprungen)',
   activityImportStopped: 'Import gestoppt',
   activityCatalogCleared: 'Katalog geleert',
   all: 'Alle',
@@ -152,7 +152,7 @@ const de: Record<TranslationKey, string> = {
   countingFilesIn: 'Import aus {sourceLabel} wird vorbereitet',
   captured: 'Aufgenommen',
   display: 'Ansicht',
-  debugParseTakeoutJson: 'Takeout-JSON testweise parsen',
+  debugParseTakeoutJson: 'Takeout-JSON testweise parsen + hashen',
   debugTools: 'Debug-Werkzeuge',
   distance: 'Distanz',
   distanceFromMapPoint: 'Distanz vom Kartenpunkt',

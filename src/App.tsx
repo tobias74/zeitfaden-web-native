@@ -855,6 +855,7 @@ function App() {
         count: summary.parsedPoints.toLocaleString(locale),
         skipped: summary.skippedPoints.toLocaleString(locale),
         duration: Math.round(summary.durationMs).toLocaleString(locale),
+        hashDuration: Math.round(summary.hashDurationMs).toLocaleString(locale),
         sourceLabel: summary.sourceLabel,
       })
     } catch (caught) {

@@ -1750,7 +1750,9 @@ async function debugParseGoogleTakeoutFile(
   const startedAt = performance.now()
   let bytesRead = 0
   let parsedPoints = 0
+  let hashedPoints = 0
   let skippedPoints = 0
+  let hashDurationMs = 0
   let lastLogAt = startedAt
 
   const log = (phase: string) => {
@@ -1764,10 +1766,13 @@ async function debugParseGoogleTakeoutFile(
       percent:
         file.size > 0 ? Math.round((bytesRead / file.size) * 1000) / 10 : 0,
       parsedPoints,
+      hashedPoints,
       skippedPoints,
       elapsedMs: Math.round(durationMs),
+      hashDurationMs: Math.round(hashDurationMs),
       bytesPerSecond: Math.round(debugParseRate(bytesRead, durationMs)),
       pointsPerSecond: Math.round(debugParseRate(parsedPoints, durationMs)),
+      hashesPerSecond: Math.round(debugParseRate(hashedPoints, hashDurationMs)),
     })
   }
 
@@ -1787,6 +1792,17 @@ async function debugParseGoogleTakeoutFile(
       chunk = ''
       parsedPoints += result.points.length
       skippedPoints += result.skippedPoints
+      const hashStartedAt = performance.now()
+      for (const point of result.points) {
+        const contentHash = await geoPointContentHash(
+          point.latitude,
+          point.longitude,
+          point.capturedAt,
+        )
+        await stableId('debug-source', sourceLabel, contentHash)
+        hashedPoints += 1
+      }
+      hashDurationMs += performance.now() - hashStartedAt
       maybeLog()
 
       if (!result.paused) break
@@ -1819,18 +1835,23 @@ async function debugParseGoogleTakeoutFile(
     bytesRead,
     totalEntries: final.totalEntries,
     parsedPoints,
+    hashedPoints,
     skippedPoints,
     durationMs,
+    hashDurationMs,
     bytesPerSecond: debugParseRate(bytesRead, durationMs),
     pointsPerSecond: debugParseRate(parsedPoints, durationMs),
+    hashesPerSecond: debugParseRate(hashedPoints, hashDurationMs),
   }
 
   console.log('[geo-debug]', {
     phase: 'complete',
     ...summary,
     durationMs: Math.round(summary.durationMs),
+    hashDurationMs: Math.round(summary.hashDurationMs),
     bytesPerSecond: Math.round(summary.bytesPerSecond),
     pointsPerSecond: Math.round(summary.pointsPerSecond),
+    hashesPerSecond: Math.round(summary.hashesPerSecond),
   })
 
   return summary
