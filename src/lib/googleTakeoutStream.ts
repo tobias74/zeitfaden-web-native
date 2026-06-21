@@ -11,6 +11,7 @@ type CompleteObject = {
 export type GoogleTakeoutStreamChunk = {
   points: ParsedGeoPoint[]
   skippedPoints: number
+  paused: boolean
 }
 
 export type GoogleTakeoutStreamResult = {
@@ -19,6 +20,10 @@ export type GoogleTakeoutStreamResult = {
 }
 
 const LOCATIONS_PROPERTY = '"locations"'
+
+type FeedOptions = {
+  maxEntries?: number
+}
 
 function completeJsonObject(buffer: string): CompleteObject | undefined {
   if (!buffer.startsWith('{')) return undefined
@@ -85,14 +90,22 @@ export class GoogleTakeoutLocationStreamParser {
   private skippedPoints = 0
   private totalEntries = 0
 
-  feed(chunk: string): GoogleTakeoutStreamChunk {
-    if (this.phase === 'done') return { points: [], skippedPoints: 0 }
+  feed(chunk: string, options: FeedOptions = {}): GoogleTakeoutStreamChunk {
+    if (this.phase === 'done') {
+      return { points: [], skippedPoints: 0, paused: false }
+    }
 
     this.buffer += chunk
     const points: ParsedGeoPoint[] = []
     let skippedPoints = 0
+    const maxEntries = Math.max(0, options.maxEntries ?? Infinity)
+    let processedEntries = 0
 
     while (true) {
+      if (processedEntries >= maxEntries) {
+        return { points, skippedPoints, paused: true }
+      }
+
       if (this.phase === 'beforeLocations') {
         const locationIndex = this.buffer.indexOf(LOCATIONS_PROPERTY)
         if (locationIndex < 0) {
@@ -132,6 +145,7 @@ export class GoogleTakeoutLocationStreamParser {
       const completeObject = completeJsonObject(this.buffer)
       if (!completeObject) break
 
+      processedEntries += 1
       this.totalEntries += 1
       const parsedEntry = JSON.parse(completeObject.text) as unknown
       const point = parseGoogleTakeoutLocationEntry(
@@ -147,7 +161,7 @@ export class GoogleTakeoutLocationStreamParser {
       this.buffer = this.buffer.slice(completeObject.endOffset)
     }
 
-    return { points, skippedPoints }
+    return { points, skippedPoints, paused: false }
   }
 
   finish(): GoogleTakeoutStreamResult {

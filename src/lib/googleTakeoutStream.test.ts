@@ -71,6 +71,30 @@ describe('GoogleTakeoutLocationStreamParser', () => {
     ])
   })
 
+  it('can pause parsing after a bounded number of entries', () => {
+    const parser = new GoogleTakeoutLocationStreamParser()
+    const document = `{"locations":[${Array.from(
+      { length: 5 },
+      (_, index) =>
+        `{"latitudeE7":48137067${index},"longitudeE7":11577599${index},"timestampMs":"13514342060${index}"}`,
+    ).join(',')}]}`
+
+    const first = parser.feed(document, { maxEntries: 2 })
+    const second = parser.feed('', { maxEntries: 2 })
+    const third = parser.feed('', { maxEntries: 2 })
+    const final = parser.finish()
+
+    expect(first.paused).toBe(true)
+    expect(second.paused).toBe(true)
+    expect(third.paused).toBe(false)
+    expect(
+      [...first.points, ...second.points, ...third.points].map(
+        (point) => point.index,
+      ),
+    ).toEqual([1, 2, 3, 4, 5])
+    expect(final.totalEntries).toBe(5)
+  })
+
   it('rejects JSON without a locations array', () => {
     const parser = new GoogleTakeoutLocationStreamParser()
     parser.feed('{"items": []}')

@@ -8,9 +8,9 @@ import {
   removeDirectoryHandle,
   removeGeoFileHandle,
 } from './handleStore'
+import { GeoImportClient } from './geoImportClient'
 import { ScannerClient } from './scannerClient'
 import type { ScanProgress } from './scanner.worker'
-import { GoogleTakeoutLocationStreamParser } from '../../lib/googleTakeoutStream'
 import {
   geoPointContentHash,
   parseGeoFilePoints,
@@ -19,7 +19,6 @@ import {
 import type {
   ImportBackend,
   ImportProgress,
-  ImportProgressPhase,
   ImportSummary,
   PlatformBackend,
   ThumbnailBackend,
@@ -43,10 +42,7 @@ type ImportGeoFileRecord = {
 }
 
 const GEO_IMPORT_LOG_PREFIX = '[geo-import]'
-const GEO_IMPORT_BATCH_SIZE = 1000
 const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
-const GEO_IMPORT_UI_PROGRESS_BYTES = 10 * 1024 * 1024
-const GEO_IMPORT_UI_PROGRESS_HEARTBEAT_MS = 1000
 const GEO_IMPORT_READ_PROGRESS_BYTES = 100 * 1024 * 1024
 
 function textReadSummary(text: string): Record<string, unknown> {
@@ -306,10 +302,16 @@ async function geoPointItemFromParsedPoint(
 class WebImportBackend implements ImportBackend {
   private readonly catalog: CatalogClient
   private readonly scanner: ScannerClient
+  private readonly geoImporter: GeoImportClient
 
-  constructor(catalog: CatalogClient, scanner: ScannerClient) {
+  constructor(
+    catalog: CatalogClient,
+    scanner: ScannerClient,
+    geoImporter: GeoImportClient,
+  ) {
     this.catalog = catalog
     this.scanner = scanner
+    this.geoImporter = geoImporter
   }
 
   private async prepareGeoSource(
@@ -346,183 +348,25 @@ class WebImportBackend implements ImportBackend {
     onProgress?: (progress: ImportProgress) => void,
   ): Promise<ImportSummary> {
     const source = await this.prepareGeoSource(sourceRecord)
-    const parser = new GoogleTakeoutLocationStreamParser()
-    const reader = file.stream().getReader()
-    const decoder = new TextDecoder()
-    const pendingPoints: ParsedGeoPoint[] = []
-    let bytesRead = 0
-    let acceptedMedia = 0
-    let inFlightAcceptedMedia = 0
-    let skippedFiles = 0
-    let nextUiProgressAt = GEO_IMPORT_UI_PROGRESS_BYTES
-    let nextProgressAt = GEO_IMPORT_READ_PROGRESS_BYTES
-    let currentProgressPhase: ImportProgressPhase = 'scanning'
-    let lastUiProgressAt = 0
-    let progressHeartbeat:
-      | ReturnType<typeof globalThis.setInterval>
-      | undefined
 
-    const visibleAcceptedMedia = () =>
-      acceptedMedia + pendingPoints.length + inFlightAcceptedMedia
-
-    const emitProgress = (
-      phase: ImportProgressPhase = currentProgressPhase,
-      scannedFiles = 0,
-    ) => {
-      currentProgressPhase = phase
-      lastUiProgressAt = performance.now()
-      onProgress?.({
-        phase,
-        sourceLabel,
-        scannedFiles,
-        totalFiles: 1,
-        acceptedMedia: visibleAcceptedMedia(),
-        skippedFiles,
-        currentPath: sourceLabel,
-        scannedBytes: bytesRead,
-        totalBytes: file.size,
-      })
-    }
-
-    const emitTimedProgress = () => {
-      if (
-        performance.now() - lastUiProgressAt >=
-        GEO_IMPORT_UI_PROGRESS_HEARTBEAT_MS
-      ) {
-        emitProgress()
-      }
-    }
-
-    const startProgressHeartbeat = () => {
-      if (!onProgress) return
-      progressHeartbeat = globalThis.setInterval(() => {
-        emitProgress()
-      }, GEO_IMPORT_UI_PROGRESS_HEARTBEAT_MS)
-    }
-
-    const stopProgressHeartbeat = () => {
-      if (progressHeartbeat !== undefined) {
-        globalThis.clearInterval(progressHeartbeat)
-        progressHeartbeat = undefined
-      }
-    }
-
-    const flushPending = async () => {
-      if (pendingPoints.length === 0) return
-
-      const points = pendingPoints.splice(0, pendingPoints.length)
-      inFlightAcceptedMedia += points.length
-      emitProgress('storing')
-      try {
-        const items = await Promise.all(
-          points.map((point) =>
-            geoPointItemFromParsedPoint(
-              sourceRecord.id,
-              sourceLabel,
-              'application/json',
-              point,
-            ),
-          ),
-        )
-        emitTimedProgress()
+    const result = await this.geoImporter.importGoogleTakeoutFile(
+      file,
+      sourceRecord.id,
+      sourceLabel,
+      async (items) => {
         await this.catalog.upsertMedia(items)
-        acceptedMedia += items.length
-      } finally {
-        inFlightAcceptedMedia -= points.length
-      }
-      emitProgress('scanning')
-    }
+      },
+      onProgress,
+    )
 
-    const consumeText = async (text: string) => {
-      const result = parser.feed(text)
-      skippedFiles += result.skippedPoints
-      pendingPoints.push(...result.points)
-      emitTimedProgress()
-
-      if (pendingPoints.length >= GEO_IMPORT_BATCH_SIZE) {
-        await flushPending()
-      }
-    }
-
-    startProgressHeartbeat()
-    emitProgress('scanning')
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        bytesRead += value.byteLength
-        await consumeText(decoder.decode(value, { stream: true }))
-
-        if (bytesRead >= nextUiProgressAt) {
-          emitProgress('scanning')
-          while (nextUiProgressAt <= bytesRead) {
-            nextUiProgressAt += GEO_IMPORT_UI_PROGRESS_BYTES
-          }
-        }
-
-        if (bytesRead >= nextProgressAt) {
-          console.log(GEO_IMPORT_LOG_PREFIX, {
-            phase: 'takeout stream progress',
-            fileName: file.name,
-            sourceLabel,
-            bytesRead,
-            sizeBytes: file.size,
-            acceptedMedia: visibleAcceptedMedia(),
-            skippedFiles,
-          })
-          emitProgress('scanning')
-          while (nextProgressAt <= bytesRead) {
-            nextProgressAt += GEO_IMPORT_READ_PROGRESS_BYTES
-          }
-        }
-      }
-
-      const finalChunk = decoder.decode()
-      if (finalChunk) {
-        await consumeText(finalChunk)
-      }
-
-      const final = parser.finish()
-      skippedFiles = final.skippedPoints
-      await flushPending()
-
-      console.log(GEO_IMPORT_LOG_PREFIX, {
-        phase: 'takeout stream complete',
-        fileName: file.name,
-        sourceLabel,
-        bytesRead,
-        sizeBytes: file.size,
-        bytesReadMatchesFileSize: bytesRead === file.size,
-        totalEntries: final.totalEntries,
-        acceptedMedia,
-        skippedFiles,
-      })
-
-      onProgress?.({
-        phase: 'storing',
-        sourceLabel,
-        scannedFiles: 1,
-        totalFiles: 1,
-        acceptedMedia,
-        skippedFiles,
-        currentPath: sourceLabel,
-        scannedBytes: file.size,
-        totalBytes: file.size,
-      })
-
-      return {
-        source,
-        sourceLabel,
-        scannedFiles: 1,
-        totalFiles: 1,
-        acceptedMedia,
-        skippedFiles,
-        errors: [],
-      }
-    } finally {
-      stopProgressHeartbeat()
+    return {
+      source,
+      sourceLabel,
+      scannedFiles: 1,
+      totalFiles: 1,
+      acceptedMedia: result.acceptedMedia,
+      skippedFiles: result.skippedFiles,
+      errors: [],
     }
   }
 
@@ -697,6 +541,7 @@ class WebImportBackend implements ImportBackend {
 
   dispose(): void {
     this.scanner.dispose()
+    this.geoImporter.dispose()
   }
 }
 
@@ -790,6 +635,7 @@ class WebFileLocationBackend {
 export function createWebPlatformBackend(): PlatformBackend {
   const catalog = new CatalogClient()
   const scanner = new ScannerClient()
+  const geoImporter = new GeoImportClient()
 
   return {
     kind: 'web',
@@ -800,12 +646,13 @@ export function createWebPlatformBackend(): PlatformBackend {
       nativeCatalog: false,
     },
     catalog,
-    importer: new WebImportBackend(catalog, scanner),
+    importer: new WebImportBackend(catalog, scanner, geoImporter),
     thumbnails: new WebThumbnailBackend(),
     files: new WebFileLocationBackend(),
     dispose() {
       catalog.dispose()
       scanner.dispose()
+      geoImporter.dispose()
     },
   }
 }
