@@ -1298,7 +1298,9 @@ function App() {
             </details>
           </div>
           <div
-            className={`topbar-progress-slot ${importProgress ? 'active' : 'idle'}`}
+            className={`topbar-progress-slot ${
+              importProgress || error ? 'active' : 'idle'
+            }`}
             aria-live="polite"
           >
             {importProgress ? (
@@ -1331,6 +1333,10 @@ function App() {
                     }}
                   />
                 </div>
+              </div>
+            ) : error ? (
+              <div className="topbar-error-strip" role="alert" title={error}>
+                {error}
               </div>
             ) : (
               <div className="import-progress-idle" aria-hidden="true" />
@@ -1664,9 +1670,6 @@ function App() {
                 {t('clearSearch')}
               </button>
             </div>
-          </div>
-          <div className="library-notices">
-            {error && <p className="error-banner">{error}</p>}
           </div>
         <div
           className={`media-grid media-grid-${resultDisplayMode} media-thumb-${resultThumbnailSize}`}
