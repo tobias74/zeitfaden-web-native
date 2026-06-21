@@ -189,6 +189,7 @@ const PROGRESS_HEARTBEAT_MS = 1000
 const GEO_POINT_ITEM_BUILD_CHUNK_SIZE = 250
 const GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE = 250
 const GEO_IMPORT_INDEXEDDB_WRITE_BATCH_SIZE = 2000
+const SQLITE_IMPORT_TRANSACTION_ITEM_LIMIT = 100_000
 const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb'
 const INDEXED_DB_VERSION = 1
 const IMPORT_TRACE_ENABLED = false
@@ -1598,8 +1599,13 @@ async function importFolderIntoCatalog(
     acceptedMedia,
     skippedFiles,
   })
-  await walk(handle, '')
-  await flushBatch('storing')
+  await store.withImportTransaction(
+    async () => {
+      await walk(handle, '')
+      await flushBatch('storing')
+    },
+    { sourceLabel },
+  )
 
   return {
     source,
@@ -2618,6 +2624,43 @@ async function clearCatalog(): Promise<void> {
   `)
 }
 
+type SqliteImportTransactionState = {
+  active: boolean
+  writtenItems: number
+  committedChunks: number
+}
+
+function beginSqliteImportTransaction(
+  activeDb: SqliteDb,
+  state: SqliteImportTransactionState,
+): void {
+  if (state.active) return
+  activeDb.exec('BEGIN')
+  state.active = true
+  state.writtenItems = 0
+}
+
+function commitSqliteImportTransaction(
+  activeDb: SqliteDb,
+  state: SqliteImportTransactionState,
+): void {
+  if (!state.active) return
+  activeDb.exec('COMMIT')
+  state.active = false
+  state.writtenItems = 0
+  state.committedChunks += 1
+}
+
+function rollbackSqliteImportTransaction(
+  activeDb: SqliteDb,
+  state: SqliteImportTransactionState,
+): void {
+  if (!state.active) return
+  activeDb.exec('ROLLBACK')
+  state.active = false
+  state.writtenItems = 0
+}
+
 function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
   const ensureMode = () => ensureDb(mode)
   const webStorageMode: WebCatalogStorageMode =
@@ -2626,6 +2669,7 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
       : mode === 'sahpool'
         ? 'sqlite-sahpool'
         : 'sqlite'
+  let importTransactionState: SqliteImportTransactionState | undefined
 
   return {
     geoImportWriteBatchSize: GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE,
@@ -2644,78 +2688,112 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
       prepareImportSource(requireDb(), source, duplicateSourceIds)
     },
     async writeMediaBatch(items) {
-    const startedAt = performance.now()
-    const ensureStartedAt = performance.now()
-    await ensureMode()
-    const ensureDbMs = performance.now() - ensureStartedAt
-    if (items.length === 0) {
+      const startedAt = performance.now()
+      const ensureStartedAt = performance.now()
+      await ensureMode()
+      const ensureDbMs = performance.now() - ensureStartedAt
+      if (items.length === 0) {
+        const totalMs = performance.now() - startedAt
+        return {
+          written: 0,
+          timing: {
+            storageMode: webStorageMode,
+            items: 0,
+            transactionActive: Boolean(importTransactionState?.active),
+            totalMs,
+            ensureDbMs,
+            requireDbMs: 0,
+            writeMs: 0,
+            accountedMs: ensureDbMs,
+            unaccountedMs: totalMs - ensureDbMs,
+          },
+        }
+      }
+      const requireStartedAt = performance.now()
+      const activeDb = requireDb()
+      const requireDbMs = performance.now() - requireStartedAt
+      const writeStartedAt = performance.now()
+      const transactionState = importTransactionState
+      let transactionActive = false
+      if (transactionState) {
+        beginSqliteImportTransaction(activeDb, transactionState)
+        transactionActive = true
+      }
+      const sqliteTiming = upsertMediaIntoSqlite(activeDb, items)
+      if (transactionState) {
+        transactionState.writtenItems += items.length
+        if (
+          transactionState.writtenItems >=
+          SQLITE_IMPORT_TRANSACTION_ITEM_LIMIT
+        ) {
+          commitSqliteImportTransaction(activeDb, transactionState)
+        }
+      }
+      const writeMs = performance.now() - writeStartedAt
       const totalMs = performance.now() - startedAt
+      const accountedMs = ensureDbMs + requireDbMs + writeMs
       return {
-        written: 0,
+        written: items.length,
         timing: {
           storageMode: webStorageMode,
-          items: 0,
-          transactionActive: false,
+          items: items.length,
+          transactionActive,
           totalMs,
           ensureDbMs,
-          requireDbMs: 0,
-          writeMs: 0,
-          accountedMs: ensureDbMs,
-          unaccountedMs: totalMs - ensureDbMs,
+          requireDbMs,
+          writeMs,
+          accountedMs,
+          unaccountedMs: totalMs - accountedMs,
+          sqlite: sqliteTiming,
         },
       }
-    }
-    const requireStartedAt = performance.now()
-    const activeDb = requireDb()
-    const requireDbMs = performance.now() - requireStartedAt
-    const writeStartedAt = performance.now()
-    const sqliteTiming = upsertMediaIntoSqlite(activeDb, items)
-    const writeMs = performance.now() - writeStartedAt
-    const totalMs = performance.now() - startedAt
-    const accountedMs = ensureDbMs + requireDbMs + writeMs
-    return {
-      written: items.length,
-      timing: {
-        storageMode: webStorageMode,
-        items: items.length,
-        transactionActive: false,
-        totalMs,
-        ensureDbMs,
-        requireDbMs,
-        writeMs,
-        accountedMs,
-        unaccountedMs: totalMs - accountedMs,
-        sqlite: sqliteTiming,
-      },
-    }
-  },
+    },
     async withImportTransaction(run, options) {
-    const startedAt = performance.now()
-    const ensureStartedAt = performance.now()
-    await ensureMode()
-    const ensureDbMs = performance.now() - ensureStartedAt
-    try {
-      const result = await run()
-      if (options?.traceId) {
-        const totalMs = performance.now() - startedAt
-        logImportTrace(options.traceId, 'sqlite import run complete', {
-          sourceLabel: options.sourceLabel,
-          totalMs: roundedMs(totalMs),
-          ensureDbMs: roundedMs(ensureDbMs),
-          runMs: roundedMs(totalMs - ensureDbMs),
-        })
+      if (importTransactionState) {
+        throw new Error('Nested SQLite import transactions are not supported.')
       }
-      return result
-    } catch (error) {
-      if (options?.traceId) {
-        logImportTrace(options.traceId, 'sqlite import run failed', {
-          sourceLabel: options.sourceLabel,
-          elapsedMs: roundedMs(performance.now() - startedAt),
-        })
+
+      const startedAt = performance.now()
+      const ensureStartedAt = performance.now()
+      await ensureMode()
+      const ensureDbMs = performance.now() - ensureStartedAt
+      const transactionState: SqliteImportTransactionState = {
+        active: false,
+        writtenItems: 0,
+        committedChunks: 0,
       }
-      throw error
-    }
-  },
+      importTransactionState = transactionState
+
+      try {
+        const result = await run()
+        commitSqliteImportTransaction(requireDb(), transactionState)
+        if (options?.traceId) {
+          const totalMs = performance.now() - startedAt
+          logImportTrace(options.traceId, 'sqlite import run complete', {
+            sourceLabel: options.sourceLabel,
+            totalMs: roundedMs(totalMs),
+            ensureDbMs: roundedMs(ensureDbMs),
+            runMs: roundedMs(totalMs - ensureDbMs),
+            committedChunks: transactionState.committedChunks,
+            transactionItemLimit: SQLITE_IMPORT_TRANSACTION_ITEM_LIMIT,
+          })
+        }
+        return result
+      } catch (error) {
+        rollbackSqliteImportTransaction(requireDb(), transactionState)
+        if (options?.traceId) {
+          logImportTrace(options.traceId, 'sqlite import run failed', {
+            sourceLabel: options.sourceLabel,
+            elapsedMs: roundedMs(performance.now() - startedAt),
+            committedChunks: transactionState.committedChunks,
+            transactionItemLimit: SQLITE_IMPORT_TRANSACTION_ITEM_LIMIT,
+          })
+        }
+        throw error
+      } finally {
+        importTransactionState = undefined
+      }
+    },
     async listMedia(query) {
       await ensureMode()
       return listMedia(query)
