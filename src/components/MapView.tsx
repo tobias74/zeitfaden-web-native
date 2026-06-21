@@ -5,11 +5,15 @@ import Point from 'ol/geom/Point'
 import TileLayer from 'ol/layer/Tile'
 import VectorLayer from 'ol/layer/Vector'
 import { fromLonLat, toLonLat } from 'ol/proj'
+import Cluster from 'ol/source/Cluster'
 import OSM from 'ol/source/OSM'
 import VectorSource from 'ol/source/Vector'
-import { Circle as CircleStyle, Fill, Stroke, Style } from 'ol/style'
+import { Circle as CircleStyle, Fill, Stroke, Style, Text } from 'ol/style'
+import { boundingExtent } from 'ol/extent'
 import { useEffect, useRef } from 'react'
 import type { EnrichedSearchResult, MediaItem } from '../types'
+import type { FeatureLike } from 'ol/Feature'
+import type { Coordinate } from 'ol/coordinate'
 
 type QueryPoint = {
   lat: number
@@ -47,6 +51,51 @@ const queryStyle = new Style({
   }),
 })
 
+const clusterStyleCache = new globalThis.Map<string, Style>()
+
+function clusterStyle(feature: FeatureLike): Style {
+  const clusteredFeatures = (feature.get('features') ?? []) as Feature[]
+  const size = clusteredFeatures.length
+  const hasResult = clusteredFeatures.some(
+    (clusteredFeature) => clusteredFeature.get('isResult') === true,
+  )
+
+  if (size <= 1) {
+    return hasResult ? resultStyle : baseStyle
+  }
+
+  const bucket = size >= 100 ? 'large' : size >= 10 ? 'medium' : 'small'
+  const key = `${hasResult ? 'result' : 'base'}:${bucket}:${size}`
+  const cachedStyle = clusterStyleCache.get(key)
+  if (cachedStyle) return cachedStyle
+
+  const radius = bucket === 'large' ? 22 : bucket === 'medium' ? 18 : 15
+  const style = new Style({
+    image: new CircleStyle({
+      radius,
+      fill: new Fill({ color: hasResult ? '#008a72' : '#4f5b69' }),
+      stroke: new Stroke({ color: '#ffffff', width: 2.5 }),
+    }),
+    text: new Text({
+      text: size.toLocaleString(),
+      fill: new Fill({ color: '#ffffff' }),
+      stroke: new Stroke({ color: hasResult ? '#005446' : '#303846', width: 2 }),
+      font: '700 12px system-ui, sans-serif',
+    }),
+  })
+
+  clusterStyleCache.set(key, style)
+  return style
+}
+
+function coordinatesForCluster(feature: FeatureLike): Coordinate[] {
+  const clusteredFeatures = (feature.get('features') ?? []) as Feature[]
+  return clusteredFeatures.flatMap((clusteredFeature) => {
+    const geometry = clusteredFeature.getGeometry()
+    return geometry instanceof Point ? [geometry.getCoordinates()] : []
+  })
+}
+
 export function MapView({
   queryPoint,
   geoItems,
@@ -56,13 +105,24 @@ export function MapView({
   const targetRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<Map | null>(null)
   const sourceRef = useRef(new VectorSource())
+  const querySourceRef = useRef(new VectorSource())
 
   useEffect(() => {
     if (!targetRef.current || mapRef.current) return
 
     const target = targetRef.current
-    const vectorLayer = new VectorLayer({
+    const clusterSource = new Cluster({
+      distance: 42,
+      minDistance: 16,
       source: sourceRef.current,
+    })
+    const clusterLayer = new VectorLayer({
+      source: clusterSource,
+      style: clusterStyle,
+    })
+    const queryLayer = new VectorLayer({
+      source: querySourceRef.current,
+      style: queryStyle,
     })
 
     const map = new Map({
@@ -71,7 +131,8 @@ export function MapView({
         new TileLayer({
           source: new OSM(),
         }),
-        vectorLayer,
+        clusterLayer,
+        queryLayer,
       ],
       view: new View({
         center: fromLonLat([8.5417, 47.3769]),
@@ -80,6 +141,22 @@ export function MapView({
     })
 
     map.on('singleclick', (event) => {
+      const clickedCluster = map.forEachFeatureAtPixel(
+        event.pixel,
+        (feature, layer) => (layer === clusterLayer ? feature : undefined),
+      )
+      if (clickedCluster) {
+        const coordinates = coordinatesForCluster(clickedCluster)
+        if (coordinates.length > 1) {
+          map.getView().fit(boundingExtent(coordinates), {
+            duration: 180,
+            maxZoom: 15,
+            padding: [72, 72, 72, 72],
+          })
+          return
+        }
+      }
+
       const [lon, lat] = toLonLat(event.coordinate)
       onQueryPointChange({ lat, lon })
     })
@@ -97,7 +174,9 @@ export function MapView({
 
   useEffect(() => {
     const source = sourceRef.current
+    const querySource = querySourceRef.current
     source.clear()
+    querySource.clear()
 
     const resultIds = new Set(results.map((result) => result.mediaId))
 
@@ -108,7 +187,8 @@ export function MapView({
       const feature = new Feature({
         geometry: new Point(fromLonLat([item.longitude, item.latitude])),
       })
-      feature.setStyle(resultIds.has(item.id) ? resultStyle : baseStyle)
+      feature.set('mediaId', item.id)
+      feature.set('isResult', resultIds.has(item.id))
       source.addFeature(feature)
     }
 
@@ -116,8 +196,7 @@ export function MapView({
       const feature = new Feature({
         geometry: new Point(fromLonLat([queryPoint.lon, queryPoint.lat])),
       })
-      feature.setStyle(queryStyle)
-      source.addFeature(feature)
+      querySource.addFeature(feature)
     }
   }, [geoItems, queryPoint, results])
 
