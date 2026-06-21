@@ -114,6 +114,7 @@ const RESULT_METADATA_KEY = 'geo-media-index-lab:result-metadata'
 const RESULT_PAGE_SIZE_KEY = 'geo-media-index-lab:result-page-size'
 const RESULT_PAGE_SIZE_OPTIONS = [50, 100, 250, 500] as const
 const DEFAULT_RESULT_PAGE_SIZE = 100
+const MAP_POINT_LIMIT = 5_000
 const DEFAULT_QUERY_POINT = {
   lat: 47.3769,
   lon: 8.5417,
@@ -308,6 +309,8 @@ function App() {
 
   const [catalogInfo, setCatalogInfo] = useState<CatalogInfo>()
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([])
+  const [mapItems, setMapItems] = useState<MediaItem[]>([])
+  const [mapPointLimitReached, setMapPointLimitReached] = useState(false)
   const [sources, setSources] = useState<MediaSource[]>([])
   const [geoPointCount, setGeoPointCount] = useState(0)
   const [geoIndexVersion, setGeoIndexVersion] = useState(0)
@@ -404,6 +407,17 @@ function App() {
       timeRange,
     ],
   )
+  const mapCatalogQuery = useMemo<CatalogQuery>(
+    () => ({
+      ...timeRange,
+      kind: kindFilter,
+      hasGeo: true,
+      sort: catalogSort,
+      limit: MAP_POINT_LIMIT + 1,
+      offset: 0,
+    }),
+    [catalogSort, kindFilter, timeRange],
+  )
   const searchUrlState = useMemo<SearchUrlState>(
     () => ({
       startDate,
@@ -465,6 +479,7 @@ function App() {
     setResultPage(nextState.resultPage)
     setResultPageSize(nextState.resultPageSize)
     setSearchResults([])
+    setMapPointLimitReached(false)
     setValidation(undefined)
     setViewerSession(undefined)
     setViewerNavigationPending(false)
@@ -479,6 +494,12 @@ function App() {
     setSources(nextSources)
   }, [catalog, catalogQuery])
 
+  const refreshMapMedia = useCallback(async () => {
+    const items = await catalog.listMedia(mapCatalogQuery)
+    setMapItems(items.slice(0, MAP_POINT_LIMIT))
+    setMapPointLimitReached(items.length > MAP_POINT_LIMIT)
+  }, [catalog, mapCatalogQuery])
+
   const rebuildGeoIndexes = useCallback(async () => {
     const points = await catalog.getGeoPoints()
     setGeoPointCount(points.length)
@@ -488,9 +509,12 @@ function App() {
   }, [catalog, registry, selectedIndexId])
 
   const refreshAll = useCallback(async () => {
-    await refreshMedia()
-    await rebuildGeoIndexes()
-  }, [rebuildGeoIndexes, refreshMedia])
+    await Promise.all([
+      refreshMedia(),
+      distanceSortActive ? Promise.resolve() : refreshMapMedia(),
+      rebuildGeoIndexes(),
+    ])
+  }, [distanceSortActive, rebuildGeoIndexes, refreshMapMedia, refreshMedia])
 
   useEffect(() => {
     let cancelled = false
@@ -562,6 +586,24 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [catalogInfo, refreshMedia])
 
+  useEffect(() => {
+    if (!catalogInfo || distanceSortActive) return
+
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      refreshMapMedia().catch((caught) => {
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : String(caught))
+        }
+      })
+    }, 0)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [catalogInfo, distanceSortActive, refreshMapMedia])
+
   const importFolder = useCallback(async () => {
     setError(undefined)
     setImportProgress(undefined)
@@ -602,6 +644,8 @@ function App() {
       setGeoBounds(undefined)
       setBoundsDrawing(false)
       setSearchResults([])
+      setMapItems([])
+      setMapPointLimitReached(false)
       setValidation(undefined)
       setViewerSession(undefined)
       setViewerNavigationPending(false)
@@ -653,14 +697,18 @@ function App() {
         )
         const items = itemChunks.flat()
         const byId = new Map(items.map((item) => [item.id, item]))
-        const enriched = results
+        const unboundedEnriched = results
           .flatMap((result) => {
             const item = byId.get(result.mediaId)
             if (!item) return []
             if (kindFilter !== 'all' && item.kind !== kindFilter) return []
-            if (!itemWithinGeoBounds(item, geoBounds)) return []
             return [{ ...result, item }]
           })
+        const enriched = geoBounds
+          ? unboundedEnriched.filter((result) =>
+              itemWithinGeoBounds(result.item, geoBounds),
+            )
+          : unboundedEnriched
         const [nextValidation, nextStats] = await Promise.all([
           kindFilter === 'all'
             ? registry.validateSelected(selectedIndex.id, query)
@@ -671,6 +719,12 @@ function App() {
         if (cancelled) return
 
         setSearchResults(enriched)
+        setMapItems(
+          unboundedEnriched
+            .slice(0, MAP_POINT_LIMIT)
+            .map((result) => result.item),
+        )
+        setMapPointLimitReached(unboundedEnriched.length > MAP_POINT_LIMIT)
         setValidation(nextValidation)
         setIndexStats(nextStats)
       } catch (caught) {
@@ -740,6 +794,7 @@ function App() {
     }
     if (nextSort !== 'distance') {
       setSearchResults([])
+      setMapPointLimitReached(false)
       setValidation(undefined)
     }
   }, [])
@@ -780,6 +835,7 @@ function App() {
     setBoundsDrawing(false)
     setResultPage(0)
     setSearchResults([])
+    setMapPointLimitReached(false)
     setValidation(undefined)
     setViewerSession(undefined)
     setViewerNavigationPending(false)
@@ -1017,6 +1073,7 @@ function App() {
   const viewerLocalIndex = viewerSession
     ? viewerSession.absoluteIndex - viewerSession.windowOffset
     : -1
+  const mapResultItems = useMemo(() => mediaItemsToResults(mapItems), [mapItems])
   const legalPageTitle =
     activePage === 'privacy' ? t('privacy') : t('imprint')
   const privacyHtml = language === 'de' ? privacyDeHtml : privacyEnHtml
@@ -1223,8 +1280,8 @@ function App() {
           >
             <MapView
               queryPoint={distanceSortActive ? queryPoint : undefined}
-              geoItems={mediaItems}
-              results={searchResults}
+              geoItems={mapItems}
+              results={mapResultItems}
               geoBounds={geoBounds}
               boundsDrawing={boundsDrawing}
               label={t('searchMap')}
@@ -1253,11 +1310,22 @@ function App() {
                 </button>
               )}
             </div>
-            {distanceSortActive && (
-              <div className="map-readout">
-                <MapPin size={16} />
-                <span>{queryPoint.lat.toFixed(5)}</span>
-                <span>{queryPoint.lon.toFixed(5)}</span>
+            {(mapPointLimitReached || distanceSortActive) && (
+              <div className="map-status-stack">
+                {mapPointLimitReached && (
+                  <div className="map-limit-notice">
+                    {t('mapPointLimitNotice', {
+                      shown: MAP_POINT_LIMIT.toLocaleString(locale),
+                    })}
+                  </div>
+                )}
+                {distanceSortActive && (
+                  <div className="map-readout">
+                    <MapPin size={16} />
+                    <span>{queryPoint.lat.toFixed(5)}</span>
+                    <span>{queryPoint.lon.toFixed(5)}</span>
+                  </div>
+                )}
               </div>
             )}
           </div>

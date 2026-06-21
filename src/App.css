@@ -275,20 +275,40 @@
   color: #ffffff;
 }
 
-.map-readout {
+.map-status-stack {
   position: absolute;
   left: 12px;
   bottom: 12px;
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  max-width: min(360px, calc(100% - 24px));
+}
+
+.map-readout,
+.map-limit-notice {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 34px;
-  padding: 0 10px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.94);
   border: 1px solid #d0d8d4;
   color: #24312d;
+}
+
+.map-readout {
+  min-height: 34px;
+  padding: 0 10px;
   font-size: 13px;
+}
+
+.map-limit-notice {
+  padding: 7px 10px;
+  color: #6b3c12;
+  border-color: #e1c7a5;
+  background: rgba(255, 249, 239, 0.96);
+  font-size: 12px;
+  line-height: 1.3;
 }
 
 .resize-handle {

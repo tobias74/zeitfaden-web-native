@@ -53,6 +53,8 @@ const en = {
   list: 'List',
   loading: 'Loading',
   locations: 'Locations',
+  mapPointLimitNotice:
+    'Map point limit reached: showing first {shown} matching geo points.',
   medium: 'Medium',
   mediaSourceOriginal: 'original',
   mediaSourceThumbnail: 'thumbnail',
@@ -145,6 +147,8 @@ const de: Record<TranslationKey, string> = {
   list: 'Liste',
   loading: 'Lädt',
   locations: 'Speicherorte',
+  mapPointLimitNotice:
+    'Kartenlimit erreicht: Es werden die ersten {shown} passenden Geo-Punkte angezeigt.',
   medium: 'Mittel',
   mediaSourceOriginal: 'Original',
   mediaSourceThumbnail: 'Vorschaubild',
