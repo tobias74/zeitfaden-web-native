@@ -1196,7 +1196,9 @@ fn list_media(app: AppHandle, query: CatalogQuery) -> AppResult<Vec<MediaItem>> 
     ];
     let mut bind = Vec::<Value>::new();
 
-    if let Some(kind) = query.kind.as_ref().filter(|kind| *kind != "all") {
+    if query.kind.as_deref() == Some("media") {
+        where_sql.push("a.kind IN ('image', 'video')".to_string());
+    } else if let Some(kind) = query.kind.as_ref().filter(|kind| *kind != "all") {
         where_sql.push("a.kind = ?".to_string());
         bind.push(Value::Text(kind.clone()));
     }

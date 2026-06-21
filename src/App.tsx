@@ -68,8 +68,8 @@ import type {
   EnrichedSearchResult,
   GeoBounds,
   GeoIndexStats,
+  KindFilter,
   MediaItem,
-  MediaKind,
   MediaSource,
   TimeRange,
   ValidationReport,
@@ -172,10 +172,19 @@ function storedPageSize(): number {
     : DEFAULT_RESULT_PAGE_SIZE
 }
 
-function filterValueToKind(value: string): MediaKind | 'all' {
-  return value === 'image' || value === 'video' || value === 'geo_point'
+function filterValueToKind(value: string): KindFilter {
+  return value === 'image' ||
+    value === 'video' ||
+    value === 'geo_point' ||
+    value === 'media'
     ? value
     : 'all'
+}
+
+function itemMatchesKindFilter(item: MediaItem, filter: KindFilter): boolean {
+  if (filter === 'all') return true
+  if (filter === 'media') return item.kind === 'image' || item.kind === 'video'
+  return item.kind === filter
 }
 
 function statsNumber(value: number | undefined, locale: string): string {
@@ -411,7 +420,7 @@ function App() {
   const [startDate, setStartDate] = useState(initialSearchState.startDate)
   const [endDate, setEndDate] = useState(initialSearchState.endDate)
   const [sort, setSort] = useState<SortMode>(initialSearchState.sort)
-  const [kindFilter, setKindFilter] = useState<MediaKind | 'all'>(
+  const [kindFilter, setKindFilter] = useState<KindFilter>(
     initialSearchState.kindFilter,
   )
   const [geoBounds, setGeoBounds] = useState<GeoBounds | undefined>(
@@ -833,7 +842,7 @@ function App() {
           .flatMap((result) => {
             const item = byId.get(result.mediaId)
             if (!item) return []
-            if (kindFilter !== 'all' && item.kind !== kindFilter) return []
+            if (!itemMatchesKindFilter(item, kindFilter)) return []
             return [{ ...result, item }]
           })
         const enriched = geoBounds
@@ -912,7 +921,7 @@ function App() {
     ? visibleEnd < allResultItems.length
     : resultItems.length === resultPageSize
 
-  const setFilterKind = useCallback((kind: MediaKind | 'all') => {
+  const setFilterKind = useCallback((kind: KindFilter) => {
     setKindFilter(kind)
     setResultPage(0)
   }, [])
@@ -1584,6 +1593,7 @@ function App() {
                   }
                 >
                   <option value="all">{t('all')}</option>
+                  <option value="media">{t('allMedia')}</option>
                   <option value="image">{t('images')}</option>
                   <option value="video">{t('videos')}</option>
                   <option value="geo_point">{t('geoPoints')}</option>

@@ -1,4 +1,4 @@
-import type { CatalogSort, GeoBounds, MediaKind } from '../types'
+import type { CatalogSort, GeoBounds, KindFilter } from '../types'
 
 export type SearchSortMode = CatalogSort | 'distance'
 
@@ -11,7 +11,7 @@ export type SearchUrlState = {
   startDate: string
   endDate: string
   sort: SearchSortMode
-  kindFilter: MediaKind | 'all'
+  kindFilter: KindFilter
   geoBounds?: GeoBounds
   resultPage: number
   resultPageSize: number
@@ -55,8 +55,13 @@ function sortMode(value: string | null): SearchSortMode {
   return 'captured_at_desc'
 }
 
-function kindFilter(value: string | null): MediaKind | 'all' {
-  if (value === 'image' || value === 'video' || value === 'geo_point') {
+function kindFilter(value: string | null): KindFilter {
+  if (
+    value === 'image' ||
+    value === 'video' ||
+    value === 'geo_point' ||
+    value === 'media'
+  ) {
     return value
   }
   return 'all'

@@ -118,4 +118,16 @@ describe('search URL state', () => {
     expect(state.kindFilter).toBe('geo_point')
     expect(buildSearchUrlParams(state, defaults).get('kind')).toBe('geo_point')
   })
+
+  it('round-trips the all media kind filter', () => {
+    const state = parseSearchUrlState(
+      '?kind=media',
+      defaults,
+      allowedIndexes,
+      allowedPageSizes,
+    )
+
+    expect(state.kindFilter).toBe('media')
+    expect(buildSearchUrlParams(state, defaults).get('kind')).toBe('media')
+  })
 })

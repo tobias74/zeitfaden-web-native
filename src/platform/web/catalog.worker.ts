@@ -549,7 +549,9 @@ async function listMedia(query: CatalogQuery): Promise<MediaItem[]> {
   ]
   const bind: unknown[] = []
 
-  if (query.kind && query.kind !== 'all') {
+  if (query.kind === 'media') {
+    where.push("a.kind IN ('image', 'video')")
+  } else if (query.kind && query.kind !== 'all') {
     where.push('a.kind = ?')
     bind.push(query.kind)
   }

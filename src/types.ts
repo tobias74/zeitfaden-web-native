@@ -1,4 +1,5 @@
 export type MediaKind = 'image' | 'video' | 'geo_point'
+export type KindFilter = MediaKind | 'all' | 'media'
 
 export type CapturedAtSource =
   | 'exif'
@@ -63,7 +64,7 @@ export type GeoBounds = {
 export type CatalogSort = 'captured_at_asc' | 'captured_at_desc'
 
 export type CatalogQuery = TimeRange & {
-  kind?: MediaKind | 'all'
+  kind?: KindFilter
   sourceId?: string
   hasGeo?: boolean
   geoBounds?: GeoBounds
