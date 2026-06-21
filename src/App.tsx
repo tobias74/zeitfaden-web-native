@@ -12,7 +12,6 @@ import {
   List,
   MapPin,
   Settings2,
-  ShieldCheck,
   Trash2,
   Video,
 } from 'lucide-react'
@@ -1152,18 +1151,10 @@ function App() {
               </address>
             </article>
           ) : (
-            <article className="legal-panel privacy-panel">
-              <div className="legal-panel-title">
-                <ShieldCheck size={20} />
-                <h2>{t('privacy')}</h2>
-              </div>
-              <iframe
-                className="privacy-frame"
-                title={t('privacy')}
-                sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin"
-                srcDoc={privacyHtml}
-              />
-            </article>
+            <article
+              className="privacy-page"
+              dangerouslySetInnerHTML={{ __html: privacyHtml }}
+            />
           )}
         </section>
       </main>

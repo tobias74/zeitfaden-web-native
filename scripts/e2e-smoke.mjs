@@ -59,12 +59,12 @@ async function main() {
 
   await page.getByRole('button', { name: /privacy policy/i }).click()
   await page
-    .frameLocator('.privacy-frame')
+    .locator('.privacy-page')
     .getByRole('heading', { name: 'Privacy Policy', level: 1 })
     .waitFor({ timeout: 15_000 })
   await page.locator('.language-control select').selectOption('de')
   await page
-    .frameLocator('.privacy-frame')
+    .locator('.privacy-page')
     .getByRole('heading', { name: 'Datenschutzerklärung', level: 1 })
     .waitFor({ timeout: 15_000 })
   await page.screenshot({ path: '/tmp/ding-e2e-privacy.png', fullPage: true })

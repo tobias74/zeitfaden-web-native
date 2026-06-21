@@ -82,18 +82,35 @@
   font-weight: 720;
 }
 
-.privacy-panel {
-  height: min(720px, calc(100vh - 170px));
-  grid-template-rows: auto minmax(0, 1fr);
+.privacy-page {
+  min-width: 0;
+  width: min(820px, 100%);
+  padding: 0 8px 48px;
+  color: #111816;
+  line-height: 1.45;
 }
 
-.privacy-frame {
-  width: 100%;
-  height: 100%;
-  min-height: 0;
-  border: 1px solid #e0e5e2;
-  border-radius: 6px;
-  background: #ffffff;
+.privacy-page :where(h1, h2, h3, h4, p, ul, ol) {
+  margin: 0 0 14px;
+}
+
+.privacy-page :where(h1, h2) {
+  font-size: 24px;
+  line-height: 1.15;
+}
+
+.privacy-page :where(h3, h4) {
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+.privacy-page :where(a) {
+  color: #0b63b6;
+  overflow-wrap: anywhere;
+}
+
+.privacy-page :where(p, li) {
+  overflow-wrap: anywhere;
 }
 
 .topbar h1 {
@@ -1218,10 +1235,6 @@
 
   .legal-content {
     padding: 18px 0;
-  }
-
-  .privacy-panel {
-    height: calc(100vh - 180px);
   }
 
   .workspace {
