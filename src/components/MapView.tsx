@@ -62,6 +62,8 @@ const boundsStyle = new Style({
 })
 
 const clusterStyleCache = new globalThis.Map<string, Style>()
+const CLUSTER_BOUNDS_PADDING_RATIO = 0.12
+const MIN_CLUSTER_BOUNDS_PADDING_METERS = 250
 
 function clusterStyle(feature: FeatureLike): Style {
   const clusteredFeatures = (feature.get('features') ?? []) as Feature[]
@@ -124,6 +126,31 @@ function boundsFromMapExtent(extent: [number, number, number, number]): GeoBound
     minLon: boundedLongitude(Math.min(leftLon, rightLon)),
     maxLon: boundedLongitude(Math.max(leftLon, rightLon)),
   }
+}
+
+function boundsFromClusterCoordinates(
+  coordinates: Coordinate[],
+): GeoBounds | undefined {
+  if (coordinates.length === 0) return undefined
+
+  const extent = boundingExtent(coordinates) as [number, number, number, number]
+  const width = extent[2] - extent[0]
+  const height = extent[3] - extent[1]
+  const paddingX = Math.max(
+    width * CLUSTER_BOUNDS_PADDING_RATIO,
+    MIN_CLUSTER_BOUNDS_PADDING_METERS,
+  )
+  const paddingY = Math.max(
+    height * CLUSTER_BOUNDS_PADDING_RATIO,
+    MIN_CLUSTER_BOUNDS_PADDING_METERS,
+  )
+
+  return boundsFromMapExtent([
+    extent[0] - paddingX,
+    extent[1] - paddingY,
+    extent[2] + paddingX,
+    extent[3] + paddingY,
+  ])
 }
 
 function mapExtentFromBounds(bounds: GeoBounds): [number, number, number, number] {
@@ -219,17 +246,30 @@ export function MapView({
       if (clickedCluster) {
         const coordinates = coordinatesForCluster(clickedCluster)
         if (coordinates.length > 1) {
-          map.getView().fit(boundingExtent(coordinates), {
-            duration: 180,
-            maxZoom: 15,
-            padding: [72, 72, 72, 72],
-          })
+          const bounds = boundsFromClusterCoordinates(coordinates)
+          if (bounds) onGeoBoundsChange(bounds)
           return
         }
       }
 
       const [lon, lat] = toLonLat(event.coordinate)
       onQueryPointChange({ lat, lon })
+    })
+
+    map.on('pointermove', (event) => {
+      if (event.dragging || boundsDrawingRef.current) {
+        target.style.cursor = boundsDrawingRef.current ? 'crosshair' : ''
+        return
+      }
+
+      const hoveredCluster = map.forEachFeatureAtPixel(
+        event.pixel,
+        (feature, layer) => (layer === clusterLayer ? feature : undefined),
+      )
+      target.style.cursor =
+        hoveredCluster && coordinatesForCluster(hoveredCluster).length > 1
+          ? 'pointer'
+          : ''
     })
 
     mapRef.current = map
