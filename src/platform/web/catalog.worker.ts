@@ -62,12 +62,13 @@ let initResult: InitResult | undefined
 const geoIndexRegistry = new GeoIndexRegistry()
 
 const IMPORT_BATCH_SIZE = 1000
-const SQLITE_BIND_CHUNK_LIMIT = 900
+const SQLITE_BIND_CHUNK_LIMIT = 12000
 const ASSET_BIND_COLUMNS = 15
 const LOCATION_BIND_COLUMNS = 7
 const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
 const GEO_IMPORT_PARSE_SLICE_MS = 250
 const PROGRESS_HEARTBEAT_MS = 1000
+const GEO_POINT_ITEM_BUILD_CHUNK_SIZE = 250
 
 const ctx = self as unknown as {
   postMessage: (message: unknown) => void
@@ -894,6 +895,19 @@ async function geoPointItemFromParsedPoint(
   }
 }
 
+async function geoPointItemsFromParsedPoints(
+  sourceId: string,
+  sourceLabel: string,
+  mimeType: string,
+  points: ParsedGeoPoint[],
+): Promise<MediaItem[]> {
+  return Promise.all(
+    points.map((point) =>
+      geoPointItemFromParsedPoint(sourceId, sourceLabel, mimeType, point),
+    ),
+  )
+}
+
 async function importFolderIntoCatalog(
   payload: ImportFolderPayload,
   postProgress: (progress: ImportProgress) => void,
@@ -1105,32 +1119,51 @@ async function importGpxIntoCatalog(
   let acceptedMedia = 0
   const batch: MediaItem[] = []
 
-  for (const point of parsed.points) {
-    batch.push(
-      await geoPointItemFromParsedPoint(
-        source.id,
-        sourceLabel,
-        parsed.mimeType,
-        point,
-      ),
+  for (
+    let offset = 0;
+    offset < parsed.points.length;
+    offset += GEO_POINT_ITEM_BUILD_CHUNK_SIZE
+  ) {
+    const itemChunk = await geoPointItemsFromParsedPoints(
+      source.id,
+      sourceLabel,
+      parsed.mimeType,
+      parsed.points.slice(offset, offset + GEO_POINT_ITEM_BUILD_CHUNK_SIZE),
     )
-    acceptedMedia += 1
-    if (batch.length >= IMPORT_BATCH_SIZE) {
-      postProgress({
-        phase: 'storing',
-        sourceLabel,
-        scannedFiles: 1,
-        totalFiles: 1,
-        acceptedMedia,
-        skippedFiles: parsed.skippedPoints,
-        currentPath: sourceLabel,
-        scannedBytes: file.size,
-        totalBytes: file.size,
-      })
-      upsertMediaBatch(activeDb, batch)
-      batch.length = 0
-      await yieldToEventLoop()
+
+    for (const item of itemChunk) {
+      batch.push(item)
+      acceptedMedia += 1
+      if (batch.length >= IMPORT_BATCH_SIZE) {
+        postProgress({
+          phase: 'storing',
+          sourceLabel,
+          scannedFiles: 1,
+          totalFiles: 1,
+          acceptedMedia,
+          skippedFiles: parsed.skippedPoints,
+          currentPath: sourceLabel,
+          scannedBytes: file.size,
+          totalBytes: file.size,
+        })
+        upsertMediaBatch(activeDb, batch)
+        batch.length = 0
+        await yieldToEventLoop()
+      }
     }
+
+    postProgress({
+      phase: 'scanning',
+      sourceLabel,
+      scannedFiles: 1,
+      totalFiles: 1,
+      acceptedMedia,
+      skippedFiles: parsed.skippedPoints,
+      currentPath: sourceLabel,
+      scannedBytes: file.size,
+      totalBytes: file.size,
+    })
+    await yieldToEventLoop()
   }
 
   if (batch.length > 0) {
@@ -1166,6 +1199,7 @@ async function importGoogleTakeoutIntoCatalog(
   let bytesRead = 0
   let acceptedMedia = 0
   let skippedFiles = 0
+  let preparingPoints = 0
   let lastProgressAt = 0
 
   const emitProgress = (phase: ImportProgress['phase']) => {
@@ -1174,7 +1208,8 @@ async function importGoogleTakeoutIntoCatalog(
       sourceLabel,
       scannedFiles: phase === 'storing' && bytesRead >= file.size ? 1 : 0,
       totalFiles: 1,
-      acceptedMedia: acceptedMedia + pendingPoints.length + batch.length,
+      acceptedMedia:
+        acceptedMedia + pendingPoints.length + preparingPoints + batch.length,
       skippedFiles,
       currentPath: sourceLabel,
       scannedBytes: bytesRead,
@@ -1201,18 +1236,34 @@ async function importGoogleTakeoutIntoCatalog(
 
   const consumePoints = async () => {
     const points = pendingPoints.splice(0)
-    for (const point of points) {
-      batch.push(
-        await geoPointItemFromParsedPoint(
-          source.id,
-          sourceLabel,
-          'application/json',
-          point,
-        ),
+    preparingPoints += points.length
+
+    for (
+      let offset = 0;
+      offset < points.length;
+      offset += GEO_POINT_ITEM_BUILD_CHUNK_SIZE
+    ) {
+      const pointChunk = points.slice(
+        offset,
+        offset + GEO_POINT_ITEM_BUILD_CHUNK_SIZE,
       )
-      if (batch.length >= IMPORT_BATCH_SIZE) {
-        await flushBatch('scanning')
+      const itemChunk = await geoPointItemsFromParsedPoints(
+        source.id,
+        sourceLabel,
+        'application/json',
+        pointChunk,
+      )
+      preparingPoints -= pointChunk.length
+
+      for (const item of itemChunk) {
+        batch.push(item)
+        if (batch.length >= IMPORT_BATCH_SIZE) {
+          await flushBatch('scanning')
+        }
       }
+
+      maybeEmitProgress()
+      await yieldToEventLoop()
     }
   }
 

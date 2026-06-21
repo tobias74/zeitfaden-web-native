@@ -20,7 +20,7 @@ use walkdir::WalkDir;
 type AppResult<T> = Result<T, String>;
 
 const IMPORT_BATCH_SIZE: usize = 1000;
-const SQLITE_BIND_CHUNK_LIMIT: usize = 900;
+const SQLITE_BIND_CHUNK_LIMIT: usize = 12000;
 const ASSET_BIND_COLUMNS: usize = 15;
 const LOCATION_BIND_COLUMNS: usize = 8;
 const GEO_IMPORT_PREFIX_BYTES: usize = 512 * 1024;
