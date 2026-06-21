@@ -17,6 +17,7 @@ const GEO_POINT_HASH_VERSION = 'geo_point:v1'
 const GPX_POINT_TAGS = new Set(['trkpt', 'rtept', 'wpt'])
 const UNSUPPORTED_GEO_FILE_FORMAT =
   'The selected file is not a supported geo import format. Supported formats are GPX and Google Takeout Location History JSON.'
+const GEO_IMPORT_DEBUG_PREFIX = '[geo-import]'
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes)
@@ -78,15 +79,63 @@ function timestampMs(value: unknown): number | undefined {
   return parsed === undefined ? undefined : Math.trunc(parsed)
 }
 
+function valueKind(value: unknown): string {
+  if (Array.isArray(value)) return 'array'
+  if (value === null) return 'null'
+  return typeof value
+}
+
+function sampleKeys(value: unknown, limit = 12): string[] {
+  return isRecord(value) ? Object.keys(value).slice(0, limit) : []
+}
+
+function logGeoImportDebug(
+  fileName: string,
+  reason: string,
+  details: Record<string, unknown>,
+): void {
+  console.debug(GEO_IMPORT_DEBUG_PREFIX, {
+    fileName,
+    reason,
+    ...details,
+  })
+}
+
 function isGoogleTakeoutLocationJson(value: unknown): value is {
   locations: unknown[]
 } {
   return isRecord(value) && Array.isArray(value.locations)
 }
 
+function isGoogleSemanticLocationJson(value: unknown): boolean {
+  return isRecord(value) && Array.isArray(value.timelineObjects)
+}
+
 function isGeoJson(value: unknown): boolean {
   if (!isRecord(value) || typeof value.type !== 'string') return false
   return ['FeatureCollection', 'Feature', 'Point'].includes(value.type)
+}
+
+function jsonDebugDetails(parsed: unknown): Record<string, unknown> {
+  const locations = isRecord(parsed) ? parsed.locations : undefined
+  const timelineObjects = isRecord(parsed) ? parsed.timelineObjects : undefined
+  const firstLocation = Array.isArray(locations) ? locations[0] : undefined
+  const firstTimelineObject = Array.isArray(timelineObjects)
+    ? timelineObjects[0]
+    : undefined
+
+  return {
+    rootKind: valueKind(parsed),
+    topLevelKeys: sampleKeys(parsed),
+    locationsKind: valueKind(locations),
+    locationsCount: Array.isArray(locations) ? locations.length : undefined,
+    firstLocationKeys: sampleKeys(firstLocation),
+    timelineObjectsKind: valueKind(timelineObjects),
+    timelineObjectsCount: Array.isArray(timelineObjects)
+      ? timelineObjects.length
+      : undefined,
+    firstTimelineObjectKeys: sampleKeys(firstTimelineObject),
+  }
 }
 
 function parsedXmlDocument(xmlText: string): Document | undefined {
@@ -195,7 +244,9 @@ export function parseGoogleTakeoutLocationPoints(
     const longitude =
       longitudeE7 === undefined ? undefined : longitudeE7 / 10_000_000
     const capturedAt =
-      timestampMillis(entry.timestamp) ?? timestampMs(entry.timestampMs)
+      timestampMillis(entry.timestamp) ??
+      timestampMs(entry.timestampMs) ??
+      timestampMs(entry.timestampMS)
 
     if (
       !validLatitude(latitude) ||
@@ -218,31 +269,68 @@ export function parseGoogleTakeoutLocationPoints(
 }
 
 export function detectGeoFileFormat(
-  _fileName: string,
+  fileName: string,
   fileText: string,
 ): GeoFileFormat {
-  if (fileText.trim() === '') {
+  const trimmed = fileText.trimStart()
+  if (trimmed === '') {
+    logGeoImportDebug(fileName, 'empty file', {})
     throw new Error(UNSUPPORTED_GEO_FILE_FORMAT)
   }
 
-  try {
-    const parsed = JSON.parse(fileText) as unknown
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(fileText) as unknown
+    } catch (error) {
+      logGeoImportDebug(
+        fileName,
+        'JSON parse failed',
+        {
+          message: error instanceof Error ? error.message : String(error),
+          firstCharacters: trimmed.slice(0, 32),
+        },
+      )
+      throw new Error(UNSUPPORTED_GEO_FILE_FORMAT, { cause: error })
+    }
+
     if (isGoogleTakeoutLocationJson(parsed)) return 'google-takeout-json'
+    if (isGoogleSemanticLocationJson(parsed)) {
+      logGeoImportDebug(
+        fileName,
+        'Google Semantic Location History is not supported yet',
+        jsonDebugDetails(parsed),
+      )
+      throw new Error(
+        'This looks like Google Semantic Location History JSON. That is valid Google Takeout data, but this importer currently supports only the raw Records.json location export.',
+      )
+    }
     if (isGeoJson(parsed)) {
+      logGeoImportDebug(
+        fileName,
+        'GeoJSON is not supported yet',
+        jsonDebugDetails(parsed),
+      )
       throw new Error(
         'GeoJSON files are not supported yet. Supported formats are GPX and Google Takeout Location History JSON.',
       )
     }
+    logGeoImportDebug(
+      fileName,
+      'unsupported JSON geo format',
+      jsonDebugDetails(parsed),
+    )
     throw new Error(
       'The selected JSON file is not a supported geo import format. Supported JSON format is Google Takeout Location History JSON.',
     )
-  } catch (error) {
-    if (!(error instanceof SyntaxError)) throw error
   }
 
   const document = parsedXmlDocument(fileText)
   if (document && isGpxDocument(document)) return 'gpx'
 
+  logGeoImportDebug(fileName, 'unsupported non-JSON/non-GPX content', {
+    firstCharacters: fileText.trimStart().slice(0, 32),
+  })
   throw new Error(UNSUPPORTED_GEO_FILE_FORMAT)
 }
 

@@ -368,6 +368,13 @@ fn is_google_takeout_location_json(value: &JsonValue) -> bool {
         .is_some()
 }
 
+fn is_google_semantic_location_json(value: &JsonValue) -> bool {
+    value
+        .get("timelineObjects")
+        .and_then(|value| value.as_array())
+        .is_some()
+}
+
 fn is_geojson(value: &JsonValue) -> bool {
     matches!(
         value.get("type").and_then(|value| value.as_str()),
@@ -375,26 +382,100 @@ fn is_geojson(value: &JsonValue) -> bool {
     )
 }
 
+fn json_value_kind(value: Option<&JsonValue>) -> &'static str {
+    match value {
+        Some(JsonValue::Array(_)) => "array",
+        Some(JsonValue::Bool(_)) => "boolean",
+        Some(JsonValue::Null) => "null",
+        Some(JsonValue::Number(_)) => "number",
+        Some(JsonValue::Object(_)) => "object",
+        Some(JsonValue::String(_)) => "string",
+        None => "missing",
+    }
+}
+
+fn sample_json_keys(value: Option<&JsonValue>) -> Vec<String> {
+    value
+        .and_then(|value| value.as_object())
+        .map(|object| object.keys().take(12).cloned().collect())
+        .unwrap_or_default()
+}
+
+fn geo_import_debug_json(path: &Path, reason: &str, parsed: &JsonValue) {
+    let locations = parsed.get("locations");
+    let timeline_objects = parsed.get("timelineObjects");
+    let first_location = locations
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first());
+    let first_timeline_object = timeline_objects
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first());
+
+    eprintln!(
+        "[geo-import] file={} reason={} rootKind={} topLevelKeys={:?} locationsKind={} locationsCount={:?} firstLocationKeys={:?} timelineObjectsKind={} timelineObjectsCount={:?} firstTimelineObjectKeys={:?}",
+        path.display(),
+        reason,
+        json_value_kind(Some(parsed)),
+        sample_json_keys(Some(parsed)),
+        json_value_kind(locations),
+        locations.and_then(|value| value.as_array()).map(|items| items.len()),
+        sample_json_keys(first_location),
+        json_value_kind(timeline_objects),
+        timeline_objects
+            .and_then(|value| value.as_array())
+            .map(|items| items.len()),
+        sample_json_keys(first_timeline_object),
+    );
+}
+
+fn geo_import_debug_text(path: &Path, reason: &str, text: &str) {
+    let first_characters = text.trim_start().chars().take(32).collect::<String>();
+    eprintln!(
+        "[geo-import] file={} reason={} firstCharacters={:?}",
+        path.display(),
+        reason,
+        first_characters
+    );
+}
+
 fn unsupported_geo_file_format_message() -> String {
     "The selected file is not a supported geo import format. Supported formats are GPX and Google Takeout Location History JSON.".to_string()
 }
 
-fn detect_geo_file_format(text: &str) -> AppResult<GeoFileFormat> {
-    if text.trim().is_empty() {
+fn detect_geo_file_format(path: &Path, text: &str) -> AppResult<GeoFileFormat> {
+    let trimmed = text.trim_start();
+    if trimmed.is_empty() {
+        geo_import_debug_text(path, "empty file", text);
         return Err(unsupported_geo_file_format_message());
     }
 
-    match serde_json::from_str::<JsonValue>(text) {
-        Ok(parsed) if is_google_takeout_location_json(&parsed) => {
-            return Ok(GeoFileFormat::GoogleTakeoutJson);
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        match serde_json::from_str::<JsonValue>(text) {
+            Ok(parsed) => {
+                if is_google_takeout_location_json(&parsed) {
+                    return Ok(GeoFileFormat::GoogleTakeoutJson);
+                }
+                if is_google_semantic_location_json(&parsed) {
+                    geo_import_debug_json(
+                        path,
+                        "Google Semantic Location History is not supported yet",
+                        &parsed,
+                    );
+                    return Err("This looks like Google Semantic Location History JSON. That is valid Google Takeout data, but this importer currently supports only the raw Records.json location export.".to_string());
+                }
+                if is_geojson(&parsed) {
+                    geo_import_debug_json(path, "GeoJSON is not supported yet", &parsed);
+                    return Err("GeoJSON files are not supported yet. Supported formats are GPX and Google Takeout Location History JSON.".to_string());
+                }
+
+                geo_import_debug_json(path, "unsupported JSON geo format", &parsed);
+                return Err("The selected JSON file is not a supported geo import format. Supported JSON format is Google Takeout Location History JSON.".to_string());
+            }
+            Err(error) => {
+                geo_import_debug_text(path, &format!("JSON parse failed: {error}"), text);
+                return Err(unsupported_geo_file_format_message());
+            }
         }
-        Ok(parsed) if is_geojson(&parsed) => {
-            return Err("GeoJSON files are not supported yet. Supported formats are GPX and Google Takeout Location History JSON.".to_string());
-        }
-        Ok(_) => {
-            return Err("The selected JSON file is not a supported geo import format. Supported JSON format is Google Takeout Location History JSON.".to_string());
-        }
-        Err(_) => {}
     }
 
     if let Ok(document) = roxmltree::Document::parse(text) {
@@ -403,6 +484,7 @@ fn detect_geo_file_format(text: &str) -> AppResult<GeoFileFormat> {
         }
     }
 
+    geo_import_debug_text(path, "unsupported non-JSON/non-GPX content", text);
     Err(unsupported_geo_file_format_message())
 }
 
@@ -477,7 +559,8 @@ fn parse_google_takeout_location_points(json: &str) -> AppResult<ParsedGeoFile> 
         let captured_at = entry
             .get("timestamp")
             .and_then(parse_json_timestamp)
-            .or_else(|| entry.get("timestampMs").and_then(parse_json_timestamp_ms));
+            .or_else(|| entry.get("timestampMs").and_then(parse_json_timestamp_ms))
+            .or_else(|| entry.get("timestampMS").and_then(parse_json_timestamp_ms));
 
         match (latitude, longitude, captured_at) {
             (Some(latitude), Some(longitude), Some(captured_at))
@@ -501,8 +584,8 @@ fn parse_google_takeout_location_points(json: &str) -> AppResult<ParsedGeoFile> 
     })
 }
 
-fn parse_geo_file_points(_path: &Path, text: &str) -> AppResult<ParsedGeoFile> {
-    match detect_geo_file_format(text)? {
+fn parse_geo_file_points(path: &Path, text: &str) -> AppResult<ParsedGeoFile> {
+    match detect_geo_file_format(path, text)? {
         GeoFileFormat::GoogleTakeoutJson => parse_google_takeout_location_points(text),
         GeoFileFormat::Gpx => parse_gpx_points(text),
     }
@@ -1696,6 +1779,10 @@ mod tests {
                 "latitudeE7": "481374628",
                 "longitudeE7": "115781587",
                 "timestampMs": "1351434205077"
+              }, {
+                "latitudeE7": "481374629",
+                "longitudeE7": "115781588",
+                "timestampMS": "1351434206077"
               }]
             }
             "#,
@@ -1704,7 +1791,7 @@ mod tests {
 
         assert_eq!(parsed.mime_type, "application/json");
         assert_eq!(parsed.skipped_points, 1);
-        assert_eq!(parsed.points.len(), 3);
+        assert_eq!(parsed.points.len(), 4);
         assert_eq!(parsed.points[0].index, 1);
         assert_eq!(parsed.points[0].latitude, 48.1370673);
         assert_eq!(parsed.points[0].longitude, 11.5775995);
@@ -1716,12 +1803,15 @@ mod tests {
         );
         assert_eq!(parsed.points[2].index, 4);
         assert_eq!(parsed.points[2].captured_at, 1_351_434_205_077);
+        assert_eq!(parsed.points[3].index, 5);
+        assert_eq!(parsed.points[3].captured_at, 1_351_434_206_077);
     }
 
     #[test]
     fn detects_geo_file_format_from_content() {
         assert_eq!(
             detect_geo_file_format(
+                Path::new("track.json"),
                 r#"
                 <gpx>
                   <wpt lat="48.4" lon="11.8"><time>2026-06-21T10:03:00Z</time></wpt>
@@ -1734,6 +1824,7 @@ mod tests {
 
         assert_eq!(
             detect_geo_file_format(
+                Path::new("records.gpx"),
                 r#"
                 {
                   "locations": [{
@@ -1790,6 +1881,17 @@ mod tests {
         assert!(geojson_error.contains("GeoJSON files are not supported yet"));
         assert!(unknown_json_error.contains("not a supported geo import format"));
         assert!(unknown_text_error.contains("not a supported geo import format"));
+    }
+
+    #[test]
+    fn identifies_semantic_location_history_as_valid_but_unsupported() {
+        let error = parse_geo_file_points(
+            Path::new("2024_JANUARY.json"),
+            r#"{ "timelineObjects": [{ "placeVisit": {} }] }"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("Google Semantic Location History"));
     }
 
     #[test]
