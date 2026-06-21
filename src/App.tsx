@@ -805,7 +805,7 @@ function App() {
             }`}
           >
             <MapView
-              queryPoint={queryPoint}
+              queryPoint={distanceSortActive ? queryPoint : undefined}
               geoItems={mediaItems}
               results={searchResults}
               geoBounds={distanceSortActive ? undefined : geoBounds}
@@ -837,11 +837,13 @@ function App() {
                 )}
               </div>
             )}
-            <div className="map-readout">
-              <MapPin size={16} />
-              <span>{queryPoint.lat.toFixed(5)}</span>
-              <span>{queryPoint.lon.toFixed(5)}</span>
-            </div>
+            {distanceSortActive && (
+              <div className="map-readout">
+                <MapPin size={16} />
+                <span>{queryPoint.lat.toFixed(5)}</span>
+                <span>{queryPoint.lon.toFixed(5)}</span>
+              </div>
+            )}
           </div>
 
           <div
