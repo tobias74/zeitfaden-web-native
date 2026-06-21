@@ -493,6 +493,7 @@ function App() {
   )
   const workspaceRef = useRef<HTMLElement | null>(null)
   const leftStackRef = useRef<HTMLElement | null>(null)
+  const settingsMenuRef = useRef<HTMLDetailsElement | null>(null)
   const activityLogIdRef = useRef(1)
 
   const selectedIndex = registry.get(selectedIndexId)
@@ -702,6 +703,17 @@ function App() {
   useEffect(() => {
     return () => platform.dispose()
   }, [platform])
+
+  useEffect(() => {
+    function closeSettingsOnEscape(event: globalThis.KeyboardEvent) {
+      if (event.key !== 'Escape' || !settingsMenuRef.current?.open) return
+      settingsMenuRef.current.open = false
+      event.preventDefault()
+    }
+
+    window.addEventListener('keydown', closeSettingsOnEscape)
+    return () => window.removeEventListener('keydown', closeSettingsOnEscape)
+  }, [])
 
   useEffect(() => {
     const params = buildSearchUrlParams(searchUrlState, searchUrlDefaults)
@@ -1474,7 +1486,7 @@ function App() {
                 ))}
               </select>
             </label>
-            <details className="display-menu settings-menu">
+            <details ref={settingsMenuRef} className="display-menu settings-menu">
               <summary>
                 <Settings2 size={17} />
                 {t('settings')}
