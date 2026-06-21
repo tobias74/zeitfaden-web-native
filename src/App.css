@@ -838,6 +838,91 @@
     0 2px 8px rgba(20, 29, 25, 0.12);
 }
 
+.media-card-skeleton {
+  cursor: default;
+  pointer-events: none;
+  border-color: #e1e7e4;
+  background: #fbfcfb;
+  box-shadow: none;
+}
+
+.media-card-skeleton:hover,
+.media-card-skeleton:focus-visible {
+  border-color: #e1e7e4;
+  box-shadow: none;
+  transform: none;
+}
+
+.skeleton-thumb {
+  background: #eef2ef;
+}
+
+.skeleton-block {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  border-radius: 5px;
+  background: #e2e8e4;
+}
+
+.skeleton-block::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0),
+    rgba(255, 255, 255, 0.72),
+    rgba(255, 255, 255, 0)
+  );
+  animation: skeleton-shimmer 1.15s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.skeleton-icon {
+  width: 34%;
+  height: 34%;
+  min-width: 30px;
+  min-height: 24px;
+}
+
+.skeleton-glyph {
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  flex: 0 0 auto;
+}
+
+.skeleton-title {
+  width: min(180px, 70%);
+  height: 15px;
+}
+
+.skeleton-line {
+  width: 100%;
+  height: 11px;
+}
+
+.skeleton-line.medium {
+  width: 68%;
+}
+
+.skeleton-line.short {
+  width: 44%;
+}
+
+.skeleton-distance {
+  width: 58px;
+  height: 12px;
+  flex: 0 0 auto;
+}
+
 .thumb-image,
 .thumb-placeholder {
   width: var(--card-thumb-width);
@@ -948,6 +1033,23 @@
   color: #b8fff0;
 }
 
+.media-overlay-skeleton {
+  background: linear-gradient(
+    to top,
+    rgba(12, 18, 16, 0.34),
+    rgba(12, 18, 16, 0.02)
+  );
+}
+
+.media-overlay-skeleton .skeleton-line {
+  width: min(160px, 62%);
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.media-overlay-skeleton .skeleton-distance {
+  background: rgba(184, 255, 240, 0.58);
+}
+
 .media-grid-list .media-card {
   min-height: 52px;
   height: 52px;
@@ -996,6 +1098,10 @@
 
 .media-list-columns strong {
   color: #0d6f5d;
+}
+
+.media-list-columns-skeleton .skeleton-line {
+  height: 12px;
 }
 
 .media-viewer {

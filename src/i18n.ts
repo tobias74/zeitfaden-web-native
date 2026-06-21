@@ -13,8 +13,6 @@ const en = {
   activityCatalogFailedToInitialize: 'Catalog failed to initialize',
   activityImportedMediaFilesFrom:
     'Imported {count} items from {sourceLabel}',
-  activityDebugParsedGeoFile:
-    'Debug parsed and built identities for {count} points from {sourceLabel} in {duration} ms, identity work {hashDuration} ms ({skipped} skipped)',
   activityImportStopped: 'Import stopped',
   activityCatalogCleared: 'Catalog cleared',
   all: 'All',
@@ -27,7 +25,7 @@ const en = {
   catalogData: 'Catalog data',
   catalogDatabase: 'Database',
   catalogDatabaseDescription:
-    'SQLite OPFS, SQLite SAHPool, SQLite memory, and IndexedDB are separate catalogs. Switching does not migrate data. Memory data is discarded on reload.',
+    'SQLite OPFS, SQLite memory, and IndexedDB are separate catalogs. Switching does not migrate data. Memory data is discarded on reload.',
   catalogResults: 'Catalog results',
   catalogStatusStarting: 'Starting local catalog',
   clear: 'Clear',
@@ -40,8 +38,6 @@ const en = {
   countingFilesIn: 'Preparing import from {sourceLabel}',
   captured: 'Captured',
   display: 'Display',
-  debugParseTakeoutJson: 'Debug parse + hash Takeout JSON',
-  debugTools: 'Debug tools',
   distance: 'Distance',
   distanceFromMapPoint: 'Distance from map point',
   distances: 'Distances',
@@ -110,7 +106,6 @@ const en = {
   sort: 'Sort',
   sources: 'sources',
   sqliteOpfs: 'SQLite OPFS',
-  sqliteSahpool: 'SQLite OPFS SAHPool',
   sqliteMemory: 'SQLite memory',
   thumbnailSize: 'Thumbnail size',
   to: 'To',
@@ -127,8 +122,6 @@ const de: Record<TranslationKey, string> = {
   activityCatalogFailedToInitialize: 'Katalog konnte nicht initialisiert werden',
   activityImportedMediaFilesFrom:
     '{count} Elemente aus {sourceLabel} importiert',
-  activityDebugParsedGeoFile:
-    'Debug: Für {count} Punkte aus {sourceLabel} wurden in {duration} ms Identitäten gebaut, Identitätsarbeit {hashDuration} ms ({skipped} übersprungen)',
   activityImportStopped: 'Import gestoppt',
   activityCatalogCleared: 'Katalog geleert',
   all: 'Alle',
@@ -141,7 +134,7 @@ const de: Record<TranslationKey, string> = {
   catalogData: 'Katalogdaten',
   catalogDatabase: 'Datenbank',
   catalogDatabaseDescription:
-    'SQLite OPFS, SQLite SAHPool, SQLite Speicher und IndexedDB sind getrennte Kataloge. Beim Wechsel werden keine Daten migriert. Speicherdaten werden beim Neuladen verworfen.',
+    'SQLite OPFS, SQLite Speicher und IndexedDB sind getrennte Kataloge. Beim Wechsel werden keine Daten migriert. Speicherdaten werden beim Neuladen verworfen.',
   catalogResults: 'Katalogergebnisse',
   catalogStatusStarting: 'Lokaler Katalog wird gestartet',
   clear: 'Löschen',
@@ -154,8 +147,6 @@ const de: Record<TranslationKey, string> = {
   countingFilesIn: 'Import aus {sourceLabel} wird vorbereitet',
   captured: 'Aufgenommen',
   display: 'Ansicht',
-  debugParseTakeoutJson: 'Takeout-JSON testweise parsen + hashen',
-  debugTools: 'Debug-Werkzeuge',
   distance: 'Distanz',
   distanceFromMapPoint: 'Distanz vom Kartenpunkt',
   distances: 'Distanzen',
@@ -226,7 +217,6 @@ const de: Record<TranslationKey, string> = {
   sort: 'Sortierung',
   sources: 'Quellen',
   sqliteOpfs: 'SQLite OPFS',
-  sqliteSahpool: 'SQLite OPFS SAHPool',
   sqliteMemory: 'SQLite Speicher',
   thumbnailSize: 'Vorschaugröße',
   to: 'Bis',

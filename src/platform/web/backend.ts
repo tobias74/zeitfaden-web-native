@@ -15,7 +15,6 @@ import {
 import type {
   ImportBackend,
   ImportOptions,
-  GeoParseDebugSummary,
   ImportProgress,
   ImportSummary,
   PlatformBackend,
@@ -217,39 +216,6 @@ class WebImportBackend implements ImportBackend {
       },
       onProgress,
     )
-  }
-
-  async debugParseGeoFile(): Promise<GeoParseDebugSummary> {
-    if (!window.showOpenFilePicker) {
-      throw new Error('This browser does not expose the File System Access API.')
-    }
-
-    const [handle] = await window.showOpenFilePicker({
-      multiple: false,
-      types: [
-        {
-          description: 'Google Takeout JSON',
-          accept: {
-            'application/json': ['.json'],
-          },
-        },
-      ],
-    })
-    if (!handle) throw new Error('Debug parse cancelled')
-
-    const file = await handle.getFile()
-    console.log('[geo-debug]', {
-      phase: 'file selected',
-      fileName: file.name,
-      sizeBytes: file.size,
-      sizeMiB: file.size / 1024 / 1024,
-    })
-    const summary = await this.catalog.debugParseGeoFile(file)
-    console.log('[geo-debug]', {
-      phase: 'debug parse result',
-      ...summary,
-    })
-    return summary
   }
 
   dispose(): void {}

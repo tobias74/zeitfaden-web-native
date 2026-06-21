@@ -26,6 +26,20 @@ import {
   useState,
 } from 'react'
 import './App.css'
+import {
+  useCatalogMapItems,
+  useCatalogPage,
+} from './app/useCatalogPage'
+import { useCatalogLifecycle } from './app/useCatalogLifecycle'
+import { useDistanceResults } from './app/useDistanceResults'
+import { useGeoIndexes } from './app/useGeoIndexes'
+import { useImports } from './app/useImports'
+import { useMediaViewer } from './app/useMediaViewer'
+import {
+  type QueryPoint,
+  type SearchSortMode,
+  useSearchState,
+} from './app/useSearchState'
 import { MapView } from './components/MapView'
 import { MediaViewer } from './components/MediaViewer'
 import { Thumbnail } from './components/Thumbnail'
@@ -42,23 +56,10 @@ import {
   languageLocale,
   translate,
 } from './i18n'
-import {
-  buildSearchUrlParams,
-  parseSearchUrlState,
-} from './lib/searchUrl'
-import type {
-  SearchUrlDefaults,
-  SearchUrlState,
-} from './lib/searchUrl'
-import {
-  dateInputEndToMillis,
-  dateInputToMillis,
-  formatDateTime,
-} from './lib/time'
+import { formatDateTime } from './lib/time'
 import { GeoIndexRegistry } from './geo/registry'
 import { createPlatformBackend } from './platform'
 import type {
-  CatalogInfo,
   GeoIndexBuildProgress,
   ImportProgress,
 } from './platform/types'
@@ -69,24 +70,13 @@ import {
   type WebCatalogStorageMode,
 } from './platform/web/storageMode'
 import type {
-  CatalogQuery,
-  CatalogSort,
   EnrichedSearchResult,
   GeoBounds,
   GeoIndexStats,
   KindFilter,
   MediaItem,
-  MediaSource,
-  TimeRange,
-  ValidationReport,
 } from './types'
 
-type QueryPoint = {
-  lat: number
-  lon: number
-}
-
-type SortMode = CatalogSort | 'distance'
 type ActivePage = 'app' | 'imprint' | 'privacy'
 type ResultDisplayMode = 'images' | 'cards' | 'list'
 type ResultThumbnailSize = 'small' | 'medium' | 'large'
@@ -95,24 +85,6 @@ type ActivityLogEntry = {
   key: TranslationKey
   values?: TranslationValues
   createdAt: number
-}
-type ViewerSession = {
-  absoluteIndex: number
-  windowOffset: number
-  items: EnrichedSearchResult[]
-  canNavigateNext: boolean
-  totalItems?: number
-}
-
-const defaultStats: GeoIndexStats = {
-  engineId: 'none',
-  pointCount: 0,
-  distanceComputations: 0,
-  nodesVisited: 0,
-  pagesRead: 0,
-  candidatesInspected: 0,
-  prunedByGeo: 0,
-  prunedByTime: 0,
 }
 
 const LEFT_WIDTH_KEY = 'geo-media-index-lab:left-width'
@@ -167,15 +139,6 @@ function storedBoolean(key: string, fallback: boolean): boolean {
 function storedLanguage(): Language {
   const stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY)
   return isLanguage(stored) ? stored : 'en'
-}
-
-function storedPageSize(): number {
-  const stored = storedNumber(RESULT_PAGE_SIZE_KEY, DEFAULT_RESULT_PAGE_SIZE)
-  return RESULT_PAGE_SIZE_OPTIONS.includes(
-    stored as (typeof RESULT_PAGE_SIZE_OPTIONS)[number],
-  )
-    ? stored
-    : DEFAULT_RESULT_PAGE_SIZE
 }
 
 function filterValueToKind(value: string): KindFilter {
@@ -355,13 +318,6 @@ function formatGeo(item: MediaItem): string | undefined {
   return `${item.latitude.toFixed(5)}, ${item.longitude.toFixed(5)}`
 }
 
-function timeRangeFromInputs(startDate: string, endDate: string): TimeRange {
-  return {
-    startTime: dateInputToMillis(startDate),
-    endTime: dateInputEndToMillis(endDate),
-  }
-}
-
 function mediaItemsToResults(items: MediaItem[]): EnrichedSearchResult[] {
   return items.map((item) => ({
     item,
@@ -370,9 +326,58 @@ function mediaItemsToResults(items: MediaItem[]): EnrichedSearchResult[] {
   }))
 }
 
-function pathWithSearchParams(params: URLSearchParams): string {
-  const search = params.toString()
-  return `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`
+function resultSkeletonCount(
+  displayMode: ResultDisplayMode,
+  pageSize: number,
+): number {
+  const modeMaximum = displayMode === 'images' ? 24 : 12
+  return Math.max(1, Math.min(pageSize, modeMaximum))
+}
+
+function ResultSkeletons({
+  count,
+  displayMode,
+}: {
+  count: number
+  displayMode: ResultDisplayMode
+}) {
+  return Array.from({ length: count }, (_, index) => (
+    <article
+      key={`result-skeleton-${index}`}
+      className="media-card media-card-skeleton"
+      aria-hidden="true"
+    >
+      <div className="thumb-placeholder skeleton-thumb">
+        <span className="skeleton-block skeleton-icon" />
+      </div>
+      {displayMode !== 'images' && (
+        <div className="media-card-body">
+          <div className="media-title-row">
+            <span className="skeleton-block skeleton-glyph" />
+            <span className="skeleton-block skeleton-title" />
+          </div>
+          <span className="skeleton-block skeleton-line" />
+          <span className="skeleton-block skeleton-line short" />
+          <span className="skeleton-block skeleton-line medium" />
+        </div>
+      )}
+      {displayMode === 'images' && (
+        <div className="media-overlay media-overlay-skeleton">
+          <span className="skeleton-block skeleton-line" />
+          <strong className="skeleton-block skeleton-distance" />
+        </div>
+      )}
+      {displayMode === 'list' && (
+        <div className="media-list-columns media-list-columns-skeleton">
+          <span className="skeleton-block skeleton-line" />
+          <span className="skeleton-block skeleton-line" />
+          <span className="skeleton-block skeleton-line" />
+          <span className="skeleton-block skeleton-line" />
+          <strong className="skeleton-block skeleton-line" />
+        </div>
+      )}
+    </article>
+  ))
 }
 
 function App() {
@@ -396,64 +401,49 @@ function App() {
     () => registry.indexes.map((index) => index.id),
     [registry],
   )
-  const searchUrlDefaults = useMemo<SearchUrlDefaults>(
-    () => ({
-      resultPageSize: DEFAULT_RESULT_PAGE_SIZE,
-      selectedIndexId: registry.indexes[0]?.id ?? 'brute-force',
-      queryPoint: DEFAULT_QUERY_POINT,
-    }),
-    [registry],
-  )
-  const initialSearchUrlDefaults = useMemo<SearchUrlDefaults>(
-    () => ({
-      ...searchUrlDefaults,
-      resultPageSize: storedPageSize(),
-    }),
-    [searchUrlDefaults],
-  )
-  const initialSearchState = useMemo(
-    () =>
-      parseSearchUrlState(
-        window.location.search,
-        initialSearchUrlDefaults,
-        allowedIndexIds,
-        RESULT_PAGE_SIZE_OPTIONS,
-      ),
-    [allowedIndexIds, initialSearchUrlDefaults],
-  )
+  const search = useSearchState({
+    allowedIndexIds,
+    defaultSelectedIndexId: registry.indexes[0]?.id ?? 'brute-force',
+    defaultQueryPoint: DEFAULT_QUERY_POINT,
+    defaultResultPageSize: DEFAULT_RESULT_PAGE_SIZE,
+    allowedPageSizes: RESULT_PAGE_SIZE_OPTIONS,
+    pageSizeStorageKey: RESULT_PAGE_SIZE_KEY,
+    mapPointLimit: MAP_POINT_LIMIT,
+  })
+  const {
+    selectedIndexId,
+    queryPoint,
+    startDate,
+    endDate,
+    sort,
+    kindFilter,
+    geoBounds,
+    boundsDrawing,
+    resultPage,
+    resultPageSize,
+    distanceSortActive,
+    catalogSort,
+    resultOffset,
+    timeRange,
+    catalogQuery,
+    mapCatalogQuery,
+    appHref,
+  } = search.values
+  const {
+    setSelectedIndexId,
+    setQueryPoint,
+    setStartDate,
+    setEndDate,
+    setSort,
+    setKindFilter,
+    setGeoBounds,
+    clearGeoBounds,
+    toggleBoundsDrawing,
+    setPage: setResultPage,
+    setPageSize,
+    clearSearch: clearSearchState,
+  } = search.actions
 
-  const [catalogInfo, setCatalogInfo] = useState<CatalogInfo>()
-  const [mediaItems, setMediaItems] = useState<MediaItem[]>([])
-  const [mapItems, setMapItems] = useState<MediaItem[]>([])
-  const [mapPointLimitReached, setMapPointLimitReached] = useState(false)
-  const [sources, setSources] = useState<MediaSource[]>([])
-  const [geoPointCount, setGeoPointCount] = useState(0)
-  const [geoIndexVersion, setGeoIndexVersion] = useState(0)
-  const [selectedIndexId, setSelectedIndexId] = useState(
-    initialSearchState.selectedIndexId,
-  )
-  const [queryPoint, setQueryPoint] = useState<QueryPoint>(
-    initialSearchState.queryPoint,
-  )
-  const [startDate, setStartDate] = useState(initialSearchState.startDate)
-  const [endDate, setEndDate] = useState(initialSearchState.endDate)
-  const [sort, setSort] = useState<SortMode>(initialSearchState.sort)
-  const [kindFilter, setKindFilter] = useState<KindFilter>(
-    initialSearchState.kindFilter,
-  )
-  const [geoBounds, setGeoBounds] = useState<GeoBounds | undefined>(
-    initialSearchState.geoBounds,
-  )
-  const [boundsDrawing, setBoundsDrawing] = useState(false)
-  const [resultPage, setResultPage] = useState(initialSearchState.resultPage)
-  const [resultPageSize, setResultPageSize] = useState(
-    initialSearchState.resultPageSize,
-  )
-  const [searchResults, setSearchResults] = useState<EnrichedSearchResult[]>([])
-  const [viewerSession, setViewerSession] = useState<ViewerSession>()
-  const [viewerNavigationPending, setViewerNavigationPending] = useState(false)
-  const [indexStats, setIndexStats] = useState<GeoIndexStats>(defaultStats)
-  const [validation, setValidation] = useState<ValidationReport>()
   const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>(() => [
     {
       id: 0,
@@ -461,11 +451,8 @@ function App() {
       createdAt: Date.now(),
     },
   ])
-  const [busy, setBusy] = useState(false)
+  const [catalogBusy, setCatalogBusy] = useState(false)
   const [error, setError] = useState<string>()
-  const [importProgress, setImportProgress] = useState<ImportProgress>()
-  const [geoIndexProgress, setGeoIndexProgress] =
-    useState<GeoIndexBuildProgress>()
   const [resultDisplayMode, setResultDisplayMode] =
     useState<ResultDisplayMode>(() =>
       storedString(RESULT_DISPLAY_MODE_KEY, 'cards', [
@@ -497,72 +484,6 @@ function App() {
   const displayMenuRef = useRef<HTMLDetailsElement | null>(null)
   const activityLogIdRef = useRef(1)
 
-  const selectedIndex = registry.get(selectedIndexId)
-  const catalogReady = Boolean(catalogInfo)
-  const distanceSortActive = sort === 'distance'
-  const catalogSort: CatalogSort =
-    sort === 'distance' ? 'captured_at_desc' : sort
-  const resultOffset = resultPage * resultPageSize
-  const timeRange = useMemo(
-    () => timeRangeFromInputs(startDate, endDate),
-    [endDate, startDate],
-  )
-
-  const catalogQuery = useMemo<CatalogQuery>(
-    () => ({
-      ...timeRange,
-      kind: kindFilter,
-      geoBounds,
-      sort: catalogSort,
-      limit: resultPageSize,
-      offset: resultOffset,
-    }),
-    [
-      catalogSort,
-      geoBounds,
-      kindFilter,
-      resultOffset,
-      resultPageSize,
-      timeRange,
-    ],
-  )
-  const mapCatalogQuery = useMemo<CatalogQuery>(
-    () => ({
-      ...timeRange,
-      kind: kindFilter,
-      hasGeo: true,
-      sort: catalogSort,
-      limit: MAP_POINT_LIMIT + 1,
-      offset: 0,
-    }),
-    [catalogSort, kindFilter, timeRange],
-  )
-  const searchUrlState = useMemo<SearchUrlState>(
-    () => ({
-      startDate,
-      endDate,
-      sort,
-      kindFilter,
-      geoBounds,
-      resultPage,
-      resultPageSize,
-      selectedIndexId,
-      queryPoint,
-    }),
-    [
-      endDate,
-      geoBounds,
-      kindFilter,
-      queryPoint,
-      resultPage,
-      resultPageSize,
-      selectedIndexId,
-      sort,
-      startDate,
-    ],
-  )
-  const hasSyncedSearchUrlRef = useRef(false)
-
   const recordActivity = useCallback((
     key: TranslationKey,
     values?: TranslationValues,
@@ -579,6 +500,183 @@ function App() {
       ].slice(0, 30),
     )
   }, [])
+  const reportError = useCallback((message: string) => {
+    setError(message || undefined)
+  }, [])
+  const recordCatalogInitFailure = useCallback(() => {
+    recordActivity('activityCatalogFailedToInitialize')
+  }, [recordActivity])
+
+  const {
+    catalogInfo,
+    catalogReady,
+    catalogRevision,
+    sources,
+    markCatalogChanged,
+    resetCatalogState,
+  } = useCatalogLifecycle({
+    catalog,
+    onError: reportError,
+    onInitFailed: recordCatalogInitFailure,
+  })
+  const selectedIndex = registry.get(selectedIndexId)
+  const {
+    geoPointCount,
+    geoIndexVersion,
+    geoIndexProgress,
+    indexStats,
+    resetIndexState,
+  } = useGeoIndexes({
+    catalog,
+    catalogInfo,
+    catalogRevision,
+    selectedIndexId,
+    indexCount: registry.indexes.length,
+    onError: reportError,
+  })
+  const catalogPage = useCatalogPage({
+    catalog,
+    ready: catalogReady,
+    enabled: !distanceSortActive,
+    query: catalogQuery,
+    revision: catalogRevision,
+    onError: reportError,
+  })
+  const catalogMap = useCatalogMapItems({
+    catalog,
+    ready: catalogReady,
+    enabled: !distanceSortActive,
+    query: mapCatalogQuery,
+    revision: catalogRevision,
+    limit: MAP_POINT_LIMIT,
+    onError: reportError,
+  })
+  const [indexStatsOverride, setIndexStatsOverride] =
+    useState<GeoIndexStats>()
+  const distanceResults = useDistanceResults({
+    catalog,
+    ready: catalogReady,
+    enabled: distanceSortActive,
+    indexId: selectedIndex.id,
+    timeRange,
+    queryPoint,
+    kindFilter,
+    geoBounds,
+    resultOffset,
+    resultPageSize,
+    geoPointCount,
+    geoIndexVersion,
+    mapPointLimit: MAP_POINT_LIMIT,
+    onError: reportError,
+    onStats: setIndexStatsOverride,
+  })
+  const mediaItems = catalogPage.items
+  const mapItems = distanceSortActive ? distanceResults.mapItems : catalogMap.items
+  const mapPointLimitReached = distanceSortActive
+    ? distanceResults.mapLimitReached
+    : catalogMap.limitReached
+  const searchResults = distanceResults.results
+  const validation = distanceResults.validation
+  const effectiveIndexStats =
+    distanceSortActive && indexStatsOverride ? indexStatsOverride : indexStats
+  const handleImported = useCallback(() => {
+    setResultPage(0)
+    markCatalogChanged()
+  }, [markCatalogChanged, setResultPage])
+  const {
+    busy: importBusy,
+    importProgress,
+    importFolder,
+    importGeoFile,
+  } = useImports({
+    platform,
+    locale,
+    t,
+    recordActivity,
+    onError: reportError,
+    onImported: handleImported,
+  })
+  const busy = importBusy || catalogBusy
+  const visibleResults = distanceSortActive
+  const catalogPageResultItems = useMemo(
+    () => mediaItemsToResults(mediaItems),
+    [mediaItems],
+  )
+  const resultItems = distanceSortActive
+    ? searchResults
+    : catalogPageResultItems
+  const resultItemsLoading = distanceSortActive
+    ? distanceResults.loading
+    : catalogPage.loading
+  const skeletonCount = resultSkeletonCount(resultDisplayMode, resultPageSize)
+  const visibleStart = resultItems.length === 0 ? 0 : resultOffset + 1
+  const visibleEnd = resultOffset + resultItems.length
+  const visibleRange = distanceSortActive
+    ? t('resultRangeOf', {
+        start: visibleStart.toLocaleString(locale),
+        end: visibleEnd.toLocaleString(locale),
+        total: geoPointCount.toLocaleString(locale),
+      })
+    : resultItems.length === 0
+      ? '0'
+      : `${visibleStart.toLocaleString(locale)}-${visibleEnd.toLocaleString(locale)}`
+  const canPageBackward = resultPage > 0
+  const canPageForward = distanceSortActive
+    ? resultItems.length === resultPageSize && visibleEnd < geoPointCount
+    : resultItems.length === resultPageSize
+  const loadViewerWindow = useCallback(
+    async (windowOffset: number) => {
+      if (distanceSortActive) {
+        return (await distanceResults.loadWindow(windowOffset)).items
+      }
+      const pageItems = await catalog.listMedia({
+        ...timeRange,
+        kind: kindFilter,
+        geoBounds,
+        sort: catalogSort,
+        limit: resultPageSize,
+        offset: windowOffset,
+      })
+      return mediaItemsToResults(pageItems)
+    },
+    [
+      catalog,
+      catalogSort,
+      distanceResults,
+      distanceSortActive,
+      geoBounds,
+      kindFilter,
+      resultPageSize,
+      timeRange,
+    ],
+  )
+  const handleViewerWindowLoaded = useCallback(
+    (windowOffset: number, windowItems: EnrichedSearchResult[]) => {
+      setResultPage(windowOffset / resultPageSize)
+      if (distanceSortActive) {
+        distanceResults.setResults(windowItems)
+        return
+      }
+      catalogPage.setItems(windowItems.map((result) => result.item))
+    },
+    [catalogPage, distanceResults, distanceSortActive, resultPageSize, setResultPage],
+  )
+  const {
+    viewerSession,
+    viewerLocalIndex,
+    viewerNavigationPending,
+    openViewer,
+    openViewerAtIndex,
+    closeViewer,
+  } = useMediaViewer({
+    resultOffset,
+    resultPageSize,
+    currentItems: resultItems,
+    totalItems: distanceSortActive ? geoPointCount : undefined,
+    loadWindow: loadViewerWindow,
+    onWindowLoaded: handleViewerWindowLoaded,
+    onError: reportError,
+  })
 
   const changeLanguage = useCallback((value: string) => {
     if (!isLanguage(value)) return
@@ -597,138 +695,28 @@ function App() {
       }
 
       window.localStorage.setItem(WEB_CATALOG_STORAGE_MODE_KEY, value)
-      setCatalogInfo(undefined)
-      setMediaItems([])
-      setMapItems([])
-      setMapPointLimitReached(false)
-      setSources([])
-      setGeoPointCount(0)
-      setGeoIndexVersion(0)
-      setSearchResults([])
-      setViewerSession(undefined)
-      setViewerNavigationPending(false)
-      setIndexStats(defaultStats)
-      setValidation(undefined)
+      resetCatalogState()
+      resetIndexState()
+      catalogPage.setItems([])
+      catalogMap.clear()
+      distanceResults.setResults([])
+      distanceResults.setValidation(undefined)
+      setIndexStatsOverride(undefined)
+      closeViewer()
       setError(undefined)
-      setImportProgress(undefined)
-      setGeoIndexProgress(undefined)
       setWebCatalogStorageMode(value)
     },
-    [busy, webCatalogStorageMode],
+    [
+      busy,
+      catalogMap,
+      catalogPage,
+      closeViewer,
+      distanceResults,
+      resetCatalogState,
+      resetIndexState,
+      webCatalogStorageMode,
+    ],
   )
-
-  const applySearchUrlState = useCallback((nextState: SearchUrlState) => {
-    setSelectedIndexId(nextState.selectedIndexId)
-    setQueryPoint(nextState.queryPoint)
-    setStartDate(nextState.startDate)
-    setEndDate(nextState.endDate)
-    setSort(nextState.sort)
-    setKindFilter(nextState.kindFilter)
-    setGeoBounds(nextState.geoBounds)
-    setBoundsDrawing(false)
-    setResultPage(nextState.resultPage)
-    setResultPageSize(nextState.resultPageSize)
-    setSearchResults([])
-    setMapPointLimitReached(false)
-    setValidation(undefined)
-    setViewerSession(undefined)
-    setViewerNavigationPending(false)
-  }, [])
-
-  const refreshMedia = useCallback(async () => {
-    const [items, nextSources] = await Promise.all([
-      catalog.listMedia(catalogQuery),
-      catalog.listSources(),
-    ])
-    setMediaItems(items)
-    setSources(nextSources)
-  }, [catalog, catalogQuery])
-
-  const refreshMapMedia = useCallback(async () => {
-    const items = await catalog.listMedia(mapCatalogQuery)
-    setMapItems(items.slice(0, MAP_POINT_LIMIT))
-    setMapPointLimitReached(items.length > MAP_POINT_LIMIT)
-  }, [catalog, mapCatalogQuery])
-
-  const rebuildGeoIndexes = useCallback(async () => {
-    setGeoIndexProgress({
-      phase: 'loading',
-      pointCount: 0,
-      builtIndexes: 0,
-      totalIndexes: registry.indexes.length,
-    })
-    try {
-      const summary = await catalog.buildGeoIndexes((progress) => {
-        setGeoIndexProgress(progress)
-      })
-      setGeoPointCount(summary.pointCount)
-      setGeoIndexVersion((version) => version + 1)
-      setIndexStats(await catalog.getGeoIndexStats(selectedIndexId))
-    } finally {
-      setGeoIndexProgress(undefined)
-    }
-  }, [catalog, registry.indexes.length, selectedIndexId])
-
-  const refreshAll = useCallback(async (
-    timingLabel?: string,
-    traceId?: string,
-  ) => {
-    const startedAt = performance.now()
-    const logTiming = (phase: string, extra: Record<string, unknown> = {}) => {
-      if (!timingLabel) return
-      console.log('[import-trace]', {
-        traceId,
-        scope: 'app',
-        label: timingLabel,
-        phase,
-        elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
-        ...extra,
-      })
-    }
-    const runTimed = async (phase: string, run: () => Promise<void>) => {
-      const phaseStartedAt = performance.now()
-      await run()
-      logTiming(phase, {
-        phaseMs: Math.round((performance.now() - phaseStartedAt) * 10) / 10,
-      })
-    }
-
-    logTiming('refresh all start', { distanceSortActive })
-    await Promise.all([
-      runTimed('refresh media page', refreshMedia),
-      distanceSortActive
-        ? Promise.resolve().then(() => {
-            logTiming('refresh map skipped for distance sort')
-          })
-        : runTimed('refresh map media', refreshMapMedia),
-      runTimed('rebuild geo indexes', rebuildGeoIndexes),
-    ])
-    logTiming('refresh all complete')
-  }, [distanceSortActive, rebuildGeoIndexes, refreshMapMedia, refreshMedia])
-
-  useEffect(() => {
-    let cancelled = false
-
-    async function boot() {
-      try {
-        const info = await catalog.init()
-        if (cancelled) return
-        setCatalogInfo(info)
-        await refreshAll()
-      } catch (caught) {
-        if (!cancelled) {
-          setError(caught instanceof Error ? caught.message : String(caught))
-          recordActivity('activityCatalogFailedToInitialize')
-        }
-      }
-    }
-
-    boot()
-
-    return () => {
-      cancelled = true
-    }
-  }, [catalog, recordActivity, refreshAll])
 
   useEffect(() => {
     return () => platform.dispose()
@@ -770,195 +758,37 @@ function App() {
       window.removeEventListener('pointerdown', closeMenusOnOutsidePointer)
   }, [])
 
-  useEffect(() => {
-    const params = buildSearchUrlParams(searchUrlState, searchUrlDefaults)
-    const nextUrl = pathWithSearchParams(params)
-    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`
-
-    if (nextUrl === currentUrl) {
-      hasSyncedSearchUrlRef.current = true
-      return
-    }
-
-    const method = hasSyncedSearchUrlRef.current ? 'pushState' : 'replaceState'
-    window.history[method](null, '', nextUrl)
-    hasSyncedSearchUrlRef.current = true
-  }, [searchUrlDefaults, searchUrlState])
-
-  useEffect(() => {
-    function onPopState() {
-      applySearchUrlState(
-        parseSearchUrlState(
-          window.location.search,
-          initialSearchUrlDefaults,
-          allowedIndexIds,
-          RESULT_PAGE_SIZE_OPTIONS,
-        ),
-      )
-    }
-
-    window.addEventListener('popstate', onPopState)
-    return () => window.removeEventListener('popstate', onPopState)
-  }, [allowedIndexIds, applySearchUrlState, initialSearchUrlDefaults])
-
-  useEffect(() => {
-    if (!catalogInfo) return
-    const timer = window.setTimeout(() => {
-      refreshMedia().catch((caught) => {
-        setError(caught instanceof Error ? caught.message : String(caught))
-      })
-    }, 0)
-
-    return () => window.clearTimeout(timer)
-  }, [catalogInfo, refreshMedia])
-
-  useEffect(() => {
-    if (!catalogInfo || distanceSortActive) return
-
-    let cancelled = false
-    const timer = window.setTimeout(() => {
-      refreshMapMedia().catch((caught) => {
-        if (!cancelled) {
-          setError(caught instanceof Error ? caught.message : String(caught))
-        }
-      })
-    }, 0)
-
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
-  }, [catalogInfo, distanceSortActive, refreshMapMedia])
-
-  const importFolder = useCallback(async () => {
-    setError(undefined)
-    setImportProgress(undefined)
-
-    setBusy(true)
-    try {
-      const summary = await platform.importer.importFolder((progress) => {
-        setImportProgress(progress)
-      })
-      setResultPage(0)
-      await refreshAll()
-      recordActivity('activityImportedMediaFilesFrom', {
-        count: summary.acceptedMedia.toLocaleString(locale),
-        sourceLabel: summary.sourceLabel,
-      })
-      if (summary.errors.length > 0) {
-        setError(
-          t('filesCouldNotBeRead', {
-            count: summary.errors.length.toLocaleString(locale),
-          }),
-        )
-      }
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught))
-      recordActivity('activityImportStopped')
-    } finally {
-      setImportProgress(undefined)
-      setBusy(false)
-    }
-  }, [locale, platform, recordActivity, refreshAll, t])
-
-  const importGeoFile = useCallback(async () => {
-    setError(undefined)
-    setImportProgress(undefined)
-
-    setBusy(true)
-    const startedAt = performance.now()
-    const traceId = `app-${Date.now().toString(36)}-${crypto.randomUUID()}`
-    console.log('[import-trace]', {
-      traceId,
-      scope: 'app',
-      phase: 'geo import action start',
-    })
-    try {
-      const summary = await platform.importer.importGeoFile(
-        (progress) => {
-          setImportProgress(progress)
-        },
-        { traceId },
-      )
-      console.log('[import-trace]', {
-        traceId,
-        scope: 'app',
-        phase: 'worker geo import complete',
-        elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
-        acceptedMedia: summary.acceptedMedia,
-        skippedFiles: summary.skippedFiles,
-      })
-      setResultPage(0)
-      await refreshAll('geo import post-refresh', traceId)
-      console.log('[import-trace]', {
-        traceId,
-        scope: 'app',
-        phase: 'geo import action complete',
-        elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
-      })
-      recordActivity('activityImportedMediaFilesFrom', {
-        count: summary.acceptedMedia.toLocaleString(locale),
-        sourceLabel: summary.sourceLabel,
-      })
-      if (summary.errors.length > 0) {
-        setError(
-          t('filesCouldNotBeRead', {
-            count: summary.errors.length.toLocaleString(locale),
-          }),
-        )
-      }
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught))
-      recordActivity('activityImportStopped')
-    } finally {
-      setImportProgress(undefined)
-      setBusy(false)
-    }
-  }, [locale, platform, recordActivity, refreshAll, t])
-
-  const debugParseGeoFile = useCallback(async () => {
-    if (!platform.importer.debugParseGeoFile) return
-
-    setError(undefined)
-    setBusy(true)
-    try {
-      const summary = await platform.importer.debugParseGeoFile()
-      recordActivity('activityDebugParsedGeoFile', {
-        count: summary.parsedPoints.toLocaleString(locale),
-        skipped: summary.skippedPoints.toLocaleString(locale),
-        duration: Math.round(summary.durationMs).toLocaleString(locale),
-        hashDuration: Math.round(summary.hashDurationMs).toLocaleString(locale),
-        sourceLabel: summary.sourceLabel,
-      })
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught))
-    } finally {
-      setBusy(false)
-    }
-  }, [locale, platform, recordActivity])
-
   const clearCatalog = useCallback(async () => {
-    setBusy(true)
+    setCatalogBusy(true)
     setError(undefined)
     try {
       await catalog.clear()
       setResultPage(0)
-      setGeoBounds(undefined)
-      setBoundsDrawing(false)
-      setSearchResults([])
-      setMapItems([])
-      setMapPointLimitReached(false)
-      setValidation(undefined)
-      setViewerSession(undefined)
-      setViewerNavigationPending(false)
-      await refreshAll()
+      clearGeoBounds()
+      catalogPage.setItems([])
+      catalogMap.clear()
+      distanceResults.setResults([])
+      distanceResults.setValidation(undefined)
+      setIndexStatsOverride(undefined)
+      closeViewer()
+      markCatalogChanged()
       recordActivity('activityCatalogCleared')
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught))
     } finally {
-      setBusy(false)
+      setCatalogBusy(false)
     }
-  }, [catalog, recordActivity, refreshAll])
+  }, [
+    catalog,
+    catalogMap,
+    catalogPage,
+    clearGeoBounds,
+    closeViewer,
+    distanceResults,
+    markCatalogChanged,
+    recordActivity,
+    setResultPage,
+  ])
 
   const confirmClearCatalog = useCallback(() => {
     if (busy || !catalogReady) return
@@ -967,323 +797,38 @@ function App() {
     void clearCatalog()
   }, [busy, catalogReady, clearCatalog, t])
 
-  useEffect(() => {
-    if (!catalogInfo || !distanceSortActive) return
-
-    let cancelled = false
-
-    async function sortByDistance() {
-      setError(undefined)
-
-      try {
-        const baseQuery = {
-          ...timeRange,
-          lat: queryPoint.lat,
-          lon: queryPoint.lon,
-        }
-        const pageQuery = {
-          ...baseQuery,
-          k: resultPageSize,
-          offset: resultOffset,
-          kind: kindFilter,
-          geoBounds,
-        }
-        const mapQuery = {
-          ...baseQuery,
-          k: MAP_POINT_LIMIT,
-          offset: 0,
-          kind: kindFilter,
-        }
-        const [pageResults, mapResults] = await Promise.all([
-          catalog.searchGeoIndex(selectedIndex.id, pageQuery),
-          catalog.searchGeoIndex(selectedIndex.id, mapQuery),
-        ])
-        const resultIds = Array.from(
-          new Set(
-            [...pageResults, ...mapResults].map((result) => result.mediaId),
-          ),
-        )
-        const mediaLookupBatchSize = 500
-        const itemChunks = await Promise.all(
-          Array.from(
-            { length: Math.ceil(resultIds.length / mediaLookupBatchSize) },
-            (_, index) =>
-              catalog.getMediaByIds(
-                resultIds.slice(
-                  index * mediaLookupBatchSize,
-                  (index + 1) * mediaLookupBatchSize,
-                ),
-              ),
-          ),
-        )
-        const items = itemChunks.flat()
-        const byId = new Map(items.map((item) => [item.id, item]))
-        const pageEnriched = pageResults
-          .flatMap((result) => {
-            const item = byId.get(result.mediaId)
-            if (!item) return []
-            return [{ ...result, item }]
-          })
-        const mapEnriched = mapResults.flatMap((result) => {
-          const item = byId.get(result.mediaId)
-          if (!item) return []
-          return [{ ...result, item }]
-        })
-        const [nextValidation, nextStats] = await Promise.all([
-          kindFilter === 'all'
-            ? catalog.validateGeoIndex(selectedIndex.id, pageQuery)
-            : Promise.resolve(undefined),
-          catalog.getGeoIndexStats(selectedIndex.id),
-        ])
-
-        if (cancelled) return
-
-        setSearchResults(pageEnriched)
-        setMapItems(mapEnriched.map((result) => result.item))
-        setMapPointLimitReached(
-          mapResults.length >= MAP_POINT_LIMIT && geoPointCount > MAP_POINT_LIMIT,
-        )
-        setValidation(nextValidation)
-        setIndexStats(nextStats)
-      } catch (caught) {
-        if (!cancelled) {
-          setError(caught instanceof Error ? caught.message : String(caught))
-        }
-      }
-    }
-
-    sortByDistance()
-
-    return () => {
-      cancelled = true
-    }
-  }, [
-    catalog,
-    catalogInfo,
-    distanceSortActive,
-    geoIndexVersion,
-    geoPointCount,
-    geoBounds,
-    kindFilter,
-    queryPoint.lat,
-    queryPoint.lon,
-    resultOffset,
-    resultPageSize,
-    selectedIndex,
-    timeRange,
-  ])
-
-  const visibleResults = distanceSortActive
-  const catalogPageResultItems = useMemo(
-    () => mediaItemsToResults(mediaItems),
-    [mediaItems],
-  )
-  const allResultItems = distanceSortActive
-    ? searchResults
-    : catalogPageResultItems
-  const resultItems = distanceSortActive
-    ? allResultItems
-    : allResultItems
-  const visibleStart = resultItems.length === 0 ? 0 : resultOffset + 1
-  const visibleEnd = resultOffset + resultItems.length
-  const visibleRange = distanceSortActive
-    ? t('resultRangeOf', {
-        start: visibleStart.toLocaleString(locale),
-        end: visibleEnd.toLocaleString(locale),
-        total: geoPointCount.toLocaleString(locale),
-      })
-    : resultItems.length === 0
-      ? '0'
-      : `${visibleStart.toLocaleString(locale)}-${visibleEnd.toLocaleString(locale)}`
-  const canPageBackward = resultPage > 0
-  const canPageForward = distanceSortActive
-    ? resultItems.length === resultPageSize && visibleEnd < geoPointCount
-    : resultItems.length === resultPageSize
-
   const setFilterKind = useCallback((kind: KindFilter) => {
     setKindFilter(kind)
-    setResultPage(0)
-  }, [])
+  }, [setKindFilter])
 
-  const setSortMode = useCallback((nextSort: SortMode) => {
+  const setSortMode = useCallback((nextSort: SearchSortMode) => {
     setSort(nextSort)
-    setResultPage(0)
-    if (nextSort === 'distance') {
-      setBoundsDrawing(false)
-    }
     if (nextSort !== 'distance') {
-      setSearchResults([])
-      setMapPointLimitReached(false)
-      setValidation(undefined)
+      distanceResults.setResults([])
+      distanceResults.setValidation(undefined)
+      setIndexStatsOverride(undefined)
     }
-  }, [])
+  }, [distanceResults, setSort])
 
   const setMapQueryPoint = useCallback((point: QueryPoint) => {
     setQueryPoint(point)
-    setResultPage(0)
-  }, [])
+  }, [setQueryPoint])
 
   const setMapGeoBounds = useCallback((bounds: GeoBounds) => {
     setGeoBounds(bounds)
-    setBoundsDrawing(false)
-    setResultPage(0)
-  }, [])
+  }, [setGeoBounds])
 
   const clearMapGeoBounds = useCallback(() => {
-    setGeoBounds(undefined)
-    setBoundsDrawing(false)
-    setResultPage(0)
-  }, [])
-
-  const toggleBoundsDrawing = useCallback(() => {
-    setBoundsDrawing((active) => !active)
-  }, [])
-
-  const setPageSize = useCallback((size: number) => {
-    setResultPageSize(size)
-    setResultPage(0)
-    window.localStorage.setItem(RESULT_PAGE_SIZE_KEY, String(size))
-  }, [])
+    clearGeoBounds()
+  }, [clearGeoBounds])
 
   const clearSearch = useCallback(() => {
-    setStartDate('')
-    setEndDate('')
-    setSort('captured_at_desc')
-    setKindFilter('all')
-    setGeoBounds(undefined)
-    setBoundsDrawing(false)
-    setResultPage(0)
-    setSearchResults([])
-    setMapPointLimitReached(false)
-    setValidation(undefined)
-    setViewerSession(undefined)
-    setViewerNavigationPending(false)
-  }, [])
-
-  const openViewerAtIndex = useCallback(
-    async (absoluteIndex: number) => {
-      if (absoluteIndex < 0) return
-
-      setViewerNavigationPending(true)
-      try {
-        if (distanceSortActive) {
-          const windowOffset =
-            Math.floor(absoluteIndex / resultPageSize) * resultPageSize
-          const localIndex = absoluteIndex - windowOffset
-          let windowItems = searchResults
-
-          if (windowOffset !== resultOffset) {
-            const results = await catalog.searchGeoIndex(selectedIndex.id, {
-              ...timeRange,
-              lat: queryPoint.lat,
-              lon: queryPoint.lon,
-              k: resultPageSize,
-              offset: windowOffset,
-              kind: kindFilter,
-              geoBounds,
-            })
-            const items = await catalog.getMediaByIds(
-              results.map((result) => result.mediaId),
-            )
-            const byId = new Map(items.map((item) => [item.id, item]))
-            windowItems = results
-              .flatMap((result) => {
-                const item = byId.get(result.mediaId)
-                if (!item) return []
-                return [{ ...result, item }]
-              })
-            setResultPage(windowOffset / resultPageSize)
-            setSearchResults(windowItems)
-          }
-
-          if (!windowItems[localIndex]) return
-
-          setViewerSession({
-            absoluteIndex,
-            windowOffset,
-            items: windowItems,
-            canNavigateNext:
-              localIndex < windowItems.length - 1 ||
-              (windowItems.length === resultPageSize &&
-                windowOffset + windowItems.length < geoPointCount),
-            totalItems: geoPointCount,
-          })
-          return
-        }
-
-        const windowOffset =
-          Math.floor(absoluteIndex / resultPageSize) * resultPageSize
-        const localIndex = absoluteIndex - windowOffset
-        let windowItems = catalogPageResultItems
-
-        if (windowOffset !== resultOffset) {
-          const pageItems = await catalog.listMedia({
-            ...timeRange,
-            kind: kindFilter,
-            geoBounds,
-            sort: catalogSort,
-            limit: resultPageSize,
-            offset: windowOffset,
-          })
-          windowItems = mediaItemsToResults(pageItems)
-          setResultPage(windowOffset / resultPageSize)
-          setMediaItems(pageItems)
-        }
-
-        if (!windowItems[localIndex]) {
-          setViewerSession((session) =>
-            session ? { ...session, canNavigateNext: false } : session,
-          )
-          return
-        }
-
-        setViewerSession({
-          absoluteIndex,
-          windowOffset,
-          items: windowItems,
-          canNavigateNext:
-            localIndex < windowItems.length - 1 ||
-            windowItems.length === resultPageSize,
-          totalItems:
-            windowItems.length < resultPageSize
-              ? windowOffset + windowItems.length
-              : undefined,
-        })
-      } catch (caught) {
-        setError(caught instanceof Error ? caught.message : String(caught))
-      } finally {
-        setViewerNavigationPending(false)
-      }
-    },
-    [
-      catalog,
-      catalogPageResultItems,
-      catalogSort,
-      distanceSortActive,
-      geoBounds,
-      geoPointCount,
-      kindFilter,
-      queryPoint.lat,
-      queryPoint.lon,
-      resultOffset,
-      resultPageSize,
-      searchResults,
-      selectedIndex.id,
-      timeRange,
-    ],
-  )
-
-  const openViewer = useCallback(
-    (index: number) => {
-      void openViewerAtIndex(resultOffset + index)
-    },
-    [openViewerAtIndex, resultOffset],
-  )
-
-  const closeViewer = useCallback(() => {
-    setViewerSession(undefined)
-    setViewerNavigationPending(false)
-  }, [])
+    clearSearchState()
+    distanceResults.setResults([])
+    distanceResults.setValidation(undefined)
+    setIndexStatsOverride(undefined)
+    closeViewer()
+  }, [clearSearchState, closeViewer, distanceResults])
 
   const setDisplayMode = useCallback((mode: ResultDisplayMode) => {
     setResultDisplayMode(mode)
@@ -1425,9 +970,6 @@ function App() {
     [mapHeight],
   )
 
-  const viewerLocalIndex = viewerSession
-    ? viewerSession.absoluteIndex - viewerSession.windowOffset
-    : -1
   const mapResultItems = useMemo(() => mediaItemsToResults(mapItems), [mapItems])
   const privacyHtml = language === 'de' ? privacyDeHtml : privacyEnHtml
 
@@ -1439,9 +981,7 @@ function App() {
             <h1>
               <a
                 className="app-title-link"
-                href={pathWithSearchParams(
-                  buildSearchUrlParams(searchUrlState, searchUrlDefaults),
-                )}
+                href={appHref}
                 onClick={(event) => {
                   event.preventDefault()
                   setActivePage('app')
@@ -1524,9 +1064,7 @@ function App() {
           <h1>
             <a
               className="app-title-link"
-              href={pathWithSearchParams(
-                buildSearchUrlParams(searchUrlState, searchUrlDefaults),
-              )}
+              href={appHref}
               onClick={(event) => {
                 event.preventDefault()
                 setActivePage('app')
@@ -1604,7 +1142,6 @@ function App() {
                         disabled={busy}
                       >
                         <option value="sqlite">{t('sqliteOpfs')}</option>
-                        <option value="sqlite-sahpool">{t('sqliteSahpool')}</option>
                         <option value="sqlite-memory">{t('sqliteMemory')}</option>
                         <option value="indexeddb">{t('indexedDb')}</option>
                       </select>
@@ -1612,20 +1149,6 @@ function App() {
                     <p className="settings-hint">
                       {t('catalogDatabaseDescription')}
                     </p>
-                  </div>
-                )}
-                {platform.kind === 'web' && platform.importer.debugParseGeoFile && (
-                  <div className="display-section">
-                    <span>{t('debugTools')}</span>
-                    <button
-                      type="button"
-                      className="settings-clear-button"
-                      onClick={debugParseGeoFile}
-                      disabled={busy || !catalogReady}
-                    >
-                      <FileText size={16} />
-                      {t('debugParseTakeoutJson')}
-                    </button>
                   </div>
                 )}
                 <div className="display-section">
@@ -1822,10 +1345,7 @@ function App() {
                   <input
                     type="datetime-local"
                     value={startDate}
-                    onChange={(event) => {
-                      setStartDate(event.target.value)
-                      setResultPage(0)
-                    }}
+                    onChange={(event) => setStartDate(event.target.value)}
                   />
                 </label>
                 <label>
@@ -1833,10 +1353,7 @@ function App() {
                   <input
                     type="datetime-local"
                     value={endDate}
-                    onChange={(event) => {
-                      setEndDate(event.target.value)
-                      setResultPage(0)
-                    }}
+                    onChange={(event) => setEndDate(event.target.value)}
                   />
                 </label>
               </div>
@@ -1860,7 +1377,7 @@ function App() {
                 <select
                   value={sort}
                   onChange={(event) =>
-                    setSortMode(event.target.value as SortMode)
+                    setSortMode(event.target.value as SearchSortMode)
                   }
                 >
                   <option value="captured_at_desc">{t('newestFirst')}</option>
@@ -1876,10 +1393,9 @@ function App() {
                     {t('engine')}
                     <select
                       value={selectedIndexId}
-                      onChange={(event) => {
+                      onChange={(event) =>
                         setSelectedIndexId(event.target.value)
-                        setResultPage(0)
-                      }}
+                      }
                     >
                       {registry.indexes.map((index) => (
                         <option key={index.id} value={index.id}>
@@ -1904,25 +1420,32 @@ function App() {
                 </div>
                 <div>
                   <dt>{t('query')}</dt>
-                  <dd>{indexStats.lastQueryTimeMs?.toFixed(2) ?? '0'} ms</dd>
+                  <dd>
+                    {effectiveIndexStats.lastQueryTimeMs?.toFixed(2) ?? '0'} ms
+                  </dd>
                 </div>
                 <div>
                   <dt>{t('distances')}</dt>
-                  <dd>{statsNumber(indexStats.distanceComputations, locale)}</dd>
+                  <dd>
+                    {statsNumber(effectiveIndexStats.distanceComputations, locale)}
+                  </dd>
                 </div>
                 <div>
                   <dt>{t('nodes')}</dt>
-                  <dd>{statsNumber(indexStats.nodesVisited, locale)}</dd>
+                  <dd>{statsNumber(effectiveIndexStats.nodesVisited, locale)}</dd>
                 </div>
                 <div>
                   <dt>{t('visited')}</dt>
-                  <dd>{statsNumber(indexStats.candidatesInspected, locale)}</dd>
+                  <dd>
+                    {statsNumber(effectiveIndexStats.candidatesInspected, locale)}
+                  </dd>
                 </div>
                 <div>
                   <dt>{t('pruned')}</dt>
                   <dd>
                     {statsNumber(
-                      indexStats.prunedByGeo + indexStats.prunedByTime,
+                      effectiveIndexStats.prunedByGeo +
+                        effectiveIndexStats.prunedByTime,
                       locale,
                     )}
                   </dd>
@@ -2067,8 +1590,14 @@ function App() {
           </div>
         <div
           className={`media-grid media-grid-${resultDisplayMode} media-thumb-${resultThumbnailSize}`}
+          aria-busy={resultItemsLoading}
         >
-          {resultItems.map((result, index) => (
+          {resultItemsLoading ? (
+            <ResultSkeletons
+              count={skeletonCount}
+              displayMode={resultDisplayMode}
+            />
+          ) : resultItems.map((result, index) => (
             <article
               key={result.item.id}
               className="media-card"

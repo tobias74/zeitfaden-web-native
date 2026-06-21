@@ -25,7 +25,6 @@ import type {
 import type {
   GeoIndexBuildProgress,
   GeoIndexBuildSummary,
-  GeoParseDebugSummary,
   ImportProgress,
   ImportSummary,
 } from '../types'
@@ -39,7 +38,7 @@ type WorkerRequest = {
 }
 
 type InitResult = {
-  storageMode: 'opfs' | 'sahpool' | 'memory' | 'indexeddb'
+  storageMode: 'opfs' | 'memory' | 'indexeddb'
   sqliteVersion: string
   filename: string
 }
@@ -61,7 +60,7 @@ type SqliteDb = {
 }
 
 type SqliteModule = Awaited<ReturnType<typeof sqlite3InitModule>>
-type SqliteStorageMode = 'opfs' | 'sahpool' | 'memory'
+type SqliteStorageMode = 'opfs' | 'memory'
 
 type IdbAsset = {
   contentHash: string
@@ -215,10 +214,6 @@ type ImportGeoFilePayload = {
   traceId?: string
 }
 
-type DebugParseGeoFilePayload = {
-  file: File
-}
-
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map((byte) => byte.toString(16).padStart(2, '0'))
@@ -262,14 +257,6 @@ async function openSqliteDb(
   if (mode === 'memory') {
     const dbConstructor = sqlite3.oo1.DB as new (filename: string) => unknown
     return new dbConstructor(':memory:') as SqliteDb
-  }
-
-  if (mode === 'sahpool') {
-    const poolUtil = await sqlite3.installOpfsSAHPoolVfs({
-      directory: '.zeitfaden-catalog-sahpool',
-      initialCapacity: 8,
-    })
-    return new poolUtil.OpfsSAHPoolDb('/catalog.sqlite3') as unknown as SqliteDb
   }
 
   const opfsVfs = sqlite3.capi.sqlite3_vfs_find('opfs')
@@ -1871,133 +1858,6 @@ function maybeLogGeoImportTiming(
   logGeoImportTiming(timing, phase, extra)
 }
 
-async function debugParseGoogleTakeoutFile(
-  payload: DebugParseGeoFilePayload,
-): Promise<GeoParseDebugSummary> {
-  const { file } = payload
-  const sourceLabel = file.name || 'selected JSON file'
-  const prefix = await file.slice(0, GEO_IMPORT_PREFIX_BYTES).text()
-
-  if (!jsonLikePrefix(prefix)) {
-    throw new Error(
-      'Debug parser expects raw Google Takeout Records.json data.',
-    )
-  }
-  throwKnownUnsupportedJsonPrefix(prefix)
-
-  const parser = new GoogleTakeoutLocationStreamParser()
-  const reader = file.stream().getReader()
-  const decoder = new TextDecoder()
-  const startedAt = performance.now()
-  let bytesRead = 0
-  let parsedPoints = 0
-  let hashedPoints = 0
-  let skippedPoints = 0
-  let hashDurationMs = 0
-  let lastLogAt = startedAt
-
-  const log = (phase: string) => {
-    const now = performance.now()
-    const durationMs = now - startedAt
-    console.log('[geo-debug]', {
-      phase,
-      fileName: sourceLabel,
-      sizeBytes: file.size,
-      bytesRead,
-      percent:
-        file.size > 0 ? Math.round((bytesRead / file.size) * 1000) / 10 : 0,
-      parsedPoints,
-      hashedPoints,
-      skippedPoints,
-      elapsedMs: Math.round(durationMs),
-      hashDurationMs: Math.round(hashDurationMs),
-      bytesPerSecond: Math.round(debugParseRate(bytesRead, durationMs)),
-      pointsPerSecond: Math.round(debugParseRate(parsedPoints, durationMs)),
-      hashesPerSecond: Math.round(debugParseRate(hashedPoints, hashDurationMs)),
-    })
-  }
-
-  const maybeLog = () => {
-    const now = performance.now()
-    if (now - lastLogAt < PROGRESS_HEARTBEAT_MS) return
-    lastLogAt = now
-    log('parsing')
-  }
-
-  const consumeText = async (text: string) => {
-    let chunk = text
-    while (true) {
-      const result = parser.feed(chunk, {
-        maxDurationMs: GEO_IMPORT_PARSE_SLICE_MS,
-      })
-      chunk = ''
-      parsedPoints += result.points.length
-      skippedPoints += result.skippedPoints
-      const hashStartedAt = performance.now()
-      for (const point of result.points) {
-        const contentHash = geoPointContentHash(
-          point.latitude,
-          point.longitude,
-          point.capturedAt,
-        )
-        geoPointLocationId('debug-source', contentHash)
-        hashedPoints += 1
-      }
-      hashDurationMs += performance.now() - hashStartedAt
-      maybeLog()
-
-      if (!result.paused) break
-      await yieldToEventLoop()
-    }
-  }
-
-  log('start')
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-
-    bytesRead += value.byteLength
-    await consumeText(decoder.decode(value, { stream: true }))
-    maybeLog()
-  }
-
-  const finalChunk = decoder.decode()
-  if (finalChunk) {
-    await consumeText(finalChunk)
-  }
-
-  const final = parser.finish()
-  skippedPoints = final.skippedPoints
-  const durationMs = performance.now() - startedAt
-  const summary = {
-    sourceLabel,
-    sizeBytes: file.size,
-    bytesRead,
-    totalEntries: final.totalEntries,
-    parsedPoints,
-    hashedPoints,
-    skippedPoints,
-    durationMs,
-    hashDurationMs,
-    bytesPerSecond: debugParseRate(bytesRead, durationMs),
-    pointsPerSecond: debugParseRate(parsedPoints, durationMs),
-    hashesPerSecond: debugParseRate(hashedPoints, hashDurationMs),
-  }
-
-  console.log('[geo-debug]', {
-    phase: 'complete',
-    ...summary,
-    durationMs: Math.round(summary.durationMs),
-    hashDurationMs: Math.round(summary.hashDurationMs),
-    bytesPerSecond: Math.round(summary.bytesPerSecond),
-    pointsPerSecond: Math.round(summary.pointsPerSecond),
-    hashesPerSecond: Math.round(summary.hashesPerSecond),
-  })
-
-  return summary
-}
-
 async function importGpxIntoCatalog(
   file: File,
   source: MediaSource,
@@ -2666,11 +2526,7 @@ function rollbackSqliteImportTransaction(
 function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
   const ensureMode = () => ensureDb(mode)
   const webStorageMode: WebCatalogStorageMode =
-    mode === 'memory'
-      ? 'sqlite-memory'
-      : mode === 'sahpool'
-        ? 'sqlite-sahpool'
-        : 'sqlite'
+    mode === 'memory' ? 'sqlite-memory' : 'sqlite'
   let importTransactionState: SqliteImportTransactionState | undefined
 
   return {
@@ -2828,7 +2684,6 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
 }
 
 const sqliteCatalogStore = createSqliteCatalogStore('opfs')
-const sqliteSahpoolCatalogStore = createSqliteCatalogStore('sahpool')
 const sqliteMemoryCatalogStore = createSqliteCatalogStore('memory')
 
 const indexedDbCatalogStore: CatalogStore = {
@@ -2890,14 +2745,12 @@ const indexedDbCatalogStore: CatalogStore = {
 
 function storageModeForRequest(request: WorkerRequest): WebCatalogStorageMode {
   if (request.storageMode === 'indexeddb') return 'indexeddb'
-  if (request.storageMode === 'sqlite-sahpool') return 'sqlite-sahpool'
   if (request.storageMode === 'sqlite-memory') return 'sqlite-memory'
   return 'sqlite'
 }
 
 function catalogStoreForMode(mode: WebCatalogStorageMode): CatalogStore {
   if (mode === 'indexeddb') return indexedDbCatalogStore
-  if (mode === 'sqlite-sahpool') return sqliteSahpoolCatalogStore
   if (mode === 'sqlite-memory') return sqliteMemoryCatalogStore
   return sqliteCatalogStore
 }
@@ -2926,10 +2779,6 @@ async function handleRequest(
         request.payload as ImportGeoFilePayload,
         store,
         postProgress as (progress: ImportProgress) => void,
-      )
-    case 'debugParseGeoFile':
-      return debugParseGoogleTakeoutFile(
-        request.payload as DebugParseGeoFilePayload,
       )
     case 'listMedia':
       return store.listMedia(request.payload as CatalogQuery)

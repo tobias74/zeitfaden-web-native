@@ -3,7 +3,6 @@ export const WEB_CATALOG_STORAGE_MODE_KEY =
 
 export const WEB_CATALOG_STORAGE_MODES = [
   'sqlite',
-  'sqlite-sahpool',
   'sqlite-memory',
   'indexeddb',
 ] as const

@@ -12,7 +12,7 @@ import type {
 } from '../types'
 
 export type CatalogInfo = {
-  storageMode: 'opfs' | 'sahpool' | 'memory' | 'indexeddb' | 'native'
+  storageMode: 'opfs' | 'memory' | 'indexeddb' | 'native'
   sqliteVersion: string
   filename: string
 }
@@ -43,21 +43,6 @@ export type ImportSummary = {
 
 export type ImportOptions = {
   traceId?: string
-}
-
-export type GeoParseDebugSummary = {
-  sourceLabel: string
-  sizeBytes: number
-  bytesRead: number
-  totalEntries: number
-  parsedPoints: number
-  hashedPoints: number
-  skippedPoints: number
-  durationMs: number
-  hashDurationMs: number
-  bytesPerSecond: number
-  pointsPerSecond: number
-  hashesPerSecond: number
 }
 
 export type GeoIndexBuildProgress = {
@@ -115,7 +100,6 @@ export interface ImportBackend {
     onProgress?: (progress: ImportProgress) => void,
     options?: ImportOptions,
   ): Promise<ImportSummary>
-  debugParseGeoFile?(): Promise<GeoParseDebugSummary>
   dispose(): void
 }
 
