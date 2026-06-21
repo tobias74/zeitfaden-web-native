@@ -124,13 +124,42 @@
 .topbar-tools {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) auto;
+  grid-template-columns: auto minmax(160px, 1fr) auto;
   align-items: center;
-  gap: 10px;
+  gap: 18px;
+}
+
+.topbar-nav {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 16px;
+  justify-content: flex-start;
+}
+
+.topbar-link {
+  min-height: 28px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #4f5b56;
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.topbar-link:hover:not(:disabled),
+.topbar-link:focus-visible {
+  background: transparent;
+  color: #0f7668;
+  text-decoration: underline;
+  text-underline-offset: 4px;
 }
 
 .topbar-actions {
-  grid-column: 2;
+  grid-column: 3;
   grid-row: 1;
   display: flex;
   flex-wrap: nowrap;
@@ -141,6 +170,13 @@
 .topbar-actions button,
 .topbar-actions summary {
   white-space: nowrap;
+}
+
+.topbar-progress-slot {
+  grid-column: 2;
+  grid-row: 1;
+  height: 32px;
+  min-width: 0;
 }
 
 .language-control {
@@ -170,13 +206,6 @@
   padding: 0 6px;
   border: 0;
   background: transparent;
-}
-
-.topbar-progress-slot {
-  grid-column: 1;
-  grid-row: 1;
-  height: 32px;
-  min-width: 0;
 }
 
 .import-progress-idle {
@@ -1118,18 +1147,26 @@
     grid-template-columns: 1fr;
   }
 
+  .topbar-nav,
   .topbar-actions,
   .topbar-progress-slot {
     grid-column: 1;
   }
 
-  .topbar-actions {
+  .topbar-nav {
     grid-row: 1;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 2px 0;
+  }
+
+  .topbar-actions {
+    grid-row: 2;
     flex-wrap: wrap;
   }
 
   .topbar-progress-slot {
-    grid-row: 2;
+    grid-row: 3;
     height: 24px;
   }
 

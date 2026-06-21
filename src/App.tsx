@@ -1099,6 +1099,22 @@ function App() {
           </p>
         </div>
         <div className="topbar-tools">
+          <nav className="topbar-nav" aria-label="Legal">
+            <button
+              type="button"
+              className="topbar-link"
+              onClick={() => setActivePage('imprint')}
+            >
+              {t('imprint')}
+            </button>
+            <button
+              type="button"
+              className="topbar-link"
+              onClick={() => setActivePage('privacy')}
+            >
+              {t('privacy')}
+            </button>
+          </nav>
           <div className="topbar-actions">
             <button
               type="button"
@@ -1124,14 +1140,6 @@ function App() {
                 ))}
               </select>
             </label>
-            <button type="button" onClick={() => setActivePage('imprint')}>
-              <FileText size={17} />
-              {t('imprint')}
-            </button>
-            <button type="button" onClick={() => setActivePage('privacy')}>
-              <ShieldCheck size={17} />
-              {t('privacy')}
-            </button>
             <details className="display-menu settings-menu">
               <summary>
                 <Settings2 size={17} />
