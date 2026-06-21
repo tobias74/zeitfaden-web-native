@@ -10,6 +10,7 @@ import {
 } from './handleStore'
 import { ScannerClient } from './scannerClient'
 import type { ScanProgress } from './scanner.worker'
+import { GoogleTakeoutLocationStreamParser } from '../../lib/googleTakeoutStream'
 import {
   geoPointContentHash,
   parseGeoFilePoints,
@@ -22,7 +23,7 @@ import type {
   PlatformBackend,
   ThumbnailBackend,
 } from '../types'
-import type { MediaItem, MediaLocation } from '../../types'
+import type { MediaItem, MediaLocation, MediaSource } from '../../types'
 
 type ImportSourceRecord = {
   id: string
@@ -41,6 +42,8 @@ type ImportGeoFileRecord = {
 }
 
 const GEO_IMPORT_LOG_PREFIX = '[geo-import]'
+const GEO_IMPORT_BATCH_SIZE = 1000
+const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
 const GEO_IMPORT_READ_PROGRESS_BYTES = 100 * 1024 * 1024
 
 function textReadSummary(text: string): Record<string, unknown> {
@@ -80,6 +83,36 @@ function logGeoFileRead(file: File, sourceLabel: string, text: string): void {
       summary.trimmedLength,
     )} firstCodePointHex=${String(summary.firstCodePointHex)}`,
   )
+}
+
+async function readGeoFilePrefix(file: File, sourceLabel: string): Promise<string> {
+  const prefix = await file.slice(0, GEO_IMPORT_PREFIX_BYTES).text()
+  console.log(GEO_IMPORT_LOG_PREFIX, {
+    phase: 'file prefix read',
+    fileName: file.name,
+    sourceLabel,
+    prefixBytes: Math.min(file.size, GEO_IMPORT_PREFIX_BYTES),
+    ...textReadSummary(prefix),
+  })
+  return prefix
+}
+
+function jsonLikePrefix(prefix: string): boolean {
+  const trimmed = prefix.trimStart()
+  return trimmed.startsWith('{') || trimmed.startsWith('[')
+}
+
+function throwKnownUnsupportedJsonPrefix(prefix: string): void {
+  if (/"timelineObjects"\s*:/.test(prefix)) {
+    throw new Error(
+      'This looks like Google Semantic Location History JSON. That is valid Google Takeout data, but this importer currently supports only the raw Records.json location export.',
+    )
+  }
+  if (/"type"\s*:\s*"(FeatureCollection|Feature|Point)"/.test(prefix)) {
+    throw new Error(
+      'GeoJSON files are not supported yet. Supported formats are GPX and Google Takeout Location History JSON.',
+    )
+  }
 }
 
 async function readGeoFileText(file: File, sourceLabel: string): Promise<string> {
@@ -276,6 +309,156 @@ class WebImportBackend implements ImportBackend {
     this.scanner = scanner
   }
 
+  private async prepareGeoSource(
+    sourceRecord: ImportGeoFileRecord,
+  ): Promise<MediaSource> {
+    const source = {
+      id: sourceRecord.id,
+      label: sourceRecord.label,
+      addedAt: sourceRecord.addedAt,
+    }
+
+    await putGeoFileHandle({
+      id: sourceRecord.id,
+      label: sourceRecord.label,
+      addedAt: sourceRecord.addedAt,
+      handle: sourceRecord.handle,
+    })
+
+    if (sourceRecord.duplicateSourceIds.length > 0) {
+      await this.catalog.removeSources(sourceRecord.duplicateSourceIds)
+      await Promise.all(
+        sourceRecord.duplicateSourceIds.map((id) => removeGeoFileHandle(id)),
+      )
+    }
+
+    await this.catalog.upsertSource(source)
+    return source
+  }
+
+  private async importGoogleTakeoutGeoFileStream(
+    file: File,
+    sourceRecord: ImportGeoFileRecord,
+    sourceLabel: string,
+    onProgress?: (progress: ImportProgress) => void,
+  ): Promise<ImportSummary> {
+    const source = await this.prepareGeoSource(sourceRecord)
+    const parser = new GoogleTakeoutLocationStreamParser()
+    const reader = file.stream().getReader()
+    const decoder = new TextDecoder()
+    const pendingPoints: ParsedGeoPoint[] = []
+    let bytesRead = 0
+    let acceptedMedia = 0
+    let skippedFiles = 0
+    let nextProgressAt = GEO_IMPORT_READ_PROGRESS_BYTES
+
+    const emitScanProgress = (scannedFiles: number) => {
+      onProgress?.({
+        phase: 'scanning',
+        sourceLabel,
+        scannedFiles,
+        totalFiles: 1,
+        acceptedMedia: acceptedMedia + pendingPoints.length,
+        skippedFiles,
+        currentPath: sourceLabel,
+      })
+    }
+
+    const flushPending = async () => {
+      if (pendingPoints.length === 0) return
+
+      const points = pendingPoints.splice(0, pendingPoints.length)
+      const items = await Promise.all(
+        points.map((point) =>
+          geoPointItemFromParsedPoint(
+            sourceRecord.id,
+            sourceLabel,
+            'application/json',
+            point,
+          ),
+        ),
+      )
+      await this.catalog.upsertMedia(items)
+      acceptedMedia += items.length
+      emitScanProgress(0)
+    }
+
+    const consumeText = async (text: string) => {
+      const result = parser.feed(text)
+      skippedFiles += result.skippedPoints
+      pendingPoints.push(...result.points)
+
+      if (pendingPoints.length >= GEO_IMPORT_BATCH_SIZE) {
+        await flushPending()
+      }
+    }
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      bytesRead += value.byteLength
+      await consumeText(decoder.decode(value, { stream: true }))
+
+      if (bytesRead >= nextProgressAt) {
+        console.log(GEO_IMPORT_LOG_PREFIX, {
+          phase: 'takeout stream progress',
+          fileName: file.name,
+          sourceLabel,
+          bytesRead,
+          sizeBytes: file.size,
+          acceptedMedia: acceptedMedia + pendingPoints.length,
+          skippedFiles,
+        })
+        emitScanProgress(0)
+        while (nextProgressAt <= bytesRead) {
+          nextProgressAt += GEO_IMPORT_READ_PROGRESS_BYTES
+        }
+      }
+    }
+
+    const finalChunk = decoder.decode()
+    if (finalChunk) {
+      await consumeText(finalChunk)
+    }
+
+    const final = parser.finish()
+    skippedFiles = final.skippedPoints
+    await flushPending()
+
+    console.log(GEO_IMPORT_LOG_PREFIX, {
+      phase: 'takeout stream complete',
+      fileName: file.name,
+      sourceLabel,
+      bytesRead,
+      sizeBytes: file.size,
+      bytesReadMatchesFileSize: bytesRead === file.size,
+      totalEntries: final.totalEntries,
+      acceptedMedia,
+      skippedFiles,
+    })
+
+    onProgress?.({
+      phase: 'storing',
+      sourceLabel,
+      scannedFiles: 1,
+      totalFiles: 1,
+      acceptedMedia,
+      skippedFiles,
+      currentPath: sourceLabel,
+    })
+
+    return {
+      source,
+      sourceLabel,
+      scannedFiles: 1,
+      totalFiles: 1,
+      acceptedMedia,
+      skippedFiles,
+      errors: [],
+    }
+  }
+
   async importFolder(
     onProgress?: (progress: ImportProgress) => void,
   ): Promise<ImportSummary> {
@@ -387,6 +570,18 @@ class WebImportBackend implements ImportBackend {
       mimeType: file.type || undefined,
       lastModified: file.lastModified,
     })
+
+    const filePrefix = await readGeoFilePrefix(file, sourceLabel)
+    if (jsonLikePrefix(filePrefix)) {
+      throwKnownUnsupportedJsonPrefix(filePrefix)
+      return this.importGoogleTakeoutGeoFileStream(
+        file,
+        sourceRecord,
+        sourceLabel,
+        onProgress,
+      )
+    }
+
     const fileText = await readGeoFileText(file, sourceLabel)
     const parsed = parseGeoFilePoints(file.name || sourceLabel, fileText)
     const items = await Promise.all(
@@ -419,26 +614,7 @@ class WebImportBackend implements ImportBackend {
       currentPath: sourceLabel,
     })
 
-    await putGeoFileHandle({
-      id: sourceRecord.id,
-      label: sourceRecord.label,
-      addedAt: sourceRecord.addedAt,
-      handle: sourceRecord.handle,
-    })
-
-    if (sourceRecord.duplicateSourceIds.length > 0) {
-      await this.catalog.removeSources(sourceRecord.duplicateSourceIds)
-      await Promise.all(
-        sourceRecord.duplicateSourceIds.map((id) => removeGeoFileHandle(id)),
-      )
-    }
-
-    const source = {
-      id: sourceRecord.id,
-      label: sourceRecord.label,
-      addedAt: sourceRecord.addedAt,
-    }
-    await this.catalog.upsertSource(source)
+    const source = await this.prepareGeoSource(sourceRecord)
     await this.catalog.upsertMedia(items)
 
     return {

@@ -232,40 +232,48 @@ export function parseGoogleTakeoutLocationPoints(
 
   parsed.locations.forEach((entry, entryIndex) => {
     const index = entryIndex + 1
-    if (!isRecord(entry)) {
+    const point = parseGoogleTakeoutLocationEntry(entry, index)
+    if (point) {
+      points.push(point)
+    } else {
       skippedPoints += 1
-      return
     }
-
-    const latitudeE7 = numeric(entry.latitudeE7)
-    const longitudeE7 = numeric(entry.longitudeE7)
-    const latitude =
-      latitudeE7 === undefined ? undefined : latitudeE7 / 10_000_000
-    const longitude =
-      longitudeE7 === undefined ? undefined : longitudeE7 / 10_000_000
-    const capturedAt =
-      timestampMillis(entry.timestamp) ??
-      timestampMs(entry.timestampMs) ??
-      timestampMs(entry.timestampMS)
-
-    if (
-      !validLatitude(latitude) ||
-      !validLongitude(longitude) ||
-      capturedAt === undefined
-    ) {
-      skippedPoints += 1
-      return
-    }
-
-    points.push({
-      index,
-      latitude,
-      longitude,
-      capturedAt,
-    })
   })
 
   return { points, skippedPoints, mimeType: 'application/json' }
+}
+
+export function parseGoogleTakeoutLocationEntry(
+  entry: unknown,
+  index: number,
+): ParsedGeoPoint | undefined {
+  if (!isRecord(entry)) return undefined
+
+  const latitudeE7 = numeric(entry.latitudeE7)
+  const longitudeE7 = numeric(entry.longitudeE7)
+  const latitude =
+    latitudeE7 === undefined ? undefined : latitudeE7 / 10_000_000
+  const longitude =
+    longitudeE7 === undefined ? undefined : longitudeE7 / 10_000_000
+  const capturedAt =
+    timestampMillis(entry.timestamp) ??
+    timestampMs(entry.timestampMs) ??
+    timestampMs(entry.timestampMS)
+
+  if (
+    !validLatitude(latitude) ||
+    !validLongitude(longitude) ||
+    capturedAt === undefined
+  ) {
+    return undefined
+  }
+
+  return {
+    index,
+    latitude,
+    longitude,
+    capturedAt,
+  }
 }
 
 export function detectGeoFileFormat(
