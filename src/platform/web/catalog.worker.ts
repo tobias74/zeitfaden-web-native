@@ -82,6 +82,7 @@ type IdbLocation = MediaLocation & {
 }
 
 type CatalogStore = {
+  geoImportWriteBatchSize: number
   init(): Promise<InitResult>
   upsertSource(source: MediaSource): Promise<void>
   upsertMedia(items: MediaItem[]): Promise<number>
@@ -117,7 +118,8 @@ const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
 const GEO_IMPORT_PARSE_SLICE_MS = 250
 const PROGRESS_HEARTBEAT_MS = 1000
 const GEO_POINT_ITEM_BUILD_CHUNK_SIZE = 250
-const GEO_IMPORT_WRITE_BATCH_SIZE = 250
+const GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE = 250
+const GEO_IMPORT_INDEXEDDB_WRITE_BATCH_SIZE = 2000
 const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb'
 const INDEXED_DB_VERSION = 1
 
@@ -543,10 +545,15 @@ async function idbUpsertMedia(items: MediaItem[]): Promise<number> {
   if (items.length === 0) return 0
 
   const database = await requireIndexedDb()
-  const existingAssets = await idbExistingAssets(
-    database,
-    items.map((item) => item.contentHash),
+  const needsExistingAssets = items.some(
+    (item) => item.kind !== 'geo_point' || item.thumbnailKey !== undefined,
   )
+  const existingAssets = needsExistingAssets
+    ? await idbExistingAssets(
+        database,
+        items.map((item) => item.contentHash),
+      )
+    : new Map<string, IdbAsset>()
   const transaction = database.transaction(['assets', 'locations'], 'readwrite')
   const done = idbTransactionDone(transaction)
   const assets = transaction.objectStore('assets')
@@ -1731,7 +1738,7 @@ async function importGpxIntoCatalog(
 
       for (const item of itemChunk) {
         batch.push(item)
-        if (batch.length >= GEO_IMPORT_WRITE_BATCH_SIZE) {
+        if (batch.length >= store.geoImportWriteBatchSize) {
           await flushBatch('storing')
         }
       }
@@ -1825,7 +1832,7 @@ async function importGoogleTakeoutIntoCatalog(
 
       for (const item of itemChunk) {
         batch.push(item)
-        if (batch.length >= GEO_IMPORT_WRITE_BATCH_SIZE) {
+        if (batch.length >= store.geoImportWriteBatchSize) {
           await flushBatch('scanning')
         }
       }
@@ -2213,6 +2220,7 @@ async function clearCatalog(): Promise<void> {
 }
 
 const sqliteCatalogStore: CatalogStore = {
+  geoImportWriteBatchSize: GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE,
   init: ensureDb,
   upsertSource,
   upsertMedia,
@@ -2243,6 +2251,7 @@ const sqliteCatalogStore: CatalogStore = {
 }
 
 const indexedDbCatalogStore: CatalogStore = {
+  geoImportWriteBatchSize: GEO_IMPORT_INDEXEDDB_WRITE_BATCH_SIZE,
   init: ensureIndexedDb,
   upsertSource: idbUpsertSource,
   upsertMedia: idbUpsertMedia,
