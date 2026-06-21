@@ -52,7 +52,6 @@ async function main() {
   await page.locator('.language-control select').selectOption('en')
   await waitForText(page, 'Import folder')
 
-  await page.getByText('Settings', { exact: true }).click()
   await page.getByRole('button', { name: /imprint/i }).click()
   await waitForText(page, 'tobiga UG')
   await waitForText(page, 'USt-IdNr. DE 301206623')
@@ -60,16 +59,15 @@ async function main() {
   await page.getByRole('button', { name: /back to app/i }).click()
   await waitForText(page, 'Catalog results')
 
-  await page.getByText('Settings', { exact: true }).click()
   await page.getByRole('button', { name: /privacy policy/i }).click()
   await page
     .frameLocator('.privacy-frame')
-    .getByText('Paste the English privacy policy HTML here')
+    .getByRole('heading', { name: 'Privacy Policy', level: 1 })
     .waitFor({ timeout: 15_000 })
   await page.locator('.language-control select').selectOption('de')
   await page
     .frameLocator('.privacy-frame')
-    .getByText('Hier die deutsche Datenschutzerklärung')
+    .getByRole('heading', { name: 'Datenschutzerklärung', level: 1 })
     .waitFor({ timeout: 15_000 })
   await page.screenshot({ path: '/tmp/ding-e2e-privacy.png', fullPage: true })
   await page.locator('.language-control select').selectOption('en')

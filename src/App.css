@@ -26,7 +26,7 @@
 .topbar {
   min-height: 72px;
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(420px, 680px);
+  grid-template-columns: minmax(260px, 1fr) minmax(620px, 920px);
   align-items: center;
   justify-content: space-between;
   gap: 16px;
@@ -124,7 +124,7 @@
 .topbar-tools {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto;
+  grid-template-columns: minmax(160px, 1fr) auto;
   align-items: center;
   gap: 10px;
 }
@@ -622,11 +622,6 @@
 }
 
 .settings-clear-button {
-  width: 100%;
-  justify-content: flex-start;
-}
-
-.settings-link-button {
   width: 100%;
   justify-content: flex-start;
 }

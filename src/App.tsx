@@ -1077,7 +1077,7 @@ function App() {
               <iframe
                 className="privacy-frame"
                 title={t('privacy')}
-                sandbox="allow-same-origin"
+                sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin"
                 srcDoc={privacyHtml}
               />
             </article>
@@ -1124,6 +1124,14 @@ function App() {
                 ))}
               </select>
             </label>
+            <button type="button" onClick={() => setActivePage('imprint')}>
+              <FileText size={17} />
+              {t('imprint')}
+            </button>
+            <button type="button" onClick={() => setActivePage('privacy')}>
+              <ShieldCheck size={17} />
+              {t('privacy')}
+            </button>
             <details className="display-menu settings-menu">
               <summary>
                 <Settings2 size={17} />
@@ -1153,25 +1161,6 @@ function App() {
                   >
                     <Trash2 size={16} />
                     {t('clearCatalog')}
-                  </button>
-                </div>
-                <div className="display-section">
-                  <span>{t('legal')}</span>
-                  <button
-                    type="button"
-                    className="settings-link-button"
-                    onClick={() => setActivePage('imprint')}
-                  >
-                    <FileText size={16} />
-                    {t('imprint')}
-                  </button>
-                  <button
-                    type="button"
-                    className="settings-link-button"
-                    onClick={() => setActivePage('privacy')}
-                  >
-                    <ShieldCheck size={16} />
-                    {t('privacy')}
                   </button>
                 </div>
               </div>
