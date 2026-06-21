@@ -130,8 +130,10 @@ async function importGoogleTakeout(
     | ReturnType<typeof globalThis.setInterval>
     | undefined
 
-  const visibleAcceptedMedia = () =>
-    acceptedMedia + pendingPoints.length + inFlightAcceptedMedia
+  const visibleAcceptedMedia = (phase: ImportProgressPhase) =>
+    phase === 'storing'
+      ? acceptedMedia + inFlightAcceptedMedia
+      : acceptedMedia + pendingPoints.length + inFlightAcceptedMedia
 
   const emitProgress = (phase: ImportProgressPhase = currentProgressPhase) => {
     currentProgressPhase = phase
@@ -140,7 +142,7 @@ async function importGoogleTakeout(
       sourceLabel,
       scannedFiles: phase === 'storing' && bytesRead >= file.size ? 1 : 0,
       totalFiles: 1,
-      acceptedMedia: visibleAcceptedMedia(),
+      acceptedMedia: visibleAcceptedMedia(phase),
       skippedFiles,
       currentPath: sourceLabel,
       scannedBytes: bytesRead,
@@ -172,11 +174,13 @@ async function importGoogleTakeout(
     await ack
   }
 
-  const flushPending = async () => {
+  const flushPendingBatch = async () => {
     if (pendingPoints.length === 0) return
 
-    const points = pendingPoints.splice(0, pendingPoints.length)
-    firstPendingPointAt = undefined
+    const points = pendingPoints.splice(0, GEO_IMPORT_BATCH_SIZE)
+    if (pendingPoints.length === 0) {
+      firstPendingPointAt = undefined
+    }
     inFlightAcceptedMedia += points.length
     emitProgress('storing')
     try {
@@ -190,7 +194,24 @@ async function importGoogleTakeout(
     } finally {
       inFlightAcceptedMedia -= points.length
     }
-    emitProgress('scanning')
+  }
+
+  const flushPending = async (force = false) => {
+    let flushed = false
+    while (pendingPoints.length > 0) {
+      if (!force && pendingPoints.length < GEO_IMPORT_BATCH_SIZE) {
+        const pendingAgeMs =
+          firstPendingPointAt === undefined
+            ? 0
+            : performance.now() - firstPendingPointAt
+        if (pendingAgeMs < GEO_IMPORT_BATCH_MAX_AGE_MS) return
+      }
+      await flushPendingBatch()
+      flushed = true
+    }
+    if (flushed) {
+      emitProgress('scanning')
+    }
   }
 
   const consumeText = async (text: string) => {
@@ -206,17 +227,7 @@ async function importGoogleTakeout(
         pendingPoints.push(...result.points)
       }
 
-      const pendingAgeMs =
-        firstPendingPointAt === undefined
-          ? 0
-          : performance.now() - firstPendingPointAt
-
-      if (
-        pendingPoints.length >= GEO_IMPORT_BATCH_SIZE ||
-        pendingAgeMs >= GEO_IMPORT_BATCH_MAX_AGE_MS
-      ) {
-        await flushPending()
-      }
+      await flushPending()
 
       if (!result.paused) break
       await yieldToEventLoop()
@@ -241,7 +252,7 @@ async function importGoogleTakeout(
           sourceLabel,
           bytesRead,
           sizeBytes: file.size,
-          acceptedMedia: visibleAcceptedMedia(),
+          acceptedMedia: visibleAcceptedMedia('scanning'),
           skippedFiles,
         })
         emitProgress('scanning')
@@ -258,7 +269,7 @@ async function importGoogleTakeout(
 
     const final = parser.finish()
     skippedFiles = final.skippedPoints
-    await flushPending()
+    await flushPending(true)
 
     console.log(GEO_IMPORT_LOG_PREFIX, {
       phase: 'takeout worker stream complete',
