@@ -1,5 +1,9 @@
 import { CatalogClient } from './catalogClient'
 import {
+  storedWebCatalogStorageMode,
+  type WebCatalogStorageMode,
+} from './storageMode'
+import {
   getDirectoryHandle,
   listGeoFileHandles,
   listDirectoryHandles,
@@ -301,8 +305,10 @@ class WebFileLocationBackend {
   }
 }
 
-export function createWebPlatformBackend(): PlatformBackend {
-  const catalog = new CatalogClient()
+export function createWebPlatformBackend(
+  storageMode: WebCatalogStorageMode = storedWebCatalogStorageMode(),
+): PlatformBackend {
+  const catalog = new CatalogClient(storageMode)
 
   return {
     kind: 'web',

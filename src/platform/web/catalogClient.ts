@@ -16,6 +16,7 @@ import type {
   ImportProgress,
   ImportSummary,
 } from '../types'
+import type { WebCatalogStorageMode } from './storageMode'
 
 type ImportFolderPayload = {
   source: MediaSource
@@ -44,6 +45,11 @@ export class CatalogClient {
   private worker: Worker | undefined
   private nextId = 1
   private readonly pending = new Map<number, PendingRequest<unknown>>()
+  private readonly storageMode: WebCatalogStorageMode
+
+  constructor(storageMode: WebCatalogStorageMode) {
+    this.storageMode = storageMode
+  }
 
   init(): Promise<CatalogInfo> {
     return this.request('init')
@@ -198,7 +204,12 @@ export class CatalogClient {
         onProgress,
       })
       try {
-        this.ensureWorker().postMessage({ id, type, payload })
+        this.ensureWorker().postMessage({
+          id,
+          type,
+          payload,
+          storageMode: this.storageMode,
+        })
       } catch (error) {
         this.pending.delete(id)
         reject(error)

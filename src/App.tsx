@@ -62,6 +62,12 @@ import type {
   GeoIndexBuildProgress,
   ImportProgress,
 } from './platform/types'
+import {
+  WEB_CATALOG_STORAGE_MODE_KEY,
+  isWebCatalogStorageMode,
+  storedWebCatalogStorageMode,
+  type WebCatalogStorageMode,
+} from './platform/web/storageMode'
 import type {
   CatalogQuery,
   CatalogSort,
@@ -370,7 +376,12 @@ function pathWithSearchParams(params: URLSearchParams): string {
 }
 
 function App() {
-  const platform = useMemo(() => createPlatformBackend(), [])
+  const [webCatalogStorageMode, setWebCatalogStorageMode] =
+    useState<WebCatalogStorageMode>(() => storedWebCatalogStorageMode())
+  const platform = useMemo(
+    () => createPlatformBackend(webCatalogStorageMode),
+    [webCatalogStorageMode],
+  )
   const catalog = platform.catalog
   const registry = useMemo(() => new GeoIndexRegistry(), [])
   const [language, setLanguage] = useState<Language>(() => storedLanguage())
@@ -572,6 +583,37 @@ function App() {
     setLanguage(value)
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, value)
   }, [])
+
+  const changeWebCatalogStorageMode = useCallback(
+    (value: string) => {
+      if (
+        busy ||
+        !isWebCatalogStorageMode(value) ||
+        value === webCatalogStorageMode
+      ) {
+        return
+      }
+
+      window.localStorage.setItem(WEB_CATALOG_STORAGE_MODE_KEY, value)
+      setCatalogInfo(undefined)
+      setMediaItems([])
+      setMapItems([])
+      setMapPointLimitReached(false)
+      setSources([])
+      setGeoPointCount(0)
+      setGeoIndexVersion(0)
+      setSearchResults([])
+      setViewerSession(undefined)
+      setViewerNavigationPending(false)
+      setIndexStats(defaultStats)
+      setValidation(undefined)
+      setError(undefined)
+      setImportProgress(undefined)
+      setGeoIndexProgress(undefined)
+      setWebCatalogStorageMode(value)
+    },
+    [busy, webCatalogStorageMode],
+  )
 
   const applySearchUrlState = useCallback((nextState: SearchUrlState) => {
     setSelectedIndexId(nextState.selectedIndexId)
@@ -1438,6 +1480,26 @@ function App() {
                 {t('settings')}
               </summary>
               <div className="display-popover settings-popover">
+                {platform.kind === 'web' && (
+                  <div className="display-section">
+                    <label className="settings-select-row">
+                      <span>{t('catalogDatabase')}</span>
+                      <select
+                        value={webCatalogStorageMode}
+                        onChange={(event) =>
+                          changeWebCatalogStorageMode(event.target.value)
+                        }
+                        disabled={busy}
+                      >
+                        <option value="sqlite">{t('sqliteOpfs')}</option>
+                        <option value="indexeddb">{t('indexedDb')}</option>
+                      </select>
+                    </label>
+                    <p className="settings-hint">
+                      {t('catalogDatabaseDescription')}
+                    </p>
+                  </div>
+                )}
                 <div className="display-section">
                   <span>{t('activityLog')}</span>
                   <div className="activity-log" aria-label={t('activityLog')}>
