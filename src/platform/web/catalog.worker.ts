@@ -121,7 +121,7 @@ const GEO_POINT_ITEM_BUILD_CHUNK_SIZE = 250
 const GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE = 250
 const GEO_IMPORT_INDEXEDDB_WRITE_BATCH_SIZE = 2000
 const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb'
-const INDEXED_DB_VERSION = 1
+const INDEXED_DB_VERSION = 2
 
 const ctx = self as unknown as {
   postMessage: (message: unknown) => void
@@ -355,6 +355,22 @@ function iterateIdbCursor(
   })
 }
 
+function ensureIdbIndex(
+  store: IDBObjectStore,
+  name: string,
+  keyPath: string | string[],
+): void {
+  if (!store.indexNames.contains(name)) {
+    store.createIndex(name, keyPath)
+  }
+}
+
+function deleteIdbIndexIfExists(store: IDBObjectStore, name: string): void {
+  if (store.indexNames.contains(name)) {
+    store.deleteIndex(name)
+  }
+}
+
 async function ensureIndexedDb(): Promise<InitResult> {
   if (indexedDb && indexedDbInitResult) return indexedDbInitResult
   if (typeof indexedDB === 'undefined') {
@@ -370,6 +386,9 @@ async function ensureIndexedDb(): Promise<InitResult> {
       if (!database.objectStoreNames.contains('sources')) {
         const sources = database.createObjectStore('sources', { keyPath: 'id' })
         sources.createIndex('addedAt', 'addedAt')
+      } else {
+        const sources = request.transaction?.objectStore('sources')
+        if (sources) ensureIdbIndex(sources, 'addedAt', 'addedAt')
       }
 
       if (!database.objectStoreNames.contains('assets')) {
@@ -377,8 +396,13 @@ async function ensureIndexedDb(): Promise<InitResult> {
           keyPath: 'contentHash',
         })
         assets.createIndex('capturedAt', 'capturedAt')
-        assets.createIndex('kind', 'kind')
-        assets.createIndex('deletedAt', 'deletedAt')
+      } else {
+        const assets = request.transaction?.objectStore('assets')
+        if (assets) {
+          ensureIdbIndex(assets, 'capturedAt', 'capturedAt')
+          deleteIdbIndexIfExists(assets, 'kind')
+          deleteIdbIndexIfExists(assets, 'deletedAt')
+        }
       }
 
       if (!database.objectStoreNames.contains('locations')) {
@@ -387,8 +411,14 @@ async function ensureIndexedDb(): Promise<InitResult> {
         })
         locations.createIndex('contentHash', 'contentHash')
         locations.createIndex('sourceId', 'sourceId')
-        locations.createIndex('sourcePath', ['sourceId', 'relativePath'])
-        locations.createIndex('deletedAt', 'deletedAt')
+      } else {
+        const locations = request.transaction?.objectStore('locations')
+        if (locations) {
+          ensureIdbIndex(locations, 'contentHash', 'contentHash')
+          ensureIdbIndex(locations, 'sourceId', 'sourceId')
+          deleteIdbIndexIfExists(locations, 'sourcePath')
+          deleteIdbIndexIfExists(locations, 'deletedAt')
+        }
       }
     }
 
