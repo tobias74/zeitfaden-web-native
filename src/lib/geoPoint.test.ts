@@ -159,7 +159,7 @@ describe('geo point helpers', () => {
   })
 
   it('rejects unsupported JSON geo formats with a clear error', () => {
-    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
 
     expect(() =>
       parseGeoFilePoints(
@@ -175,7 +175,7 @@ describe('geo point helpers', () => {
       parseGeoFilePoints('unknown.json', JSON.stringify({ items: [] })),
     ).toThrow('not a supported geo import format')
 
-    expect(debugSpy).toHaveBeenCalledWith(
+    expect(logSpy).toHaveBeenCalledWith(
       '[geo-import]',
       expect.objectContaining({
         fileName: 'unknown.json',
@@ -184,11 +184,11 @@ describe('geo point helpers', () => {
       }),
     )
 
-    debugSpy.mockRestore()
+    logSpy.mockRestore()
   })
 
   it('identifies Google Semantic Location History JSON as valid but unsupported', () => {
-    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
 
     expect(() =>
       parseGeoFilePoints(
@@ -199,7 +199,7 @@ describe('geo point helpers', () => {
       ),
     ).toThrow('Google Semantic Location History')
 
-    expect(debugSpy).toHaveBeenCalledWith(
+    expect(logSpy).toHaveBeenCalledWith(
       '[geo-import]',
       expect.objectContaining({
         fileName: '2024_JANUARY.json',
@@ -209,16 +209,16 @@ describe('geo point helpers', () => {
       }),
     )
 
-    debugSpy.mockRestore()
+    logSpy.mockRestore()
   })
 
   it('rejects files whose geo format cannot be detected', () => {
-    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
 
     expect(() => parseGeoFilePoints('notes.txt', 'plain text')).toThrow(
       'not a supported geo import format',
     )
 
-    debugSpy.mockRestore()
+    logSpy.mockRestore()
   })
 })

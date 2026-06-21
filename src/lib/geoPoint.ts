@@ -94,7 +94,7 @@ function logGeoImportDebug(
   reason: string,
   details: Record<string, unknown>,
 ): void {
-  console.debug(GEO_IMPORT_DEBUG_PREFIX, {
+  console.log(GEO_IMPORT_DEBUG_PREFIX, {
     fileName,
     reason,
     ...details,
