@@ -12,7 +12,7 @@ import type {
 } from '../types'
 
 export type CatalogInfo = {
-  storageMode: 'opfs' | 'memory' | 'indexeddb' | 'native'
+  storageMode: 'opfs' | 'sahpool' | 'memory' | 'indexeddb' | 'native'
   sqliteVersion: string
   filename: string
 }

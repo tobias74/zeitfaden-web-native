@@ -39,7 +39,7 @@ type WorkerRequest = {
 }
 
 type InitResult = {
-  storageMode: 'opfs' | 'memory' | 'indexeddb'
+  storageMode: 'opfs' | 'sahpool' | 'memory' | 'indexeddb'
   sqliteVersion: string
   filename: string
 }
@@ -61,7 +61,7 @@ type SqliteDb = {
 }
 
 type SqliteModule = Awaited<ReturnType<typeof sqlite3InitModule>>
-type SqliteStorageMode = 'opfs' | 'memory'
+type SqliteStorageMode = 'opfs' | 'sahpool' | 'memory'
 
 type IdbAsset = {
   contentHash: string
@@ -254,13 +254,21 @@ function yieldToEventLoop(): Promise<void> {
   })
 }
 
-function openSqliteDb(
+async function openSqliteDb(
   sqlite3: SqliteModule,
   mode: SqliteStorageMode,
-): SqliteDb {
+): Promise<SqliteDb> {
   if (mode === 'memory') {
     const dbConstructor = sqlite3.oo1.DB as new (filename: string) => unknown
     return new dbConstructor(':memory:') as SqliteDb
+  }
+
+  if (mode === 'sahpool') {
+    const poolUtil = await sqlite3.installOpfsSAHPoolVfs({
+      directory: '.zeitfaden-catalog-sahpool',
+      initialCapacity: 8,
+    })
+    return new poolUtil.OpfsSAHPoolDb('/catalog.sqlite3') as unknown as SqliteDb
   }
 
   const opfsVfs = sqlite3.capi.sqlite3_vfs_find('opfs')
@@ -281,7 +289,7 @@ async function ensureDb(
   if (db && initResult && sqliteMode === mode) return initResult
 
   const sqlite3 = await sqlite3InitModule()
-  db = openSqliteDb(sqlite3, mode)
+  db = await openSqliteDb(sqlite3, mode)
   sqliteMode = mode
   const activeDb = db
 
@@ -2613,7 +2621,11 @@ async function clearCatalog(): Promise<void> {
 function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
   const ensureMode = () => ensureDb(mode)
   const webStorageMode: WebCatalogStorageMode =
-    mode === 'memory' ? 'sqlite-memory' : 'sqlite'
+    mode === 'memory'
+      ? 'sqlite-memory'
+      : mode === 'sahpool'
+        ? 'sqlite-sahpool'
+        : 'sqlite'
 
   return {
     geoImportWriteBatchSize: GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE,
@@ -2736,6 +2748,7 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
 }
 
 const sqliteCatalogStore = createSqliteCatalogStore('opfs')
+const sqliteSahpoolCatalogStore = createSqliteCatalogStore('sahpool')
 const sqliteMemoryCatalogStore = createSqliteCatalogStore('memory')
 
 const indexedDbCatalogStore: CatalogStore = {
@@ -2797,12 +2810,14 @@ const indexedDbCatalogStore: CatalogStore = {
 
 function storageModeForRequest(request: WorkerRequest): WebCatalogStorageMode {
   if (request.storageMode === 'indexeddb') return 'indexeddb'
+  if (request.storageMode === 'sqlite-sahpool') return 'sqlite-sahpool'
   if (request.storageMode === 'sqlite-memory') return 'sqlite-memory'
   return 'sqlite'
 }
 
 function catalogStoreForMode(mode: WebCatalogStorageMode): CatalogStore {
   if (mode === 'indexeddb') return indexedDbCatalogStore
+  if (mode === 'sqlite-sahpool') return sqliteSahpoolCatalogStore
   if (mode === 'sqlite-memory') return sqliteMemoryCatalogStore
   return sqliteCatalogStore
 }
