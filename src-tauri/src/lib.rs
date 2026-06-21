@@ -438,6 +438,20 @@ fn geo_import_debug_text(path: &Path, reason: &str, text: &str) {
     );
 }
 
+fn geo_import_debug_file_read(path: &Path, text: &str) {
+    let size_bytes = fs::metadata(path).map(|metadata| metadata.len()).ok();
+    let first_characters = text.chars().take(120).collect::<String>();
+    eprintln!(
+        "[geo-import] file={} phase=file-read sizeBytes={:?} sizeKiB={:?} textLength={} readEmptyButFileHasBytes={} firstCharacters={:?}",
+        path.display(),
+        size_bytes,
+        size_bytes.map(|size| (size + 1023) / 1024),
+        text.len(),
+        size_bytes.is_some_and(|size| size > 0) && text.is_empty(),
+        first_characters,
+    );
+}
+
 fn unsupported_geo_file_format_message() -> String {
     "The selected file is not a supported geo import format. Supported formats are GPX and Google Takeout Location History JSON.".to_string()
 }
@@ -1568,6 +1582,7 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
     );
 
     let text = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    geo_import_debug_file_read(&path, &text);
     let parsed = parse_geo_file_points(&path, &text)?;
     let items = parsed
         .points

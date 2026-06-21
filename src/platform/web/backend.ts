@@ -40,6 +40,27 @@ type ImportGeoFileRecord = {
   duplicateSourceIds: string[]
 }
 
+const GEO_IMPORT_LOG_PREFIX = '[geo-import]'
+
+function logGeoFileRead(
+  file: File,
+  sourceLabel: string,
+  text: string,
+): void {
+  console.log(GEO_IMPORT_LOG_PREFIX, {
+    phase: 'file read',
+    fileName: file.name,
+    sourceLabel,
+    sizeBytes: file.size,
+    sizeKiB: Math.round(file.size / 1024),
+    mimeType: file.type || undefined,
+    lastModified: file.lastModified,
+    textLength: text.length,
+    readEmptyButFileHasBytes: file.size > 0 && text.length === 0,
+    firstCharacters: text.slice(0, 120),
+  })
+}
+
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map((byte) => byte.toString(16).padStart(2, '0'))
@@ -292,7 +313,18 @@ class WebImportBackend implements ImportBackend {
     })
 
     const file = await handle.getFile()
-    const parsed = parseGeoFilePoints(file.name || sourceLabel, await file.text())
+    console.log(GEO_IMPORT_LOG_PREFIX, {
+      phase: 'file selected',
+      fileName: file.name,
+      sourceLabel,
+      sizeBytes: file.size,
+      sizeKiB: Math.round(file.size / 1024),
+      mimeType: file.type || undefined,
+      lastModified: file.lastModified,
+    })
+    const fileText = await file.text()
+    logGeoFileRead(file, sourceLabel, fileText)
+    const parsed = parseGeoFilePoints(file.name || sourceLabel, fileText)
     const items = await Promise.all(
       parsed.points.map((point) =>
         geoPointItemFromParsedPoint(
