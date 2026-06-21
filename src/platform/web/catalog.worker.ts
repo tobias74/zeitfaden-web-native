@@ -187,6 +187,7 @@ const GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE = 250
 const GEO_IMPORT_INDEXEDDB_WRITE_BATCH_SIZE = 2000
 const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb-v3'
 const INDEXED_DB_VERSION = 1
+const IMPORT_TRACE_ENABLED = false
 
 const ctx = self as unknown as {
   postMessage: (message: unknown) => void
@@ -1753,6 +1754,7 @@ function logImportTrace(
   phase: string,
   data: Record<string, unknown>,
 ): void {
+  if (!IMPORT_TRACE_ENABLED) return
   console.log('[import-trace]', {
     traceId,
     phase,
@@ -2041,7 +2043,7 @@ async function importGpxIntoCatalog(
   const flushBatch = async (phase: ImportProgress['phase']) => {
     if (batch.length === 0) return
     const flushedItems = batch.length
-    await store.writeMediaBatch(batch, { transactionActive: true })
+    await store.writeMediaBatch(batch)
     acceptedMedia += flushedItems
     batch.length = 0
 
@@ -2148,32 +2150,32 @@ async function importGoogleTakeoutIntoCatalog(
   const flushBatch = async (phase: ImportProgress['phase']) => {
     if (batch.length === 0) return
     const flushedItems = batch.length
-    const batchId = `${timing.traceId}:batch-${++timing.batchSequence}`
+    timing.batchSequence += 1
     const writeStartedAt = performance.now()
-    const writeResult = await store.writeMediaBatch(batch, {
-      transactionActive: true,
-    })
+    const writeResult = await store.writeMediaBatch(batch)
     const writeMs = performance.now() - writeStartedAt
     timing.dbWriteMs += writeMs
     timing.dbWriteBatches += 1
     timing.dbWritten += flushedItems
     acceptedMedia += flushedItems
     batch.length = 0
-    const storageTiming = writeResult.timing
-    const storageTotalMs = storageTiming.totalMs
-    logGeoImportTiming(timing, 'database batch written', {
-      batchId,
-      batchItems: flushedItems,
-      batchWriteMs: roundedMs(writeMs),
-      storageWritten: writeResult.written,
-      storageWrite: roundedMediaBatchWriteTiming(storageTiming),
-      batchAccounting: {
-        outerWriteMs: roundedMs(writeMs),
-        storageTotalMs: roundedMs(storageTotalMs),
-        outerMinusStorageMs: roundedMs(writeMs - storageTotalMs),
-      },
-      importPhase: phase,
-    })
+    if (IMPORT_TRACE_ENABLED) {
+      const storageTiming = writeResult.timing
+      const storageTotalMs = storageTiming.totalMs
+      logGeoImportTiming(timing, 'database batch written', {
+        batchId: `${timing.traceId}:batch-${timing.batchSequence}`,
+        batchItems: flushedItems,
+        batchWriteMs: roundedMs(writeMs),
+        storageWritten: writeResult.written,
+        storageWrite: roundedMediaBatchWriteTiming(storageTiming),
+        batchAccounting: {
+          outerWriteMs: roundedMs(writeMs),
+          storageTotalMs: roundedMs(storageTotalMs),
+          outerMinusStorageMs: roundedMs(writeMs - storageTotalMs),
+        },
+        importPhase: phase,
+      })
+    }
     emitProgress(phase)
     await yieldToEventLoop()
   }
@@ -2739,46 +2741,22 @@ const sqliteCatalogStore: CatalogStore = {
     const ensureStartedAt = performance.now()
     await ensureDb()
     const ensureDbMs = performance.now() - ensureStartedAt
-    const requireStartedAt = performance.now()
-    const activeDb = requireDb()
-    const requireDbMs = performance.now() - requireStartedAt
-    const beginStartedAt = performance.now()
-    activeDb.exec('BEGIN')
-    const beginMs = performance.now() - beginStartedAt
-    const runStartedAt = performance.now()
     try {
       const result = await run()
-      const runMs = performance.now() - runStartedAt
-      const commitStartedAt = performance.now()
-      activeDb.exec('COMMIT')
-      const commitMs = performance.now() - commitStartedAt
       if (options?.traceId) {
         const totalMs = performance.now() - startedAt
         logImportTrace(options.traceId, 'sqlite import transaction complete', {
           sourceLabel: options.sourceLabel,
           totalMs: roundedMs(totalMs),
           ensureDbMs: roundedMs(ensureDbMs),
-          requireDbMs: roundedMs(requireDbMs),
-          beginMs: roundedMs(beginMs),
-          runMs: roundedMs(runMs),
-          commitMs: roundedMs(commitMs),
-          accountedMs: roundedMs(
-            ensureDbMs + requireDbMs + beginMs + runMs + commitMs,
-          ),
-          unaccountedMs: roundedMs(
-            totalMs - (ensureDbMs + requireDbMs + beginMs + runMs + commitMs),
-          ),
+          runMs: roundedMs(totalMs - ensureDbMs),
         })
       }
       return result
     } catch (error) {
-      const rollbackStartedAt = performance.now()
-      activeDb.exec('ROLLBACK')
-      const rollbackMs = performance.now() - rollbackStartedAt
       if (options?.traceId) {
         logImportTrace(options.traceId, 'sqlite import transaction rollback', {
           sourceLabel: options.sourceLabel,
-          rollbackMs: roundedMs(rollbackMs),
           elapsedMs: roundedMs(performance.now() - startedAt),
         })
       }
