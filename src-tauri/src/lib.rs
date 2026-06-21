@@ -671,7 +671,7 @@ fn app_cache_dir(app: &AppHandle) -> AppResult<PathBuf> {
 }
 
 fn catalog_path(app: &AppHandle) -> AppResult<PathBuf> {
-    Ok(app_data_dir(app)?.join("catalog-v4.sqlite3"))
+    Ok(app_data_dir(app)?.join("catalog-v5.sqlite3"))
 }
 
 fn connect(app: &AppHandle) -> AppResult<Connection> {
@@ -713,16 +713,8 @@ fn ensure_schema(conn: &Connection) -> AppResult<()> {
           last_seen_at INTEGER NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS idx_media_assets_captured_at
-          ON media_assets(captured_at);
-        CREATE INDEX IF NOT EXISTS idx_media_assets_kind
-          ON media_assets(kind);
-        CREATE INDEX IF NOT EXISTS idx_media_assets_geo
-          ON media_assets(latitude, longitude);
         CREATE INDEX IF NOT EXISTS idx_media_locations_content_hash
           ON media_locations(content_hash);
-        CREATE INDEX IF NOT EXISTS idx_media_locations_source
-          ON media_locations(source_id);
         ",
     )
     .map_err(|error| error.to_string())
