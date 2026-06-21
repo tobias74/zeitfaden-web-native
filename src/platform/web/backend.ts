@@ -12,7 +12,7 @@ import { ScannerClient } from './scannerClient'
 import type { ScanProgress } from './scanner.worker'
 import {
   geoPointContentHash,
-  parseGpxPoints,
+  parseGeoFilePoints,
   type ParsedGeoPoint,
 } from '../../lib/geoPoint'
 import type {
@@ -144,6 +144,7 @@ function webProgress(
 async function geoPointItemFromParsedPoint(
   sourceId: string,
   sourceLabel: string,
+  mimeType: string,
   point: ParsedGeoPoint,
 ): Promise<MediaItem> {
   const contentHash = await geoPointContentHash(
@@ -168,7 +169,7 @@ async function geoPointItemFromParsedPoint(
     relativePath: sourceLabel,
     displayName,
     kind: 'geo_point',
-    mimeType: 'application/gpx+xml',
+    mimeType,
     sizeBytes: 0,
     capturedAt: point.capturedAt,
     capturedAtSource: 'geo-file',
@@ -264,11 +265,12 @@ class WebImportBackend implements ImportBackend {
       multiple: false,
       types: [
         {
-          description: 'GPX files',
+          description: 'Geo point files',
           accept: {
             'application/gpx+xml': ['.gpx'],
             'application/xml': ['.gpx'],
             'text/xml': ['.gpx'],
+            'application/json': ['.json'],
           },
         },
       ],
@@ -289,10 +291,15 @@ class WebImportBackend implements ImportBackend {
     })
 
     const file = await handle.getFile()
-    const parsed = parseGpxPoints(await file.text())
+    const parsed = parseGeoFilePoints(file.name || sourceLabel, await file.text())
     const items = await Promise.all(
       parsed.points.map((point) =>
-        geoPointItemFromParsedPoint(sourceRecord.id, sourceLabel, point),
+        geoPointItemFromParsedPoint(
+          sourceRecord.id,
+          sourceLabel,
+          parsed.mimeType,
+          point,
+        ),
       ),
     )
 

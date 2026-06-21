@@ -5,9 +5,10 @@ export type ParsedGeoPoint = {
   capturedAt: number
 }
 
-export type ParsedGpx = {
+export type ParsedGeoFile = {
   points: ParsedGeoPoint[]
   skippedPoints: number
+  mimeType: string
 }
 
 const GEO_POINT_HASH_VERSION = 'geo_point:v1'
@@ -47,6 +48,32 @@ function pointTime(element: Element): number | undefined {
   return undefined
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function numeric(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
+
+function timestampMillis(value: unknown): number | undefined {
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
+
+function timestampMs(value: unknown): number | undefined {
+  const parsed = numeric(value)
+  return parsed === undefined ? undefined : Math.trunc(parsed)
+}
+
 async function sha256String(value: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     'SHA-256',
@@ -76,7 +103,7 @@ export function geoPointContentHash(
   return sha256String(geoPointIdentityInput(latitude, longitude, capturedAt))
 }
 
-export function parseGpxPoints(xmlText: string): ParsedGpx {
+export function parseGpxPoints(xmlText: string): ParsedGeoFile {
   const document = new DOMParser().parseFromString(xmlText, 'application/xml')
   const parserError = Array.from(document.getElementsByTagName('*')).find(
     (element) => localName(element) === 'parsererror',
@@ -114,5 +141,65 @@ export function parseGpxPoints(xmlText: string): ParsedGpx {
     })
   }
 
-  return { points, skippedPoints }
+  return { points, skippedPoints, mimeType: 'application/gpx+xml' }
+}
+
+export function parseGoogleTakeoutLocationPoints(
+  jsonText: string,
+): ParsedGeoFile {
+  const parsed = JSON.parse(jsonText) as unknown
+  if (!isRecord(parsed) || !Array.isArray(parsed.locations)) {
+    throw new Error(
+      'The selected JSON file does not look like a Google Takeout location export.',
+    )
+  }
+
+  const points: ParsedGeoPoint[] = []
+  let skippedPoints = 0
+
+  parsed.locations.forEach((entry, entryIndex) => {
+    const index = entryIndex + 1
+    if (!isRecord(entry)) {
+      skippedPoints += 1
+      return
+    }
+
+    const latitudeE7 = numeric(entry.latitudeE7)
+    const longitudeE7 = numeric(entry.longitudeE7)
+    const latitude =
+      latitudeE7 === undefined ? undefined : latitudeE7 / 10_000_000
+    const longitude =
+      longitudeE7 === undefined ? undefined : longitudeE7 / 10_000_000
+    const capturedAt =
+      timestampMillis(entry.timestamp) ?? timestampMs(entry.timestampMs)
+
+    if (
+      !validLatitude(latitude) ||
+      !validLongitude(longitude) ||
+      capturedAt === undefined
+    ) {
+      skippedPoints += 1
+      return
+    }
+
+    points.push({
+      index,
+      latitude,
+      longitude,
+      capturedAt,
+    })
+  })
+
+  return { points, skippedPoints, mimeType: 'application/json' }
+}
+
+export function parseGeoFilePoints(
+  fileName: string,
+  fileText: string,
+): ParsedGeoFile {
+  if (fileName.toLowerCase().endsWith('.json')) {
+    return parseGoogleTakeoutLocationPoints(fileText)
+  }
+
+  return parseGpxPoints(fileText)
 }

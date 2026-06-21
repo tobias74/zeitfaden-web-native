@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   geoPointContentHash,
   geoPointIdentityInput,
+  parseGeoFilePoints,
+  parseGoogleTakeoutLocationPoints,
   parseGpxPoints,
 } from './geoPoint'
 
@@ -52,5 +54,84 @@ describe('geo point helpers', () => {
         capturedAt: Date.parse('2026-06-21T10:03:00Z'),
       },
     ])
+  })
+
+  it('parses Google Takeout location JSON entries', () => {
+    const result = parseGoogleTakeoutLocationPoints(
+      JSON.stringify({
+        locations: [
+          {
+            latitudeE7: 481370673,
+            longitudeE7: 115775995,
+            accuracy: 540,
+            source: 'CELL',
+            timestamp: '2012-10-28T14:21:22.010Z',
+          },
+          {
+            latitudeE7: 481374628,
+            longitudeE7: 115781587,
+            accuracy: 22,
+            activity: [
+              {
+                activity: [{ type: 'STILL', confidence: 100 }],
+                timestamp: '2012-10-28T14:21:46.568Z',
+              },
+            ],
+            source: 'CELL',
+            timestamp: '2012-10-28T14:22:24.784Z',
+          },
+          {
+            latitudeE7: 481374628,
+            longitudeE7: 115781587,
+          },
+          {
+            latitudeE7: '481374628',
+            longitudeE7: '115781587',
+            timestampMs: '1351434205077',
+          },
+        ],
+      }),
+    )
+
+    expect(result.mimeType).toBe('application/json')
+    expect(result.skippedPoints).toBe(1)
+    expect(result.points).toEqual([
+      {
+        index: 1,
+        latitude: 48.1370673,
+        longitude: 11.5775995,
+        capturedAt: Date.parse('2012-10-28T14:21:22.010Z'),
+      },
+      {
+        index: 2,
+        latitude: 48.1374628,
+        longitude: 11.5781587,
+        capturedAt: Date.parse('2012-10-28T14:22:24.784Z'),
+      },
+      {
+        index: 4,
+        latitude: 48.1374628,
+        longitude: 11.5781587,
+        capturedAt: 1_351_434_205_077,
+      },
+    ])
+  })
+
+  it('selects the JSON parser for imported geo JSON files', () => {
+    const result = parseGeoFilePoints(
+      'Records.json',
+      JSON.stringify({
+        locations: [
+          {
+            latitudeE7: 481370673,
+            longitudeE7: 115775995,
+            timestamp: '2012-10-28T14:21:22.010Z',
+          },
+        ],
+      }),
+    )
+
+    expect(result.mimeType).toBe('application/json')
+    expect(result.points).toHaveLength(1)
   })
 })

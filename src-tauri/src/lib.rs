@@ -4,6 +4,7 @@ use image::ImageFormat;
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
@@ -139,9 +140,10 @@ struct ParsedGeoPoint {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct ParsedGpx {
+struct ParsedGeoFile {
     points: Vec<ParsedGeoPoint>,
     skipped_points: i64,
+    mime_type: String,
 }
 
 #[derive(Default)]
@@ -332,6 +334,27 @@ fn parse_gpx_time(value: &str) -> Option<i64> {
         .map(|date| date.timestamp_millis())
 }
 
+fn parse_json_timestamp(value: &JsonValue) -> Option<i64> {
+    value
+        .as_str()
+        .and_then(|value| DateTime::parse_from_rfc3339(value.trim()).ok())
+        .map(|date| date.timestamp_millis())
+}
+
+fn parse_json_timestamp_ms(value: &JsonValue) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn json_number(value: Option<&JsonValue>) -> Option<f64> {
+    value.and_then(|value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+    })
+}
+
 fn valid_latitude(value: f64) -> bool {
     value.is_finite() && (-90.0..=90.0).contains(&value)
 }
@@ -340,7 +363,7 @@ fn valid_longitude(value: f64) -> bool {
     value.is_finite() && (-180.0..=180.0).contains(&value)
 }
 
-fn parse_gpx_points(xml: &str) -> AppResult<ParsedGpx> {
+fn parse_gpx_points(xml: &str) -> AppResult<ParsedGeoFile> {
     let document = roxmltree::Document::parse(xml).map_err(|error| error.to_string())?;
     let mut points = Vec::<ParsedGeoPoint>::new();
     let mut skipped_points = 0_i64;
@@ -377,10 +400,62 @@ fn parse_gpx_points(xml: &str) -> AppResult<ParsedGpx> {
         }
     }
 
-    Ok(ParsedGpx {
+    Ok(ParsedGeoFile {
         points,
         skipped_points,
+        mime_type: "application/gpx+xml".to_string(),
     })
+}
+
+fn parse_google_takeout_location_points(json: &str) -> AppResult<ParsedGeoFile> {
+    let parsed: JsonValue = serde_json::from_str(json).map_err(|error| error.to_string())?;
+    let locations = parsed
+        .get("locations")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| {
+            "The selected JSON file does not look like a Google Takeout location export."
+                .to_string()
+        })?;
+    let mut points = Vec::<ParsedGeoPoint>::new();
+    let mut skipped_points = 0_i64;
+
+    for (entry_index, entry) in locations.iter().enumerate() {
+        let index = entry_index as i64 + 1;
+        let latitude = json_number(entry.get("latitudeE7")).map(|value| value / 10_000_000.0);
+        let longitude = json_number(entry.get("longitudeE7")).map(|value| value / 10_000_000.0);
+        let captured_at = entry
+            .get("timestamp")
+            .and_then(parse_json_timestamp)
+            .or_else(|| entry.get("timestampMs").and_then(parse_json_timestamp_ms));
+
+        match (latitude, longitude, captured_at) {
+            (Some(latitude), Some(longitude), Some(captured_at))
+                if valid_latitude(latitude) && valid_longitude(longitude) =>
+            {
+                points.push(ParsedGeoPoint {
+                    index,
+                    latitude,
+                    longitude,
+                    captured_at,
+                });
+            }
+            _ => skipped_points += 1,
+        }
+    }
+
+    Ok(ParsedGeoFile {
+        points,
+        skipped_points,
+        mime_type: "application/json".to_string(),
+    })
+}
+
+fn parse_geo_file_points(path: &Path, text: &str) -> AppResult<ParsedGeoFile> {
+    if extension(path).as_deref() == Some("json") {
+        return parse_google_takeout_location_points(text);
+    }
+
+    parse_gpx_points(text)
 }
 
 fn file_hash(path: &Path) -> AppResult<String> {
@@ -680,6 +755,7 @@ fn source_from_file(path: &Path) -> MediaSource {
 fn geo_point_item_from_parsed_point(
     source: &MediaSource,
     absolute_path: &str,
+    mime_type: &str,
     point: &ParsedGeoPoint,
 ) -> MediaItem {
     let content_hash = geo_point_content_hash(point.latitude, point.longitude, point.captured_at);
@@ -705,7 +781,7 @@ fn geo_point_item_from_parsed_point(
         relative_path: source.label.clone(),
         display_name,
         kind: "geo_point".to_string(),
-        mime_type: "application/gpx+xml".to_string(),
+        mime_type: mime_type.to_string(),
         size_bytes: 0,
         width: None,
         height: None,
@@ -1335,7 +1411,7 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
 #[tauri::command]
 fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
     let Some(path) = rfd::FileDialog::new()
-        .add_filter("GPX files", &["gpx"])
+        .add_filter("Geo point files", &["gpx", "json"])
         .pick_file()
     else {
         return Err("Import cancelled".to_string());
@@ -1358,12 +1434,14 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
         },
     );
 
-    let xml = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    let parsed = parse_gpx_points(&xml)?;
+    let text = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let parsed = parse_geo_file_points(&path, &text)?;
     let items = parsed
         .points
         .iter()
-        .map(|point| geo_point_item_from_parsed_point(&source, &absolute_path, point))
+        .map(|point| {
+            geo_point_item_from_parsed_point(&source, &absolute_path, &parsed.mime_type, point)
+        })
         .collect::<Vec<_>>();
 
     emit_progress(
@@ -1530,10 +1608,64 @@ mod tests {
         .unwrap();
 
         assert_eq!(parsed.skipped_points, 2);
+        assert_eq!(parsed.mime_type, "application/gpx+xml");
         assert_eq!(parsed.points.len(), 3);
         assert_eq!(parsed.points[0].index, 1);
         assert_eq!(parsed.points[1].index, 4);
         assert_eq!(parsed.points[2].index, 5);
+    }
+
+    #[test]
+    fn parses_google_takeout_location_json_points() {
+        let parsed = parse_google_takeout_location_points(
+            r#"
+            {
+              "locations": [{
+                "latitudeE7": 481370673,
+                "longitudeE7": 115775995,
+                "accuracy": 540,
+                "source": "CELL",
+                "timestamp": "2012-10-28T14:21:22.010Z"
+              }, {
+                "latitudeE7": 481374628,
+                "longitudeE7": 115781587,
+                "accuracy": 22,
+                "activity": [{
+                  "activity": [{
+                    "type": "STILL",
+                    "confidence": 100
+                  }],
+                  "timestamp": "2012-10-28T14:21:46.568Z"
+                }],
+                "source": "CELL",
+                "timestamp": "2012-10-28T14:22:24.784Z"
+              }, {
+                "latitudeE7": 481374628,
+                "longitudeE7": 115781587
+              }, {
+                "latitudeE7": "481374628",
+                "longitudeE7": "115781587",
+                "timestampMs": "1351434205077"
+              }]
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.mime_type, "application/json");
+        assert_eq!(parsed.skipped_points, 1);
+        assert_eq!(parsed.points.len(), 3);
+        assert_eq!(parsed.points[0].index, 1);
+        assert_eq!(parsed.points[0].latitude, 48.1370673);
+        assert_eq!(parsed.points[0].longitude, 11.5775995);
+        assert_eq!(
+            parsed.points[0].captured_at,
+            DateTime::parse_from_rfc3339("2012-10-28T14:21:22.010Z")
+                .unwrap()
+                .timestamp_millis()
+        );
+        assert_eq!(parsed.points[2].index, 4);
+        assert_eq!(parsed.points[2].captured_at, 1_351_434_205_077);
     }
 
     #[test]
@@ -1559,8 +1691,18 @@ mod tests {
             captured_at: 1_782_036_060_000,
         };
         let items = vec![
-            geo_point_item_from_parsed_point(&source, "/tmp/track.gpx", &first),
-            geo_point_item_from_parsed_point(&source, "/tmp/track.gpx", &second),
+            geo_point_item_from_parsed_point(
+                &source,
+                "/tmp/track.gpx",
+                "application/gpx+xml",
+                &first,
+            ),
+            geo_point_item_from_parsed_point(
+                &source,
+                "/tmp/track.gpx",
+                "application/gpx+xml",
+                &second,
+            ),
         ];
 
         upsert_source_tx(&conn, &source).unwrap();

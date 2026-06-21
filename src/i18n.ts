@@ -142,7 +142,7 @@ const de: Record<TranslationKey, string> = {
   images: 'Bilder',
   imprint: 'Impressum',
   importFolder: 'Ordner importieren',
-  importGeoFile: 'GPX importieren',
+  importGeoFile: 'Geo importieren',
   importProgress: 'Importfortschritt',
   kind: 'Typ',
   language: 'Sprache',
