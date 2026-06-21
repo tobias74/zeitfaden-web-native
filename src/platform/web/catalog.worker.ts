@@ -263,12 +263,10 @@ async function ensureDb(): Promise<InitResult> {
     )
   }
 
-  db = new opfsDb('/catalog.sqlite3') as unknown as SqliteDb
+  db = new opfsDb('/catalog-v2.sqlite3') as unknown as SqliteDb
   const activeDb = db
 
   activeDb.exec(`
-    PRAGMA foreign_keys = ON;
-
     CREATE TABLE IF NOT EXISTS media_sources (
       id TEXT PRIMARY KEY,
       label TEXT NOT NULL,
@@ -334,8 +332,7 @@ async function ensureDb(): Promise<InitResult> {
       relative_path TEXT NOT NULL,
       display_name TEXT NOT NULL,
       deleted_at INTEGER,
-      last_seen_at INTEGER NOT NULL,
-      FOREIGN KEY(content_hash) REFERENCES media_assets(content_hash) ON DELETE CASCADE
+      last_seen_at INTEGER NOT NULL
     );
 
     CREATE INDEX IF NOT EXISTS idx_media_assets_captured_at
@@ -355,9 +352,6 @@ async function ensureDb(): Promise<InitResult> {
     CREATE INDEX IF NOT EXISTS idx_media_locations_deleted
       ON media_locations(deleted_at);
   `)
-
-  migrateMediaItemsSchema(activeDb)
-  migrateMediaLocationsSchema(activeDb)
 
   initResult = {
     storageMode: 'opfs',
@@ -927,93 +921,6 @@ async function idbClear(): Promise<void> {
   transaction.objectStore('assets').clear()
   transaction.objectStore('sources').clear()
   await done
-}
-
-function migrateMediaItemsSchema(activeDb: SqliteDb): void {
-  const columns = new Set(
-    activeDb
-      .selectObjects('PRAGMA table_info(media_items)')
-      .map((row) => String(row.name)),
-  )
-
-  if (!columns.has('content_hash')) {
-    activeDb.exec('ALTER TABLE media_items ADD COLUMN content_hash TEXT')
-  }
-
-  activeDb.exec(`
-    DROP INDEX IF EXISTS idx_media_content_hash;
-    CREATE INDEX IF NOT EXISTS idx_media_content_hash
-      ON media_items(content_hash);
-
-    INSERT OR IGNORE INTO media_assets (
-      content_hash, kind, mime_type, size_bytes, width, height, duration_ms,
-      captured_at, captured_at_source, latitude, longitude, geo_source,
-      thumbnail_key, deleted_at, last_seen_at
-    )
-    SELECT
-      COALESCE(content_hash, id), kind, mime_type, size_bytes, width, height,
-      duration_ms, captured_at, captured_at_source, latitude, longitude,
-      geo_source, thumbnail_key, deleted_at, last_seen_at
-    FROM media_items
-    WHERE COALESCE(content_hash, id) IS NOT NULL
-    ORDER BY last_seen_at DESC;
-
-    INSERT OR IGNORE INTO media_locations (
-      id, content_hash, source_id, relative_path, display_name, deleted_at,
-      last_seen_at
-    )
-    SELECT
-      id, COALESCE(content_hash, id), source_id, relative_path, display_name,
-      deleted_at, last_seen_at
-    FROM media_items
-    WHERE COALESCE(content_hash, id) IS NOT NULL;
-  `)
-}
-
-function migrateMediaLocationsSchema(activeDb: SqliteDb): void {
-  const tableSql = activeDb.selectValue(
-    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_locations'",
-  )
-  if (
-    typeof tableSql !== 'string' ||
-    !tableSql.includes('UNIQUE(source_id, relative_path)')
-  ) {
-    return
-  }
-
-  activeDb.exec(`
-    PRAGMA foreign_keys = OFF;
-    ALTER TABLE media_locations RENAME TO media_locations_old;
-    CREATE TABLE media_locations (
-      id TEXT PRIMARY KEY,
-      content_hash TEXT NOT NULL,
-      source_id TEXT NOT NULL,
-      relative_path TEXT NOT NULL,
-      display_name TEXT NOT NULL,
-      deleted_at INTEGER,
-      last_seen_at INTEGER NOT NULL,
-      FOREIGN KEY(content_hash) REFERENCES media_assets(content_hash) ON DELETE CASCADE
-    );
-    INSERT OR IGNORE INTO media_locations (
-      id, content_hash, source_id, relative_path, display_name, deleted_at,
-      last_seen_at
-    )
-    SELECT
-      id, content_hash, source_id, relative_path, display_name, deleted_at,
-      last_seen_at
-    FROM media_locations_old;
-    DROP TABLE media_locations_old;
-    PRAGMA foreign_keys = ON;
-
-    CREATE INDEX IF NOT EXISTS idx_media_locations_content_hash
-      ON media_locations(content_hash);
-    CREATE INDEX IF NOT EXISTS idx_media_locations_source
-      ON media_locations(source_id);
-    CREATE INDEX IF NOT EXISTS idx_media_locations_source_path
-      ON media_locations(source_id, relative_path);
-    CREATE INDEX IF NOT EXISTS idx_media_locations_deleted
-      ON media_locations(deleted_at);
-  `)
 }
 
 function locationFromRow(row: Record<string, unknown>): MediaLocation {
