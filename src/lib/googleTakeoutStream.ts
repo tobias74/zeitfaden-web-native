@@ -26,14 +26,17 @@ type FeedOptions = {
   maxDurationMs?: number
 }
 
-function completeJsonObject(buffer: string): CompleteObject | undefined {
-  if (!buffer.startsWith('{')) return undefined
+function completeJsonObject(
+  buffer: string,
+  startOffset: number,
+): CompleteObject | undefined {
+  if (buffer[startOffset] !== '{') return undefined
 
   let depth = 0
   let inString = false
   let escaped = false
 
-  for (let index = 0; index < buffer.length; index += 1) {
+  for (let index = startOffset; index < buffer.length; index += 1) {
     const character = buffer[index]
 
     if (inString) {
@@ -55,7 +58,7 @@ function completeJsonObject(buffer: string): CompleteObject | undefined {
       depth -= 1
       if (depth === 0) {
         return {
-          text: buffer.slice(0, index + 1),
+          text: buffer.slice(startOffset, index + 1),
           endOffset: index + 1,
         }
       }
@@ -65,8 +68,8 @@ function completeJsonObject(buffer: string): CompleteObject | undefined {
   return undefined
 }
 
-function leadingJsonSeparatorLength(buffer: string): number {
-  let index = 0
+function skipLeadingJsonSeparators(buffer: string, offset: number): number {
+  let index = offset
   while (index < buffer.length) {
     const character = buffer[index]
     if (
@@ -88,8 +91,18 @@ export class GoogleTakeoutLocationStreamParser {
     'beforeLocations'
 
   private buffer = ''
+  private cursor = 0
   private skippedPoints = 0
   private totalEntries = 0
+
+  private compactBuffer(force = false): void {
+    if (this.cursor === 0) return
+    if (!force && this.cursor < 64 * 1024 && this.cursor < this.buffer.length / 2) {
+      return
+    }
+    this.buffer = this.buffer.slice(this.cursor)
+    this.cursor = 0
+  }
 
   feed(chunk: string, options: FeedOptions = {}): GoogleTakeoutStreamChunk {
     if (this.phase === 'done') {
@@ -111,47 +124,62 @@ export class GoogleTakeoutLocationStreamParser {
         processedEntries >= maxEntries ||
         (processedEntries > 0 && performance.now() >= deadline)
       ) {
+        this.compactBuffer(true)
         return { points, skippedPoints, paused: true }
       }
 
       if (this.phase === 'beforeLocations') {
-        const locationIndex = this.buffer.indexOf(LOCATIONS_PROPERTY)
+        const locationIndex = this.buffer.indexOf(
+          LOCATIONS_PROPERTY,
+          this.cursor,
+        )
         if (locationIndex < 0) {
-          this.buffer = this.buffer.slice(-(LOCATIONS_PROPERTY.length - 1))
+          this.cursor = Math.max(
+            0,
+            this.buffer.length - (LOCATIONS_PROPERTY.length - 1),
+          )
+          this.compactBuffer(true)
           break
         }
-        this.buffer = this.buffer.slice(locationIndex + LOCATIONS_PROPERTY.length)
+        this.cursor = locationIndex + LOCATIONS_PROPERTY.length
         this.phase = 'beforeArray'
       }
 
       if (this.phase === 'beforeArray') {
-        const arrayStart = this.buffer.indexOf('[')
-        if (arrayStart < 0) break
-        this.buffer = this.buffer.slice(arrayStart + 1)
+        const arrayStart = this.buffer.indexOf('[', this.cursor)
+        if (arrayStart < 0) {
+          this.compactBuffer(true)
+          break
+        }
+        this.cursor = arrayStart + 1
         this.phase = 'inArray'
       }
 
       if (this.phase !== 'inArray') continue
 
-      const separatorLength = leadingJsonSeparatorLength(this.buffer)
-      if (separatorLength > 0) {
-        this.buffer = this.buffer.slice(separatorLength)
-      }
+      this.cursor = skipLeadingJsonSeparators(this.buffer, this.cursor)
 
-      if (this.buffer.length === 0) break
-      if (this.buffer[0] === ']') {
-        this.phase = 'done'
-        this.buffer = ''
+      if (this.cursor >= this.buffer.length) {
+        this.compactBuffer(true)
         break
       }
-      if (this.buffer[0] !== '{') {
+      if (this.buffer[this.cursor] === ']') {
+        this.phase = 'done'
+        this.buffer = ''
+        this.cursor = 0
+        break
+      }
+      if (this.buffer[this.cursor] !== '{') {
         throw new Error(
           'The selected JSON file does not look like raw Google Takeout Records.json data.',
         )
       }
 
-      const completeObject = completeJsonObject(this.buffer)
-      if (!completeObject) break
+      const completeObject = completeJsonObject(this.buffer, this.cursor)
+      if (!completeObject) {
+        this.compactBuffer(true)
+        break
+      }
 
       processedEntries += 1
       this.totalEntries += 1
@@ -166,7 +194,8 @@ export class GoogleTakeoutLocationStreamParser {
         skippedPoints += 1
         this.skippedPoints += 1
       }
-      this.buffer = this.buffer.slice(completeObject.endOffset)
+      this.cursor = completeObject.endOffset
+      this.compactBuffer()
     }
 
     return { points, skippedPoints, paused: false }
