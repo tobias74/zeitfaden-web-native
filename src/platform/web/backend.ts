@@ -19,6 +19,7 @@ import {
 import type {
   ImportBackend,
   ImportProgress,
+  ImportProgressPhase,
   ImportSummary,
   PlatformBackend,
   ThumbnailBackend,
@@ -45,6 +46,7 @@ const GEO_IMPORT_LOG_PREFIX = '[geo-import]'
 const GEO_IMPORT_BATCH_SIZE = 1000
 const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
 const GEO_IMPORT_UI_PROGRESS_BYTES = 10 * 1024 * 1024
+const GEO_IMPORT_UI_PROGRESS_HEARTBEAT_MS = 1000
 const GEO_IMPORT_READ_PROGRESS_BYTES = 100 * 1024 * 1024
 
 function textReadSummary(text: string): Record<string, unknown> {
@@ -350,17 +352,31 @@ class WebImportBackend implements ImportBackend {
     const pendingPoints: ParsedGeoPoint[] = []
     let bytesRead = 0
     let acceptedMedia = 0
+    let inFlightAcceptedMedia = 0
     let skippedFiles = 0
     let nextUiProgressAt = GEO_IMPORT_UI_PROGRESS_BYTES
     let nextProgressAt = GEO_IMPORT_READ_PROGRESS_BYTES
+    let currentProgressPhase: ImportProgressPhase = 'scanning'
+    let lastUiProgressAt = 0
+    let progressHeartbeat:
+      | ReturnType<typeof globalThis.setInterval>
+      | undefined
 
-    const emitScanProgress = (scannedFiles: number) => {
+    const visibleAcceptedMedia = () =>
+      acceptedMedia + pendingPoints.length + inFlightAcceptedMedia
+
+    const emitProgress = (
+      phase: ImportProgressPhase = currentProgressPhase,
+      scannedFiles = 0,
+    ) => {
+      currentProgressPhase = phase
+      lastUiProgressAt = performance.now()
       onProgress?.({
-        phase: 'scanning',
+        phase,
         sourceLabel,
         scannedFiles,
         totalFiles: 1,
-        acceptedMedia: acceptedMedia + pendingPoints.length,
+        acceptedMedia: visibleAcceptedMedia(),
         skippedFiles,
         currentPath: sourceLabel,
         scannedBytes: bytesRead,
@@ -368,107 +384,145 @@ class WebImportBackend implements ImportBackend {
       })
     }
 
+    const emitTimedProgress = () => {
+      if (
+        performance.now() - lastUiProgressAt >=
+        GEO_IMPORT_UI_PROGRESS_HEARTBEAT_MS
+      ) {
+        emitProgress()
+      }
+    }
+
+    const startProgressHeartbeat = () => {
+      if (!onProgress) return
+      progressHeartbeat = globalThis.setInterval(() => {
+        emitProgress()
+      }, GEO_IMPORT_UI_PROGRESS_HEARTBEAT_MS)
+    }
+
+    const stopProgressHeartbeat = () => {
+      if (progressHeartbeat !== undefined) {
+        globalThis.clearInterval(progressHeartbeat)
+        progressHeartbeat = undefined
+      }
+    }
+
     const flushPending = async () => {
       if (pendingPoints.length === 0) return
 
       const points = pendingPoints.splice(0, pendingPoints.length)
-      const items = await Promise.all(
-        points.map((point) =>
-          geoPointItemFromParsedPoint(
-            sourceRecord.id,
-            sourceLabel,
-            'application/json',
-            point,
+      inFlightAcceptedMedia += points.length
+      emitProgress('storing')
+      try {
+        const items = await Promise.all(
+          points.map((point) =>
+            geoPointItemFromParsedPoint(
+              sourceRecord.id,
+              sourceLabel,
+              'application/json',
+              point,
+            ),
           ),
-        ),
-      )
-      await this.catalog.upsertMedia(items)
-      acceptedMedia += items.length
-      emitScanProgress(0)
+        )
+        emitTimedProgress()
+        await this.catalog.upsertMedia(items)
+        acceptedMedia += items.length
+      } finally {
+        inFlightAcceptedMedia -= points.length
+      }
+      emitProgress('scanning')
     }
 
     const consumeText = async (text: string) => {
       const result = parser.feed(text)
       skippedFiles += result.skippedPoints
       pendingPoints.push(...result.points)
+      emitTimedProgress()
 
       if (pendingPoints.length >= GEO_IMPORT_BATCH_SIZE) {
         await flushPending()
       }
     }
 
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
+    startProgressHeartbeat()
+    emitProgress('scanning')
 
-      bytesRead += value.byteLength
-      await consumeText(decoder.decode(value, { stream: true }))
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
 
-      if (bytesRead >= nextUiProgressAt) {
-        emitScanProgress(0)
-        while (nextUiProgressAt <= bytesRead) {
-          nextUiProgressAt += GEO_IMPORT_UI_PROGRESS_BYTES
+        bytesRead += value.byteLength
+        await consumeText(decoder.decode(value, { stream: true }))
+
+        if (bytesRead >= nextUiProgressAt) {
+          emitProgress('scanning')
+          while (nextUiProgressAt <= bytesRead) {
+            nextUiProgressAt += GEO_IMPORT_UI_PROGRESS_BYTES
+          }
+        }
+
+        if (bytesRead >= nextProgressAt) {
+          console.log(GEO_IMPORT_LOG_PREFIX, {
+            phase: 'takeout stream progress',
+            fileName: file.name,
+            sourceLabel,
+            bytesRead,
+            sizeBytes: file.size,
+            acceptedMedia: visibleAcceptedMedia(),
+            skippedFiles,
+          })
+          emitProgress('scanning')
+          while (nextProgressAt <= bytesRead) {
+            nextProgressAt += GEO_IMPORT_READ_PROGRESS_BYTES
+          }
         }
       }
 
-      if (bytesRead >= nextProgressAt) {
-        console.log(GEO_IMPORT_LOG_PREFIX, {
-          phase: 'takeout stream progress',
-          fileName: file.name,
-          sourceLabel,
-          bytesRead,
-          sizeBytes: file.size,
-          acceptedMedia: acceptedMedia + pendingPoints.length,
-          skippedFiles,
-        })
-        emitScanProgress(0)
-        while (nextProgressAt <= bytesRead) {
-          nextProgressAt += GEO_IMPORT_READ_PROGRESS_BYTES
-        }
+      const finalChunk = decoder.decode()
+      if (finalChunk) {
+        await consumeText(finalChunk)
       }
-    }
 
-    const finalChunk = decoder.decode()
-    if (finalChunk) {
-      await consumeText(finalChunk)
-    }
+      const final = parser.finish()
+      skippedFiles = final.skippedPoints
+      await flushPending()
 
-    const final = parser.finish()
-    skippedFiles = final.skippedPoints
-    await flushPending()
+      console.log(GEO_IMPORT_LOG_PREFIX, {
+        phase: 'takeout stream complete',
+        fileName: file.name,
+        sourceLabel,
+        bytesRead,
+        sizeBytes: file.size,
+        bytesReadMatchesFileSize: bytesRead === file.size,
+        totalEntries: final.totalEntries,
+        acceptedMedia,
+        skippedFiles,
+      })
 
-    console.log(GEO_IMPORT_LOG_PREFIX, {
-      phase: 'takeout stream complete',
-      fileName: file.name,
-      sourceLabel,
-      bytesRead,
-      sizeBytes: file.size,
-      bytesReadMatchesFileSize: bytesRead === file.size,
-      totalEntries: final.totalEntries,
-      acceptedMedia,
-      skippedFiles,
-    })
+      onProgress?.({
+        phase: 'storing',
+        sourceLabel,
+        scannedFiles: 1,
+        totalFiles: 1,
+        acceptedMedia,
+        skippedFiles,
+        currentPath: sourceLabel,
+        scannedBytes: file.size,
+        totalBytes: file.size,
+      })
 
-    onProgress?.({
-      phase: 'storing',
-      sourceLabel,
-      scannedFiles: 1,
-      totalFiles: 1,
-      acceptedMedia,
-      skippedFiles,
-      currentPath: sourceLabel,
-      scannedBytes: file.size,
-      totalBytes: file.size,
-    })
-
-    return {
-      source,
-      sourceLabel,
-      scannedFiles: 1,
-      totalFiles: 1,
-      acceptedMedia,
-      skippedFiles,
-      errors: [],
+      return {
+        source,
+        sourceLabel,
+        scannedFiles: 1,
+        totalFiles: 1,
+        acceptedMedia,
+        skippedFiles,
+        errors: [],
+      }
+    } finally {
+      stopProgressHeartbeat()
     }
   }
 
