@@ -52,12 +52,20 @@ export type TimeRange = {
   endTime?: number
 }
 
+export type GeoBounds = {
+  minLat: number
+  maxLat: number
+  minLon: number
+  maxLon: number
+}
+
 export type CatalogSort = 'captured_at_asc' | 'captured_at_desc'
 
 export type CatalogQuery = TimeRange & {
   kind?: MediaKind | 'all'
   sourceId?: string
   hasGeo?: boolean
+  geoBounds?: GeoBounds
   sort: CatalogSort
   limit?: number
   offset?: number

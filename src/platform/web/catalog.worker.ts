@@ -514,6 +514,12 @@ async function listMedia(query: CatalogQuery): Promise<MediaItem[]> {
         : '(a.latitude IS NULL OR a.longitude IS NULL)',
     )
   }
+  if (query.geoBounds) {
+    where.push('a.latitude BETWEEN ? AND ?')
+    bind.push(query.geoBounds.minLat, query.geoBounds.maxLat)
+    where.push('a.longitude BETWEEN ? AND ?')
+    bind.push(query.geoBounds.minLon, query.geoBounds.maxLon)
+  }
 
   timeWhere(query, where, bind, 'a.')
 

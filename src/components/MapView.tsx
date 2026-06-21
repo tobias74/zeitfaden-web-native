@@ -1,7 +1,10 @@
 import Feature from 'ol/Feature'
 import Map from 'ol/Map'
 import View from 'ol/View'
+import { boundingExtent } from 'ol/extent'
 import Point from 'ol/geom/Point'
+import { fromExtent } from 'ol/geom/Polygon'
+import DragBox from 'ol/interaction/DragBox'
 import TileLayer from 'ol/layer/Tile'
 import VectorLayer from 'ol/layer/Vector'
 import { fromLonLat, toLonLat } from 'ol/proj'
@@ -9,9 +12,8 @@ import Cluster from 'ol/source/Cluster'
 import OSM from 'ol/source/OSM'
 import VectorSource from 'ol/source/Vector'
 import { Circle as CircleStyle, Fill, Stroke, Style, Text } from 'ol/style'
-import { boundingExtent } from 'ol/extent'
 import { useEffect, useRef } from 'react'
-import type { EnrichedSearchResult, MediaItem } from '../types'
+import type { EnrichedSearchResult, GeoBounds, MediaItem } from '../types'
 import type { FeatureLike } from 'ol/Feature'
 import type { Coordinate } from 'ol/coordinate'
 
@@ -24,7 +26,10 @@ type MapViewProps = {
   queryPoint?: QueryPoint
   geoItems: MediaItem[]
   results: EnrichedSearchResult[]
+  geoBounds?: GeoBounds
+  boundsDrawing: boolean
   onQueryPointChange: (point: QueryPoint) => void
+  onGeoBoundsChange: (bounds: GeoBounds) => void
 }
 
 const baseStyle = new Style({
@@ -49,6 +54,11 @@ const queryStyle = new Style({
     fill: new Fill({ color: '#d84d2a' }),
     stroke: new Stroke({ color: '#ffffff', width: 2.5 }),
   }),
+})
+
+const boundsStyle = new Style({
+  fill: new Fill({ color: 'rgba(216, 77, 42, 0.12)' }),
+  stroke: new Stroke({ color: '#d84d2a', width: 2 }),
 })
 
 const clusterStyleCache = new globalThis.Map<string, Style>()
@@ -96,16 +106,54 @@ function coordinatesForCluster(feature: FeatureLike): Coordinate[] {
   })
 }
 
+function boundedLatitude(value: number): number {
+  return Math.min(90, Math.max(-90, value))
+}
+
+function boundedLongitude(value: number): number {
+  return Math.min(180, Math.max(-180, value))
+}
+
+function boundsFromMapExtent(extent: [number, number, number, number]): GeoBounds {
+  const [leftLon, bottomLat] = toLonLat([extent[0], extent[1]])
+  const [rightLon, topLat] = toLonLat([extent[2], extent[3]])
+
+  return {
+    minLat: boundedLatitude(Math.min(bottomLat, topLat)),
+    maxLat: boundedLatitude(Math.max(bottomLat, topLat)),
+    minLon: boundedLongitude(Math.min(leftLon, rightLon)),
+    maxLon: boundedLongitude(Math.max(leftLon, rightLon)),
+  }
+}
+
+function mapExtentFromBounds(bounds: GeoBounds): [number, number, number, number] {
+  const [minX, minY] = fromLonLat([bounds.minLon, bounds.minLat])
+  const [maxX, maxY] = fromLonLat([bounds.maxLon, bounds.maxLat])
+
+  return [
+    Math.min(minX, maxX),
+    Math.min(minY, maxY),
+    Math.max(minX, maxX),
+    Math.max(minY, maxY),
+  ]
+}
+
 export function MapView({
   queryPoint,
   geoItems,
   results,
+  geoBounds,
+  boundsDrawing,
   onQueryPointChange,
+  onGeoBoundsChange,
 }: MapViewProps) {
   const targetRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<Map | null>(null)
+  const dragBoxRef = useRef<DragBox | null>(null)
+  const boundsDrawingRef = useRef(boundsDrawing)
   const sourceRef = useRef(new VectorSource())
   const querySourceRef = useRef(new VectorSource())
+  const boundsSourceRef = useRef(new VectorSource())
 
   useEffect(() => {
     if (!targetRef.current || mapRef.current) return
@@ -124,6 +172,15 @@ export function MapView({
       source: querySourceRef.current,
       style: queryStyle,
     })
+    const boundsLayer = new VectorLayer({
+      source: boundsSourceRef.current,
+      style: boundsStyle,
+    })
+    const dragBox = new DragBox({
+      className: 'map-draw-box',
+      minArea: 64,
+    })
+    dragBox.setActive(boundsDrawingRef.current)
 
     const map = new Map({
       target,
@@ -131,6 +188,7 @@ export function MapView({
         new TileLayer({
           source: new OSM(),
         }),
+        boundsLayer,
         clusterLayer,
         queryLayer,
       ],
@@ -139,8 +197,21 @@ export function MapView({
         zoom: 4,
       }),
     })
+    map.addInteraction(dragBox)
+
+    dragBox.on('boxend', () => {
+      const extent = dragBox.getGeometry().getExtent() as [
+        number,
+        number,
+        number,
+        number,
+      ]
+      onGeoBoundsChange(boundsFromMapExtent(extent))
+    })
 
     map.on('singleclick', (event) => {
+      if (boundsDrawingRef.current) return
+
       const clickedCluster = map.forEachFeatureAtPixel(
         event.pixel,
         (feature, layer) => (layer === clusterLayer ? feature : undefined),
@@ -162,15 +233,23 @@ export function MapView({
     })
 
     mapRef.current = map
+    dragBoxRef.current = dragBox
     const resizeObserver = new ResizeObserver(() => map.updateSize())
     resizeObserver.observe(target)
 
     return () => {
       resizeObserver.disconnect()
+      map.removeInteraction(dragBox)
       map.setTarget(undefined)
       mapRef.current = null
+      dragBoxRef.current = null
     }
-  }, [onQueryPointChange])
+  }, [onGeoBoundsChange, onQueryPointChange])
+
+  useEffect(() => {
+    boundsDrawingRef.current = boundsDrawing
+    dragBoxRef.current?.setActive(boundsDrawing)
+  }, [boundsDrawing])
 
   useEffect(() => {
     const source = sourceRef.current
@@ -199,6 +278,18 @@ export function MapView({
       querySource.addFeature(feature)
     }
   }, [geoItems, queryPoint, results])
+
+  useEffect(() => {
+    const boundsSource = boundsSourceRef.current
+    boundsSource.clear()
+    if (!geoBounds) return
+
+    boundsSource.addFeature(
+      new Feature({
+        geometry: fromExtent(mapExtentFromBounds(geoBounds)),
+      }),
+    )
+  }, [geoBounds])
 
   return <div ref={targetRef} className="map-view" aria-label="Search map" />
 }

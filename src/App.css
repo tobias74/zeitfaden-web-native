@@ -101,6 +101,38 @@
   height: 100%;
 }
 
+.map-pane.area-drawing .map-view {
+  cursor: crosshair;
+}
+
+.map-draw-box {
+  border: 2px solid #d84d2a;
+  background: rgba(216, 77, 42, 0.14);
+}
+
+.map-area-tools {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.map-area-tools button {
+  min-height: 32px;
+  padding: 0 9px;
+  border-color: rgba(116, 132, 124, 0.76);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 1px 4px rgba(22, 32, 24, 0.12);
+}
+
+.map-area-tools button.active {
+  border-color: #0f7668;
+  background: #0f7668;
+  color: #ffffff;
+}
+
 .map-readout {
   position: absolute;
   left: 12px;

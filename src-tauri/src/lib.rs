@@ -69,10 +69,20 @@ struct MediaItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct GeoBounds {
+    min_lat: f64,
+    max_lat: f64,
+    min_lon: f64,
+    max_lon: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CatalogQuery {
     kind: Option<String>,
     source_id: Option<String>,
     has_geo: Option<bool>,
+    geo_bounds: Option<GeoBounds>,
     sort: String,
     limit: Option<i64>,
     offset: Option<i64>,
@@ -785,6 +795,14 @@ fn list_media(app: AppHandle, query: CatalogQuery) -> AppResult<Vec<MediaItem>> 
         } else {
             "(a.latitude IS NULL OR a.longitude IS NULL)".to_string()
         });
+    }
+    if let Some(bounds) = query.geo_bounds.as_ref() {
+        where_sql.push("a.latitude BETWEEN ? AND ?".to_string());
+        bind.push(Value::Real(bounds.min_lat));
+        bind.push(Value::Real(bounds.max_lat));
+        where_sql.push("a.longitude BETWEEN ? AND ?".to_string());
+        bind.push(Value::Real(bounds.min_lon));
+        bind.push(Value::Real(bounds.max_lon));
     }
     if let Some(start_time) = query.start_time {
         where_sql.push("a.captured_at >= ?".to_string());

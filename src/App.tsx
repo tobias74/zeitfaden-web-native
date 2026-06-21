@@ -1,5 +1,6 @@
 import {
   Activity,
+  BoxSelect,
   Calendar,
   ChevronLeft,
   ChevronRight,
@@ -42,6 +43,7 @@ import type {
   CatalogQuery,
   CatalogSort,
   EnrichedSearchResult,
+  GeoBounds,
   GeoIndexPoint,
   GeoIndexStats,
   MediaItem,
@@ -220,6 +222,8 @@ function App() {
   const [endDate, setEndDate] = useState('')
   const [sort, setSort] = useState<SortMode>('captured_at_desc')
   const [kindFilter, setKindFilter] = useState<MediaKind | 'all'>('all')
+  const [geoBounds, setGeoBounds] = useState<GeoBounds>()
+  const [boundsDrawing, setBoundsDrawing] = useState(false)
   const [resultPage, setResultPage] = useState(0)
   const [resultPageSize, setResultPageSize] = useState(storedPageSize)
   const [searchResults, setSearchResults] = useState<EnrichedSearchResult[]>([])
@@ -273,11 +277,20 @@ function App() {
     () => ({
       ...timeRange,
       kind: kindFilter,
+      geoBounds: distanceSortActive ? undefined : geoBounds,
       sort: catalogSort,
       limit: resultPageSize,
       offset: resultOffset,
     }),
-    [catalogSort, kindFilter, resultOffset, resultPageSize, timeRange],
+    [
+      catalogSort,
+      distanceSortActive,
+      geoBounds,
+      kindFilter,
+      resultOffset,
+      resultPageSize,
+      timeRange,
+    ],
   )
 
   const refreshMedia = useCallback(async () => {
@@ -396,6 +409,8 @@ function App() {
     try {
       await catalog.clear()
       setResultPage(0)
+      setGeoBounds(undefined)
+      setBoundsDrawing(false)
       setSearchResults([])
       setValidation(undefined)
       await refreshAll()
@@ -515,10 +530,36 @@ function App() {
   const setSortMode = useCallback((nextSort: SortMode) => {
     setSort(nextSort)
     setResultPage(0)
+    if (nextSort === 'distance') {
+      setBoundsDrawing(false)
+    }
     if (nextSort !== 'distance') {
       setSearchResults([])
       setValidation(undefined)
     }
+  }, [])
+
+  const setMapQueryPoint = useCallback((point: QueryPoint) => {
+    setQueryPoint(point)
+    setResultPage(0)
+  }, [])
+
+  const setMapGeoBounds = useCallback((bounds: GeoBounds) => {
+    setGeoBounds(bounds)
+    setBoundsDrawing(false)
+    setResultPage(0)
+    setStatus('Area filter set')
+  }, [])
+
+  const clearMapGeoBounds = useCallback(() => {
+    setGeoBounds(undefined)
+    setBoundsDrawing(false)
+    setResultPage(0)
+    setStatus('Area filter cleared')
+  }, [])
+
+  const toggleBoundsDrawing = useCallback(() => {
+    setBoundsDrawing((active) => !active)
   }, [])
 
   const setPageSize = useCallback((size: number) => {
@@ -758,16 +799,44 @@ function App() {
 
       <section ref={workspaceRef} className="workspace">
         <section ref={leftStackRef} className="left-stack">
-          <div className="map-pane">
+          <div
+            className={`map-pane ${
+              boundsDrawing && !distanceSortActive ? 'area-drawing' : ''
+            }`}
+          >
             <MapView
               queryPoint={queryPoint}
               geoItems={mediaItems}
               results={searchResults}
-              onQueryPointChange={(point) => {
-                setQueryPoint(point)
-                setResultPage(0)
-              }}
+              geoBounds={distanceSortActive ? undefined : geoBounds}
+              boundsDrawing={boundsDrawing && !distanceSortActive}
+              onQueryPointChange={setMapQueryPoint}
+              onGeoBoundsChange={setMapGeoBounds}
             />
+            {!distanceSortActive && (
+              <div className="map-area-tools">
+                <button
+                  type="button"
+                  className={boundsDrawing ? 'active' : undefined}
+                  aria-pressed={boundsDrawing}
+                  onClick={toggleBoundsDrawing}
+                  title="Area filter"
+                >
+                  <BoxSelect size={16} />
+                  Area
+                </button>
+                {geoBounds && (
+                  <button
+                    type="button"
+                    onClick={clearMapGeoBounds}
+                    title="Clear area filter"
+                  >
+                    <Trash2 size={16} />
+                    Clear
+                  </button>
+                )}
+              </div>
+            )}
             <div className="map-readout">
               <MapPin size={16} />
               <span>{queryPoint.lat.toFixed(5)}</span>
