@@ -2,8 +2,10 @@ import Feature from 'ol/Feature'
 import Map from 'ol/Map'
 import View from 'ol/View'
 import Point from 'ol/geom/Point'
+import TileLayer from 'ol/layer/Tile'
 import VectorLayer from 'ol/layer/Vector'
 import { fromLonLat, toLonLat } from 'ol/proj'
+import OSM from 'ol/source/OSM'
 import VectorSource from 'ol/source/Vector'
 import { Circle as CircleStyle, Fill, Stroke, Style } from 'ol/style'
 import { useEffect, useRef } from 'react'
@@ -65,7 +67,12 @@ export function MapView({
 
     const map = new Map({
       target,
-      layers: [vectorLayer],
+      layers: [
+        new TileLayer({
+          source: new OSM(),
+        }),
+        vectorLayer,
+      ],
       view: new View({
         center: fromLonLat([8.5417, 47.3769]),
         zoom: 4,
