@@ -76,7 +76,6 @@ const en = {
   privacy: 'Privacy Policy',
   pruned: 'Pruned',
   query: 'Query',
-  backToApp: 'Back to app',
   reveal: 'Reveal',
   resizeLeftToolsAndResults: 'Resize left tools and results',
   resizeMapAndQueryPanels: 'Resize map and query panels',
@@ -170,7 +169,6 @@ const de: Record<TranslationKey, string> = {
   privacy: 'Datenschutzerklärung',
   pruned: 'Ausgefiltert',
   query: 'Abfrage',
-  backToApp: 'Zurück zur App',
   reveal: 'Anzeigen',
   resizeLeftToolsAndResults:
     'Linke Werkzeuge und Ergebnisse in der Breite ändern',

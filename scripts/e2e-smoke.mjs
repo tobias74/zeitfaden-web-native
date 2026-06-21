@@ -44,7 +44,7 @@ async function main() {
   await page.goto(appUrl, { waitUntil: 'domcontentloaded' })
   await page.screenshot({ path: '/tmp/ding-e2e-initial.png', fullPage: true })
 
-  await waitForText(page, 'Geo Media Index Lab')
+  await waitForText(page, 'zeitfaden')
   await waitForText(page, 'SQLite')
   await waitForText(page, 'OPFS')
   await page.locator('.language-control select').selectOption('de')
@@ -56,7 +56,7 @@ async function main() {
   await waitForText(page, 'tobiga UG')
   await waitForText(page, 'USt-IdNr. DE 301206623')
   await page.screenshot({ path: '/tmp/ding-e2e-imprint.png', fullPage: true })
-  await page.getByRole('button', { name: /back to app/i }).click()
+  await page.getByRole('link', { name: /zeitfaden/i }).click()
   await waitForText(page, 'Catalog results')
 
   await page.getByRole('button', { name: /privacy policy/i }).click()
@@ -71,7 +71,7 @@ async function main() {
     .waitFor({ timeout: 15_000 })
   await page.screenshot({ path: '/tmp/ding-e2e-privacy.png', fullPage: true })
   await page.locator('.language-control select').selectOption('en')
-  await page.getByRole('button', { name: /back to app/i }).click()
+  await page.getByRole('link', { name: /zeitfaden/i }).click()
   await waitForText(page, 'Catalog results')
 
   const verticalHandle = page.getByRole('separator', {

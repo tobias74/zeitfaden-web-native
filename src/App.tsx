@@ -1083,30 +1083,59 @@ function App() {
       <main className="legal-shell">
         <header className="topbar legal-topbar">
           <div className="topbar-copy">
-            <h1>Geo Media Index Lab</h1>
+            <h1>
+              <a
+                className="app-title-link"
+                href={pathWithSearchParams(
+                  buildSearchUrlParams(searchUrlState, searchUrlDefaults),
+                )}
+                onClick={(event) => {
+                  event.preventDefault()
+                  setActivePage('app')
+                }}
+              >
+                zeitfaden
+              </a>
+            </h1>
             <p className="subtle">{legalPageTitle}</p>
           </div>
-          <div className="legal-actions">
-            <label className="language-control" title={t('language')}>
-              <span aria-hidden="true">
-                <Languages size={16} />
-              </span>
-              <select
-                aria-label={t('language')}
-                value={language}
-                onChange={(event) => changeLanguage(event.target.value)}
+          <div className="topbar-tools">
+            <nav className="topbar-nav" aria-label="Legal">
+              <button
+                type="button"
+                className="topbar-link"
+                aria-current={activePage === 'imprint' ? 'page' : undefined}
+                onClick={() => setActivePage('imprint')}
               >
-                {LANGUAGES.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button type="button" onClick={() => setActivePage('app')}>
-              <ChevronLeft size={17} />
-              {t('backToApp')}
-            </button>
+                {t('imprint')}
+              </button>
+              <button
+                type="button"
+                className="topbar-link"
+                aria-current={activePage === 'privacy' ? 'page' : undefined}
+                onClick={() => setActivePage('privacy')}
+              >
+                {t('privacy')}
+              </button>
+            </nav>
+            <div className="topbar-actions">
+              <label className="language-control" title={t('language')}>
+                <span aria-hidden="true">
+                  <Languages size={16} />
+                </span>
+                <select
+                  aria-label={t('language')}
+                  value={language}
+                  onChange={(event) => changeLanguage(event.target.value)}
+                >
+                  {LANGUAGES.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
           </div>
         </header>
         <section className="legal-content">
@@ -1148,7 +1177,20 @@ function App() {
     <main className="app-shell" style={resizeStyle}>
       <header className="topbar">
         <div className="topbar-copy">
-          <h1>Geo Media Index Lab</h1>
+          <h1>
+            <a
+              className="app-title-link"
+              href={pathWithSearchParams(
+                buildSearchUrlParams(searchUrlState, searchUrlDefaults),
+              )}
+              onClick={(event) => {
+                event.preventDefault()
+                setActivePage('app')
+              }}
+            >
+              zeitfaden
+            </a>
+          </h1>
           <p className="subtle">
             {catalogInfo
               ? `SQLite ${catalogInfo.sqliteVersion} · ${catalogInfo.storageMode.toUpperCase()} · ${catalogInfo.filename}`
