@@ -62,6 +62,9 @@ let initResult: InitResult | undefined
 const geoIndexRegistry = new GeoIndexRegistry()
 
 const IMPORT_BATCH_SIZE = 1000
+const SQLITE_BIND_CHUNK_LIMIT = 900
+const ASSET_BIND_COLUMNS = 15
+const LOCATION_BIND_COLUMNS = 7
 const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
 const GEO_IMPORT_PARSE_SLICE_MS = 250
 const PROGRESS_HEARTBEAT_MS = 1000
@@ -465,16 +468,47 @@ function upsertSourceIntoSqlite(activeDb: SqliteDb, source: MediaSource): void {
   })
 }
 
+function placeholders(rowCount: number, columnCount: number): string {
+  const row = `(${Array.from({ length: columnCount }, () => '?').join(', ')})`
+  return Array.from({ length: rowCount }, () => row).join(', ')
+}
+
+function execMultiRowUpsert(
+  activeDb: SqliteDb,
+  insertPrefix: string,
+  conflictClause: string,
+  rows: unknown[][],
+  columnCount: number,
+): void {
+  if (rows.length === 0) return
+
+  const maxRows = Math.max(1, Math.floor(SQLITE_BIND_CHUNK_LIMIT / columnCount))
+  for (let offset = 0; offset < rows.length; offset += maxRows) {
+    const chunk = rows.slice(offset, offset + maxRows)
+    activeDb.exec({
+      sql: `
+        ${insertPrefix}
+        VALUES ${placeholders(chunk.length, columnCount)}
+        ${conflictClause}
+      `,
+      bind: chunk.flat(),
+    })
+  }
+}
+
 function upsertMediaIntoSqlite(activeDb: SqliteDb, items: MediaItem[]): void {
   if (items.length === 0) return
 
-  const insertOrUpdateAsset = activeDb.prepare(`
+  execMultiRowUpsert(
+    activeDb,
+    `
     INSERT INTO media_assets (
       content_hash, kind, mime_type, size_bytes, width, height, duration_ms,
       captured_at, captured_at_source, latitude, longitude, geo_source,
       thumbnail_key, deleted_at, last_seen_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    `
     ON CONFLICT(content_hash) DO UPDATE SET
       kind = excluded.kind,
       mime_type = excluded.mime_type,
@@ -490,13 +524,32 @@ function upsertMediaIntoSqlite(activeDb: SqliteDb, items: MediaItem[]): void {
       thumbnail_key = COALESCE(excluded.thumbnail_key, media_assets.thumbnail_key),
       deleted_at = excluded.deleted_at,
       last_seen_at = MAX(media_assets.last_seen_at, excluded.last_seen_at)
-  `)
-  const insertOrUpdateLocation = activeDb.prepare(`
+    `,
+    items.map(assetBind),
+    ASSET_BIND_COLUMNS,
+  )
+
+  const locationRows = items.flatMap((item) =>
+    itemLocations(item).map((location) => [
+      location.id,
+      item.contentHash,
+      location.sourceId,
+      location.relativePath ?? '',
+      location.displayName,
+      location.deletedAt ?? null,
+      location.lastSeenAt,
+    ]),
+  )
+
+  execMultiRowUpsert(
+    activeDb,
+    `
     INSERT INTO media_locations (
       id, content_hash, source_id, relative_path, display_name, deleted_at,
       last_seen_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    `,
+    `
     ON CONFLICT(id) DO UPDATE SET
       content_hash = excluded.content_hash,
       source_id = excluded.source_id,
@@ -504,29 +557,10 @@ function upsertMediaIntoSqlite(activeDb: SqliteDb, items: MediaItem[]): void {
       display_name = excluded.display_name,
       deleted_at = excluded.deleted_at,
       last_seen_at = excluded.last_seen_at
-  `)
-
-  try {
-    for (const item of items) {
-      insertOrUpdateAsset.bind(assetBind(item)).stepReset(true)
-      for (const location of itemLocations(item)) {
-        insertOrUpdateLocation
-          .bind([
-            location.id,
-            item.contentHash,
-            location.sourceId,
-            location.relativePath,
-            location.displayName,
-            location.deletedAt ?? null,
-            location.lastSeenAt,
-          ])
-          .stepReset(true)
-      }
-    }
-  } finally {
-    insertOrUpdateAsset.finalize()
-    insertOrUpdateLocation.finalize()
-  }
+    `,
+    locationRows,
+    LOCATION_BIND_COLUMNS,
+  )
 }
 
 function timeWhere(

@@ -20,6 +20,9 @@ use walkdir::WalkDir;
 type AppResult<T> = Result<T, String>;
 
 const IMPORT_BATCH_SIZE: usize = 1000;
+const SQLITE_BIND_CHUNK_LIMIT: usize = 900;
+const ASSET_BIND_COLUMNS: usize = 15;
+const LOCATION_BIND_COLUMNS: usize = 8;
 const GEO_IMPORT_PREFIX_BYTES: usize = 512 * 1024;
 const PROGRESS_HEARTBEAT_MS: u128 = 1000;
 
@@ -1851,98 +1854,156 @@ fn upsert_source_tx(conn: &Connection, source: &MediaSource) -> AppResult<()> {
     Ok(())
 }
 
+fn value_text(value: &str) -> Value {
+    Value::Text(value.to_string())
+}
+
+fn value_optional_text(value: &Option<String>) -> Value {
+    value
+        .as_ref()
+        .map(|value| Value::Text(value.clone()))
+        .unwrap_or(Value::Null)
+}
+
+fn value_optional_i64(value: Option<i64>) -> Value {
+    value.map(Value::Integer).unwrap_or(Value::Null)
+}
+
+fn value_optional_f64(value: Option<f64>) -> Value {
+    value.map(Value::Real).unwrap_or(Value::Null)
+}
+
+fn sql_placeholders(row_count: usize, column_count: usize) -> String {
+    let row = format!("({})", vec!["?"; column_count].join(", "));
+    vec![row; row_count].join(", ")
+}
+
+fn exec_multi_row_upsert(
+    tx: &rusqlite::Transaction<'_>,
+    insert_prefix: &str,
+    conflict_clause: &str,
+    rows: &[Vec<Value>],
+    column_count: usize,
+) -> AppResult<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let max_rows = (SQLITE_BIND_CHUNK_LIMIT / column_count).max(1);
+    for chunk in rows.chunks(max_rows) {
+        let sql = format!(
+            "{insert_prefix} VALUES {} {conflict_clause}",
+            sql_placeholders(chunk.len(), column_count)
+        );
+        let bind = chunk
+            .iter()
+            .flat_map(|row| row.iter().cloned())
+            .collect::<Vec<_>>();
+        tx.execute(&sql, params_from_iter(bind.iter()))
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn asset_row(item: &MediaItem) -> Vec<Value> {
+    vec![
+        value_text(&item.content_hash),
+        value_text(&item.kind),
+        value_text(&item.mime_type),
+        Value::Integer(item.size_bytes),
+        value_optional_i64(item.width),
+        value_optional_i64(item.height),
+        value_optional_i64(item.duration_ms),
+        value_optional_i64(item.captured_at),
+        value_optional_text(&item.captured_at_source),
+        value_optional_f64(item.latitude),
+        value_optional_f64(item.longitude),
+        value_optional_text(&item.geo_source),
+        value_optional_text(&item.thumbnail_key),
+        value_optional_i64(item.deleted_at),
+        Value::Integer(item.last_seen_at),
+    ]
+}
+
+fn location_rows(item: &MediaItem) -> Vec<Vec<Value>> {
+    item.locations
+        .iter()
+        .map(|location| {
+            let absolute_path = location
+                .absolute_path
+                .clone()
+                .or_else(|| location.relative_path.clone())
+                .unwrap_or_else(|| location.id.clone());
+            vec![
+                value_text(&location.id),
+                value_text(&item.content_hash),
+                value_text(&location.source_id),
+                value_optional_text(&location.relative_path),
+                value_text(&absolute_path),
+                value_text(&location.display_name),
+                value_optional_i64(location.deleted_at),
+                Value::Integer(location.last_seen_at),
+            ]
+        })
+        .collect()
+}
+
 fn upsert_media_tx(conn: &mut Connection, items: &[MediaItem]) -> AppResult<usize> {
     let tx = conn.transaction().map_err(|error| error.to_string())?;
-    {
-        let mut asset_stmt = tx
-            .prepare(
-                "
-                INSERT INTO media_assets (
-                  content_hash, kind, mime_type, size_bytes, width, height, duration_ms,
-                  captured_at, captured_at_source, latitude, longitude, geo_source,
-                  thumbnail_key, deleted_at, last_seen_at
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-                ON CONFLICT(content_hash) DO UPDATE SET
-                  kind = excluded.kind,
-                  mime_type = excluded.mime_type,
-                  size_bytes = excluded.size_bytes,
-                  width = excluded.width,
-                  height = excluded.height,
-                  duration_ms = excluded.duration_ms,
-                  captured_at = excluded.captured_at,
-                  captured_at_source = excluded.captured_at_source,
-                  latitude = excluded.latitude,
-                  longitude = excluded.longitude,
-                  geo_source = excluded.geo_source,
-                  thumbnail_key = COALESCE(excluded.thumbnail_key, media_assets.thumbnail_key),
-                  deleted_at = excluded.deleted_at,
-                  last_seen_at = MAX(media_assets.last_seen_at, excluded.last_seen_at)
-                ",
-            )
-            .map_err(|error| error.to_string())?;
-        let mut location_stmt = tx
-            .prepare(
-                "
-                INSERT INTO media_locations (
-                  id, content_hash, source_id, relative_path, absolute_path, display_name,
-                  deleted_at, last_seen_at
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                ON CONFLICT(id) DO UPDATE SET
-                  content_hash = excluded.content_hash,
-                  source_id = excluded.source_id,
-                  relative_path = excluded.relative_path,
-                  absolute_path = excluded.absolute_path,
-                  display_name = excluded.display_name,
-                  deleted_at = excluded.deleted_at,
-                  last_seen_at = excluded.last_seen_at
-                ",
-            )
-            .map_err(|error| error.to_string())?;
+    let asset_rows = items.iter().map(asset_row).collect::<Vec<_>>();
+    exec_multi_row_upsert(
+        &tx,
+        "
+        INSERT INTO media_assets (
+          content_hash, kind, mime_type, size_bytes, width, height, duration_ms,
+          captured_at, captured_at_source, latitude, longitude, geo_source,
+          thumbnail_key, deleted_at, last_seen_at
+        )
+        ",
+        "
+        ON CONFLICT(content_hash) DO UPDATE SET
+          kind = excluded.kind,
+          mime_type = excluded.mime_type,
+          size_bytes = excluded.size_bytes,
+          width = excluded.width,
+          height = excluded.height,
+          duration_ms = excluded.duration_ms,
+          captured_at = excluded.captured_at,
+          captured_at_source = excluded.captured_at_source,
+          latitude = excluded.latitude,
+          longitude = excluded.longitude,
+          geo_source = excluded.geo_source,
+          thumbnail_key = COALESCE(excluded.thumbnail_key, media_assets.thumbnail_key),
+          deleted_at = excluded.deleted_at,
+          last_seen_at = MAX(media_assets.last_seen_at, excluded.last_seen_at)
+        ",
+        &asset_rows,
+        ASSET_BIND_COLUMNS,
+    )?;
 
-        for item in items {
-            asset_stmt
-                .execute(params![
-                    item.content_hash,
-                    item.kind,
-                    item.mime_type,
-                    item.size_bytes,
-                    item.width,
-                    item.height,
-                    item.duration_ms,
-                    item.captured_at,
-                    item.captured_at_source,
-                    item.latitude,
-                    item.longitude,
-                    item.geo_source,
-                    item.thumbnail_key,
-                    item.deleted_at,
-                    item.last_seen_at
-                ])
-                .map_err(|error| error.to_string())?;
-
-            for location in &item.locations {
-                let absolute_path = location
-                    .absolute_path
-                    .clone()
-                    .or_else(|| location.relative_path.clone())
-                    .unwrap_or_else(|| location.id.clone());
-                location_stmt
-                    .execute(params![
-                        location.id,
-                        item.content_hash,
-                        location.source_id,
-                        location.relative_path,
-                        absolute_path,
-                        location.display_name,
-                        location.deleted_at,
-                        location.last_seen_at
-                    ])
-                    .map_err(|error| error.to_string())?;
-            }
-        }
-    }
+    let location_rows = items.iter().flat_map(location_rows).collect::<Vec<_>>();
+    exec_multi_row_upsert(
+        &tx,
+        "
+        INSERT INTO media_locations (
+          id, content_hash, source_id, relative_path, absolute_path, display_name,
+          deleted_at, last_seen_at
+        )
+        ",
+        "
+        ON CONFLICT(id) DO UPDATE SET
+          content_hash = excluded.content_hash,
+          source_id = excluded.source_id,
+          relative_path = excluded.relative_path,
+          absolute_path = excluded.absolute_path,
+          display_name = excluded.display_name,
+          deleted_at = excluded.deleted_at,
+          last_seen_at = excluded.last_seen_at
+        ",
+        &location_rows,
+        LOCATION_BIND_COLUMNS,
+    )?;
     tx.commit().map_err(|error| error.to_string())?;
     Ok(items.len())
 }
