@@ -1604,6 +1604,7 @@ function App() {
                         disabled={busy}
                       >
                         <option value="sqlite">{t('sqliteOpfs')}</option>
+                        <option value="sqlite-memory">{t('sqliteMemory')}</option>
                         <option value="indexeddb">{t('indexedDb')}</option>
                       </select>
                     </label>

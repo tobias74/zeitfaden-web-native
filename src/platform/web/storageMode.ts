@@ -1,7 +1,11 @@
 export const WEB_CATALOG_STORAGE_MODE_KEY =
   'geo-media-index-lab:web-catalog-storage-mode'
 
-export const WEB_CATALOG_STORAGE_MODES = ['sqlite', 'indexeddb'] as const
+export const WEB_CATALOG_STORAGE_MODES = [
+  'sqlite',
+  'sqlite-memory',
+  'indexeddb',
+] as const
 
 export type WebCatalogStorageMode =
   (typeof WEB_CATALOG_STORAGE_MODES)[number]

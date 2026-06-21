@@ -8,6 +8,7 @@ import {
 describe('web catalog storage mode', () => {
   it('validates supported storage modes', () => {
     expect(isWebCatalogStorageMode('sqlite')).toBe(true)
+    expect(isWebCatalogStorageMode('sqlite-memory')).toBe(true)
     expect(isWebCatalogStorageMode('indexeddb')).toBe(true)
     expect(isWebCatalogStorageMode('native')).toBe(false)
   })
@@ -23,5 +24,10 @@ describe('web catalog storage mode', () => {
   it('reads the stored IndexedDB setting', () => {
     window.localStorage.setItem(WEB_CATALOG_STORAGE_MODE_KEY, 'indexeddb')
     expect(storedWebCatalogStorageMode()).toBe('indexeddb')
+  })
+
+  it('reads the stored SQLite memory setting', () => {
+    window.localStorage.setItem(WEB_CATALOG_STORAGE_MODE_KEY, 'sqlite-memory')
+    expect(storedWebCatalogStorageMode()).toBe('sqlite-memory')
   })
 })

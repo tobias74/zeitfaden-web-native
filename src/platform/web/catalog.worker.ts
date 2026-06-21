@@ -39,7 +39,7 @@ type WorkerRequest = {
 }
 
 type InitResult = {
-  storageMode: 'opfs' | 'indexeddb'
+  storageMode: 'opfs' | 'memory' | 'indexeddb'
   sqliteVersion: string
   filename: string
 }
@@ -59,6 +59,9 @@ type SqliteDb = {
   ) => Record<string, unknown>[]
   selectValue: (sql: string, bind?: unknown[]) => unknown
 }
+
+type SqliteModule = Awaited<ReturnType<typeof sqlite3InitModule>>
+type SqliteStorageMode = 'opfs' | 'memory'
 
 type IdbAsset = {
   contentHash: string
@@ -171,6 +174,7 @@ type CatalogStore = {
 
 let db: SqliteDb | undefined
 let initResult: InitResult | undefined
+let sqliteMode: SqliteStorageMode | undefined
 let indexedDb: IDBDatabase | undefined
 let indexedDbInitResult: InitResult | undefined
 const geoIndexRegistry = new GeoIndexRegistry()
@@ -250,10 +254,15 @@ function yieldToEventLoop(): Promise<void> {
   })
 }
 
-async function ensureDb(): Promise<InitResult> {
-  if (db && initResult) return initResult
+function openSqliteDb(
+  sqlite3: SqliteModule,
+  mode: SqliteStorageMode,
+): SqliteDb {
+  if (mode === 'memory') {
+    const dbConstructor = sqlite3.oo1.DB as new (filename: string) => unknown
+    return new dbConstructor(':memory:') as SqliteDb
+  }
 
-  const sqlite3 = await sqlite3InitModule()
   const opfsVfs = sqlite3.capi.sqlite3_vfs_find('opfs')
   const opfsDb = sqlite3.oo1.OpfsDb
 
@@ -263,7 +272,17 @@ async function ensureDb(): Promise<InitResult> {
     )
   }
 
-  db = new opfsDb('/catalog-v5.sqlite3') as unknown as SqliteDb
+  return new opfsDb('/catalog-v5.sqlite3') as unknown as SqliteDb
+}
+
+async function ensureDb(
+  mode: SqliteStorageMode = sqliteMode ?? 'opfs',
+): Promise<InitResult> {
+  if (db && initResult && sqliteMode === mode) return initResult
+
+  const sqlite3 = await sqlite3InitModule()
+  db = openSqliteDb(sqlite3, mode)
+  sqliteMode = mode
   const activeDb = db
 
   activeDb.exec(`
@@ -300,7 +319,7 @@ async function ensureDb(): Promise<InitResult> {
   `)
 
   initResult = {
-    storageMode: 'opfs',
+    storageMode: mode,
     sqliteVersion: sqlite3.version.libVersion,
     filename: activeDb.filename,
   }
@@ -1165,17 +1184,6 @@ function mediaItemsFromAssetRows(
       preferredSourceId,
     ),
   )
-}
-
-async function upsertSource(source: MediaSource): Promise<void> {
-  await ensureDb()
-  void source
-}
-
-async function upsertMedia(items: MediaItem[]): Promise<number> {
-  await ensureDb()
-  upsertMediaIntoSqlite(requireDb(), items)
-  return items.length
 }
 
 function removeSourcesFromSqlite(activeDb: SqliteDb, sourceIds: string[]): void {
@@ -2602,26 +2610,38 @@ async function clearCatalog(): Promise<void> {
   `)
 }
 
-const sqliteCatalogStore: CatalogStore = {
-  geoImportWriteBatchSize: GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE,
-  init: ensureDb,
-  upsertSource,
-  upsertMedia,
-  async prepareImportSource(source, duplicateSourceIds) {
-    await ensureDb()
-    prepareImportSource(requireDb(), source, duplicateSourceIds)
-  },
-  async writeMediaBatch(items) {
+function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
+  const ensureMode = () => ensureDb(mode)
+  const webStorageMode: WebCatalogStorageMode =
+    mode === 'memory' ? 'sqlite-memory' : 'sqlite'
+
+  return {
+    geoImportWriteBatchSize: GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE,
+    init: ensureMode,
+    async upsertSource(source) {
+      await ensureMode()
+      void source
+    },
+    async upsertMedia(items) {
+      await ensureMode()
+      upsertMediaIntoSqlite(requireDb(), items)
+      return items.length
+    },
+    async prepareImportSource(source, duplicateSourceIds) {
+      await ensureMode()
+      prepareImportSource(requireDb(), source, duplicateSourceIds)
+    },
+    async writeMediaBatch(items) {
     const startedAt = performance.now()
     const ensureStartedAt = performance.now()
-    await ensureDb()
+    await ensureMode()
     const ensureDbMs = performance.now() - ensureStartedAt
     if (items.length === 0) {
       const totalMs = performance.now() - startedAt
       return {
         written: 0,
         timing: {
-          storageMode: 'sqlite',
+          storageMode: webStorageMode,
           items: 0,
           transactionActive: false,
           totalMs,
@@ -2644,7 +2664,7 @@ const sqliteCatalogStore: CatalogStore = {
     return {
       written: items.length,
       timing: {
-        storageMode: 'sqlite',
+        storageMode: webStorageMode,
         items: items.length,
         transactionActive: false,
         totalMs,
@@ -2657,10 +2677,10 @@ const sqliteCatalogStore: CatalogStore = {
       },
     }
   },
-  async withImportTransaction(run, options) {
+    async withImportTransaction(run, options) {
     const startedAt = performance.now()
     const ensureStartedAt = performance.now()
-    await ensureDb()
+    await ensureMode()
     const ensureDbMs = performance.now() - ensureStartedAt
     try {
       const result = await run()
@@ -2684,14 +2704,39 @@ const sqliteCatalogStore: CatalogStore = {
       throw error
     }
   },
-  listMedia,
-  getMediaByIds,
-  getGeoPoints,
-  listSources,
-  removeSources,
-  countMedia,
-  clear: clearCatalog,
+    async listMedia(query) {
+      await ensureMode()
+      return listMedia(query)
+    },
+    async getMediaByIds(ids) {
+      await ensureMode()
+      return getMediaByIds(ids)
+    },
+    async getGeoPoints(range) {
+      await ensureMode()
+      return getGeoPoints(range)
+    },
+    async listSources() {
+      await ensureMode()
+      return listSources()
+    },
+    async removeSources(sourceIds) {
+      await ensureMode()
+      return removeSources(sourceIds)
+    },
+    async countMedia() {
+      await ensureMode()
+      return countMedia()
+    },
+    async clear() {
+      await ensureMode()
+      return clearCatalog()
+    },
+  }
 }
+
+const sqliteCatalogStore = createSqliteCatalogStore('opfs')
+const sqliteMemoryCatalogStore = createSqliteCatalogStore('memory')
 
 const indexedDbCatalogStore: CatalogStore = {
   geoImportWriteBatchSize: GEO_IMPORT_INDEXEDDB_WRITE_BATCH_SIZE,
@@ -2751,11 +2796,15 @@ const indexedDbCatalogStore: CatalogStore = {
 }
 
 function storageModeForRequest(request: WorkerRequest): WebCatalogStorageMode {
-  return request.storageMode === 'indexeddb' ? 'indexeddb' : 'sqlite'
+  if (request.storageMode === 'indexeddb') return 'indexeddb'
+  if (request.storageMode === 'sqlite-memory') return 'sqlite-memory'
+  return 'sqlite'
 }
 
 function catalogStoreForMode(mode: WebCatalogStorageMode): CatalogStore {
-  return mode === 'indexeddb' ? indexedDbCatalogStore : sqliteCatalogStore
+  if (mode === 'indexeddb') return indexedDbCatalogStore
+  if (mode === 'sqlite-memory') return sqliteMemoryCatalogStore
+  return sqliteCatalogStore
 }
 
 async function handleRequest(

@@ -27,7 +27,7 @@ const en = {
   catalogData: 'Catalog data',
   catalogDatabase: 'Database',
   catalogDatabaseDescription:
-    'SQLite and IndexedDB are separate catalogs. Switching does not migrate data.',
+    'SQLite OPFS, SQLite memory, and IndexedDB are separate catalogs. Switching does not migrate data. Memory data is discarded on reload.',
   catalogResults: 'Catalog results',
   catalogStatusStarting: 'Starting local catalog',
   clear: 'Clear',
@@ -110,6 +110,7 @@ const en = {
   sort: 'Sort',
   sources: 'sources',
   sqliteOpfs: 'SQLite OPFS',
+  sqliteMemory: 'SQLite memory',
   thumbnailSize: 'Thumbnail size',
   to: 'To',
   video: 'video',
@@ -139,7 +140,7 @@ const de: Record<TranslationKey, string> = {
   catalogData: 'Katalogdaten',
   catalogDatabase: 'Datenbank',
   catalogDatabaseDescription:
-    'SQLite und IndexedDB sind getrennte Kataloge. Beim Wechsel werden keine Daten migriert.',
+    'SQLite OPFS, SQLite Speicher und IndexedDB sind getrennte Kataloge. Beim Wechsel werden keine Daten migriert. Speicherdaten werden beim Neuladen verworfen.',
   catalogResults: 'Katalogergebnisse',
   catalogStatusStarting: 'Lokaler Katalog wird gestartet',
   clear: 'Löschen',
@@ -224,6 +225,7 @@ const de: Record<TranslationKey, string> = {
   sort: 'Sortierung',
   sources: 'Quellen',
   sqliteOpfs: 'SQLite OPFS',
+  sqliteMemory: 'SQLite Speicher',
   thumbnailSize: 'Vorschaugröße',
   to: 'Bis',
   video: 'Video',
