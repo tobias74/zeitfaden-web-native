@@ -25,6 +25,7 @@ import type {
 import type {
   GeoIndexBuildProgress,
   GeoIndexBuildSummary,
+  GeoParseDebugSummary,
   ImportProgress,
   ImportSummary,
 } from '../types'
@@ -140,6 +141,10 @@ type ImportFolderPayload = {
 type ImportGeoFilePayload = {
   source: MediaSource
   duplicateSourceIds: string[]
+  file: File
+}
+
+type DebugParseGeoFilePayload = {
   file: File
 }
 
@@ -1720,6 +1725,117 @@ function throwKnownUnsupportedJsonPrefix(prefix: string): void {
   }
 }
 
+function debugParseRate(count: number, durationMs: number): number {
+  if (durationMs <= 0) return 0
+  return count / (durationMs / 1000)
+}
+
+async function debugParseGoogleTakeoutFile(
+  payload: DebugParseGeoFilePayload,
+): Promise<GeoParseDebugSummary> {
+  const { file } = payload
+  const sourceLabel = file.name || 'selected JSON file'
+  const prefix = await file.slice(0, GEO_IMPORT_PREFIX_BYTES).text()
+
+  if (!jsonLikePrefix(prefix)) {
+    throw new Error(
+      'Debug parser expects raw Google Takeout Records.json data.',
+    )
+  }
+  throwKnownUnsupportedJsonPrefix(prefix)
+
+  const parser = new GoogleTakeoutLocationStreamParser()
+  const reader = file.stream().getReader()
+  const decoder = new TextDecoder()
+  const startedAt = performance.now()
+  let bytesRead = 0
+  let parsedPoints = 0
+  let skippedPoints = 0
+  let lastLogAt = startedAt
+
+  const log = (phase: string) => {
+    const now = performance.now()
+    const durationMs = now - startedAt
+    console.log('[geo-debug]', {
+      phase,
+      fileName: sourceLabel,
+      sizeBytes: file.size,
+      bytesRead,
+      percent:
+        file.size > 0 ? Math.round((bytesRead / file.size) * 1000) / 10 : 0,
+      parsedPoints,
+      skippedPoints,
+      elapsedMs: Math.round(durationMs),
+      bytesPerSecond: Math.round(debugParseRate(bytesRead, durationMs)),
+      pointsPerSecond: Math.round(debugParseRate(parsedPoints, durationMs)),
+    })
+  }
+
+  const maybeLog = () => {
+    const now = performance.now()
+    if (now - lastLogAt < PROGRESS_HEARTBEAT_MS) return
+    lastLogAt = now
+    log('parsing')
+  }
+
+  const consumeText = async (text: string) => {
+    let chunk = text
+    while (true) {
+      const result = parser.feed(chunk, {
+        maxDurationMs: GEO_IMPORT_PARSE_SLICE_MS,
+      })
+      chunk = ''
+      parsedPoints += result.points.length
+      skippedPoints += result.skippedPoints
+      maybeLog()
+
+      if (!result.paused) break
+      await yieldToEventLoop()
+    }
+  }
+
+  log('start')
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    bytesRead += value.byteLength
+    await consumeText(decoder.decode(value, { stream: true }))
+    maybeLog()
+  }
+
+  const finalChunk = decoder.decode()
+  if (finalChunk) {
+    await consumeText(finalChunk)
+  }
+
+  const final = parser.finish()
+  skippedPoints = final.skippedPoints
+  const durationMs = performance.now() - startedAt
+  const summary = {
+    sourceLabel,
+    sizeBytes: file.size,
+    bytesRead,
+    totalEntries: final.totalEntries,
+    parsedPoints,
+    skippedPoints,
+    durationMs,
+    bytesPerSecond: debugParseRate(bytesRead, durationMs),
+    pointsPerSecond: debugParseRate(parsedPoints, durationMs),
+  }
+
+  console.log('[geo-debug]', {
+    phase: 'complete',
+    ...summary,
+    durationMs: Math.round(summary.durationMs),
+    bytesPerSecond: Math.round(summary.bytesPerSecond),
+    pointsPerSecond: Math.round(summary.pointsPerSecond),
+  })
+
+  return summary
+}
+
 async function importGpxIntoCatalog(
   file: File,
   source: MediaSource,
@@ -2329,6 +2445,10 @@ async function handleRequest(
         request.payload as ImportGeoFilePayload,
         store,
         postProgress as (progress: ImportProgress) => void,
+      )
+    case 'debugParseGeoFile':
+      return debugParseGoogleTakeoutFile(
+        request.payload as DebugParseGeoFilePayload,
       )
     case 'listMedia':
       return store.listMedia(request.payload as CatalogQuery)

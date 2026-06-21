@@ -844,6 +844,26 @@ function App() {
     }
   }, [locale, platform, recordActivity, refreshAll, t])
 
+  const debugParseGeoFile = useCallback(async () => {
+    if (!platform.importer.debugParseGeoFile) return
+
+    setError(undefined)
+    setBusy(true)
+    try {
+      const summary = await platform.importer.debugParseGeoFile()
+      recordActivity('activityDebugParsedGeoFile', {
+        count: summary.parsedPoints.toLocaleString(locale),
+        skipped: summary.skippedPoints.toLocaleString(locale),
+        duration: Math.round(summary.durationMs).toLocaleString(locale),
+        sourceLabel: summary.sourceLabel,
+      })
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      setBusy(false)
+    }
+  }, [locale, platform, recordActivity])
+
   const clearCatalog = useCallback(async () => {
     setBusy(true)
     setError(undefined)
@@ -1517,6 +1537,20 @@ function App() {
                     <p className="settings-hint">
                       {t('catalogDatabaseDescription')}
                     </p>
+                  </div>
+                )}
+                {platform.kind === 'web' && platform.importer.debugParseGeoFile && (
+                  <div className="display-section">
+                    <span>{t('debugTools')}</span>
+                    <button
+                      type="button"
+                      className="settings-clear-button"
+                      onClick={debugParseGeoFile}
+                      disabled={busy || !catalogReady}
+                    >
+                      <FileText size={16} />
+                      {t('debugParseTakeoutJson')}
+                    </button>
                   </div>
                 )}
                 <div className="display-section">

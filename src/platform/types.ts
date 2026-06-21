@@ -41,6 +41,18 @@ export type ImportSummary = {
   errors: string[]
 }
 
+export type GeoParseDebugSummary = {
+  sourceLabel: string
+  sizeBytes: number
+  bytesRead: number
+  totalEntries: number
+  parsedPoints: number
+  skippedPoints: number
+  durationMs: number
+  bytesPerSecond: number
+  pointsPerSecond: number
+}
+
 export type GeoIndexBuildProgress = {
   phase: 'loading' | 'building' | 'ready'
   pointCount: number
@@ -93,6 +105,7 @@ export interface CatalogBackend {
 export interface ImportBackend {
   importFolder(onProgress?: (progress: ImportProgress) => void): Promise<ImportSummary>
   importGeoFile(onProgress?: (progress: ImportProgress) => void): Promise<ImportSummary>
+  debugParseGeoFile?(): Promise<GeoParseDebugSummary>
   dispose(): void
 }
 

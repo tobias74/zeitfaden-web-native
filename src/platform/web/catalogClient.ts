@@ -13,6 +13,7 @@ import type {
   CatalogInfo,
   GeoIndexBuildProgress,
   GeoIndexBuildSummary,
+  GeoParseDebugSummary,
   ImportProgress,
   ImportSummary,
 } from '../types'
@@ -79,6 +80,10 @@ export class CatalogClient {
     return this.request('importGeoFile', payload, (progress) => {
       onProgress?.(progress as ImportProgress)
     })
+  }
+
+  debugParseGeoFile(file: File): Promise<GeoParseDebugSummary> {
+    return this.request('debugParseGeoFile', { file })
   }
 
   listMedia(query: CatalogQuery): Promise<MediaItem[]> {
