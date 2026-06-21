@@ -32,7 +32,8 @@ type PendingBatchAck = {
 
 const GEO_IMPORT_LOG_PREFIX = '[geo-import]'
 const GEO_IMPORT_BATCH_SIZE = 1000
-const GEO_IMPORT_PARSE_SLICE_ENTRIES = 1000
+const GEO_IMPORT_BATCH_MAX_AGE_MS = 1000
+const GEO_IMPORT_PARSE_SLICE_MS = 250
 const GEO_IMPORT_UI_PROGRESS_HEARTBEAT_MS = 1000
 const GEO_IMPORT_READ_PROGRESS_BYTES = 100 * 1024 * 1024
 
@@ -122,6 +123,7 @@ async function importGoogleTakeout(
   let inFlightAcceptedMedia = 0
   let skippedFiles = 0
   let batchId = 0
+  let firstPendingPointAt: number | undefined
   let nextProgressAt = GEO_IMPORT_READ_PROGRESS_BYTES
   let currentProgressPhase: ImportProgressPhase = 'scanning'
   let progressHeartbeat:
@@ -174,6 +176,7 @@ async function importGoogleTakeout(
     if (pendingPoints.length === 0) return
 
     const points = pendingPoints.splice(0, pendingPoints.length)
+    firstPendingPointAt = undefined
     inFlightAcceptedMedia += points.length
     emitProgress('storing')
     try {
@@ -194,13 +197,24 @@ async function importGoogleTakeout(
     let chunk = text
     while (true) {
       const result = parser.feed(chunk, {
-        maxEntries: GEO_IMPORT_PARSE_SLICE_ENTRIES,
+        maxDurationMs: GEO_IMPORT_PARSE_SLICE_MS,
       })
       chunk = ''
       skippedFiles += result.skippedPoints
-      pendingPoints.push(...result.points)
+      if (result.points.length > 0) {
+        firstPendingPointAt ??= performance.now()
+        pendingPoints.push(...result.points)
+      }
 
-      if (pendingPoints.length >= GEO_IMPORT_BATCH_SIZE) {
+      const pendingAgeMs =
+        firstPendingPointAt === undefined
+          ? 0
+          : performance.now() - firstPendingPointAt
+
+      if (
+        pendingPoints.length >= GEO_IMPORT_BATCH_SIZE ||
+        pendingAgeMs >= GEO_IMPORT_BATCH_MAX_AGE_MS
+      ) {
         await flushPending()
       }
 

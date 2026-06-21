@@ -23,6 +23,7 @@ const LOCATIONS_PROPERTY = '"locations"'
 
 type FeedOptions = {
   maxEntries?: number
+  maxDurationMs?: number
 }
 
 function completeJsonObject(buffer: string): CompleteObject | undefined {
@@ -99,10 +100,17 @@ export class GoogleTakeoutLocationStreamParser {
     const points: ParsedGeoPoint[] = []
     let skippedPoints = 0
     const maxEntries = Math.max(0, options.maxEntries ?? Infinity)
+    const deadline =
+      typeof options.maxDurationMs === 'number'
+        ? performance.now() + Math.max(0, options.maxDurationMs)
+        : Infinity
     let processedEntries = 0
 
     while (true) {
-      if (processedEntries >= maxEntries) {
+      if (
+        processedEntries >= maxEntries ||
+        (processedEntries > 0 && performance.now() >= deadline)
+      ) {
         return { points, skippedPoints, paused: true }
       }
 

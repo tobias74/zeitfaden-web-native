@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GoogleTakeoutLocationStreamParser } from './googleTakeoutStream'
 
 function parseChunks(chunks: string[]) {
@@ -21,7 +21,19 @@ function parseChunks(chunks: string[]) {
   }
 }
 
+function takeoutDocument(length: number): string {
+  return `{"locations":[${Array.from(
+    { length },
+    (_, index) =>
+      `{"latitudeE7":48137067${index},"longitudeE7":11577599${index},"timestampMs":"13514342060${index}"}`,
+  ).join(',')}]}`
+}
+
 describe('GoogleTakeoutLocationStreamParser', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it('parses raw Records.json locations across chunk boundaries', () => {
     const result = parseChunks([
       '{"locations',
@@ -73,11 +85,7 @@ describe('GoogleTakeoutLocationStreamParser', () => {
 
   it('can pause parsing after a bounded number of entries', () => {
     const parser = new GoogleTakeoutLocationStreamParser()
-    const document = `{"locations":[${Array.from(
-      { length: 5 },
-      (_, index) =>
-        `{"latitudeE7":48137067${index},"longitudeE7":11577599${index},"timestampMs":"13514342060${index}"}`,
-    ).join(',')}]}`
+    const document = takeoutDocument(5)
 
     const first = parser.feed(document, { maxEntries: 2 })
     const second = parser.feed('', { maxEntries: 2 })
@@ -92,6 +100,30 @@ describe('GoogleTakeoutLocationStreamParser', () => {
         (point) => point.index,
       ),
     ).toEqual([1, 2, 3, 4, 5])
+    expect(final.totalEntries).toBe(5)
+  })
+
+  it('can pause parsing after a time budget', () => {
+    const parser = new GoogleTakeoutLocationStreamParser()
+    const now = vi
+      .spyOn(performance, 'now')
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(5)
+      .mockReturnValueOnce(10)
+      .mockReturnValueOnce(15)
+
+    const first = parser.feed(takeoutDocument(5), {
+      maxDurationMs: 10,
+    })
+    const second = parser.feed('')
+    const final = parser.finish()
+
+    expect(now).toHaveBeenCalled()
+    expect(first.paused).toBe(true)
+    expect(first.points).toHaveLength(3)
+    expect(second.paused).toBe(false)
+    expect([...first.points, ...second.points]).toHaveLength(5)
     expect(final.totalEntries).toBe(5)
   })
 
