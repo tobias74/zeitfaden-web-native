@@ -148,4 +148,29 @@ describe('geo indexes', () => {
     )
     expect(actual.map((result) => result.mediaId)).not.toContain('zurich-a')
   })
+
+  it('dynamic Z-order index builds dense cells with chunk progress', async () => {
+    const densePoints = Array.from({ length: 100_000 }, (_, index) => ({
+      mediaId: `dense-${index.toString().padStart(6, '0')}`,
+      lat: 48.137,
+      lon: 11.576,
+      capturedAt: index,
+    }))
+    const index = new DynamicZOrderGeoIndex()
+    const processedCounts: number[] = []
+
+    await index.build(densePoints, {
+      yieldEvery: 10_000,
+      onProgress: (progress) => {
+        processedCounts.push(progress.processedPoints)
+      },
+    })
+
+    await index.remove('dense-000000')
+    const stats = await index.stats()
+    expect(stats.pointCount).toBe(densePoints.length - 1)
+    expect(processedCounts[0]).toBe(0)
+    expect(processedCounts).toContain(50_000)
+    expect(processedCounts.at(-1)).toBe(densePoints.length)
+  })
 })

@@ -1,6 +1,7 @@
 import { distanceToQueryMeters } from '../lib/distance'
 import { matchesTimeRange, overlapsTimeRange } from '../lib/time'
 import type {
+  GeoIndexBuildOptions,
   GeoIndexPoint,
   GeoIndexStats,
   GeoSearchQuery,
@@ -70,6 +71,26 @@ function sortResults(results: GeoSearchResult[]): GeoSearchResult[] {
   })
 }
 
+function replaceResultsInPlace(
+  target: GeoSearchResult[],
+  source: GeoSearchResult[],
+): void {
+  target.length = source.length
+  for (let index = 0; index < source.length; index += 1) {
+    target[index] = source[index]
+  }
+}
+
+function trimResultsInPlace(results: GeoSearchResult[], limit: number): void {
+  replaceResultsInPlace(results, sortResults(results).slice(0, limit))
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0)
+  })
+}
+
 export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
   readonly id = 'dynamic-z-order-cells'
   readonly label = 'Dynamic Z-order cells'
@@ -93,15 +114,36 @@ export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
     this.axisSize = 2 ** resolution
   }
 
-  async build(points: GeoIndexPoint[]): Promise<void> {
+  async build(
+    points: GeoIndexPoint[],
+    options?: GeoIndexBuildOptions,
+  ): Promise<void> {
     const start = performance.now()
     this.pointsById.clear()
     this.pointCellKey.clear()
     this.cells.clear()
 
+    const yieldEvery = Math.max(1, options?.yieldEvery ?? 2_000)
+    const reportProgress = (processedPoints: number) => {
+      options?.onProgress?.({
+        indexId: this.id,
+        indexLabel: this.label,
+        processedPoints,
+        totalPoints: points.length,
+      })
+    }
+
+    reportProgress(0)
+    let processedPoints = 0
     for (const point of points) {
       this.insertInternal(point)
+      processedPoints += 1
+      if (processedPoints % yieldEvery === 0) {
+        reportProgress(processedPoints)
+        await yieldToEventLoop()
+      }
     }
+    reportProgress(points.length)
 
     this.lastStats = {
       ...this.emptyStats(),
@@ -144,7 +186,8 @@ export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
       prunedByTime: 0,
     }
 
-    if (query.k <= 0 || this.cells.size === 0) {
+    const limit = Math.max(0, Math.trunc(query.k))
+    if (limit <= 0 || this.cells.size === 0) {
       this.lastStats = {
         ...this.emptyStats(),
         lastQueryTimeMs: performance.now() - start,
@@ -173,9 +216,9 @@ export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
     for (let index = 0; index < candidates.length; index += 1) {
       const candidate = candidates[index]
       const worst =
-        topK.length === query.k ? topK[topK.length - 1].distanceMeters : Infinity
+        topK.length === limit ? topK[topK.length - 1].distanceMeters : Infinity
 
-      if (topK.length === query.k && candidate.lowerBound > worst) {
+      if (topK.length === limit && candidate.lowerBound > worst) {
         metrics.prunedByGeo += candidates.length - index
         break
       }
@@ -195,7 +238,9 @@ export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
           mediaId: point.mediaId,
           distanceMeters: distanceToQueryMeters(point, query),
         })
-        topK.splice(0, topK.length, ...sortResults(topK).slice(0, query.k))
+        if (topK.length >= limit) {
+          trimResultsInPlace(topK, limit)
+        }
       }
     }
 
@@ -254,7 +299,7 @@ export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
     cell.points.set(normalizedPoint.mediaId, normalizedPoint)
     this.pointsById.set(normalizedPoint.mediaId, normalizedPoint)
     this.pointCellKey.set(normalizedPoint.mediaId, cell.key)
-    this.recomputeCellTimeRange(cell)
+    this.updateCellTimeRangeWithPoint(cell, normalizedPoint)
   }
 
   private removeInternal(mediaId: string): void {
@@ -315,12 +360,27 @@ export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
   }
 
   private recomputeCellTimeRange(cell: Cell): void {
-    const times = [...cell.points.values()]
-      .map((point) => point.capturedAt)
-      .filter((time): time is number => typeof time === 'number')
+    cell.minCapturedAt = undefined
+    cell.maxCapturedAt = undefined
+    for (const point of cell.points.values()) {
+      this.updateCellTimeRangeWithPoint(cell, point)
+    }
+  }
 
-    cell.minCapturedAt = times.length > 0 ? Math.min(...times) : undefined
-    cell.maxCapturedAt = times.length > 0 ? Math.max(...times) : undefined
+  private updateCellTimeRangeWithPoint(cell: Cell, point: GeoIndexPoint): void {
+    if (typeof point.capturedAt !== 'number') return
+    if (
+      typeof cell.minCapturedAt !== 'number' ||
+      point.capturedAt < cell.minCapturedAt
+    ) {
+      cell.minCapturedAt = point.capturedAt
+    }
+    if (
+      typeof cell.maxCapturedAt !== 'number' ||
+      point.capturedAt > cell.maxCapturedAt
+    ) {
+      cell.maxCapturedAt = point.capturedAt
+    }
   }
 
   private cellLowerBoundMeters(

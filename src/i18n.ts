@@ -45,6 +45,8 @@ const en = {
   geoPoints: 'Geo points',
   geo_point: 'geo point',
   geoIndexProgressDetail: '{points} points · {built} / {total} indexes',
+  geoIndexProgressDetailWithCurrent:
+    '{points} points · {built} / {total} indexes · {processed} / {currentTotal} points',
   geoIndexesReady: 'Geo indexes ready',
   image: 'image',
   images: 'Images',
@@ -146,6 +148,8 @@ const de: Record<TranslationKey, string> = {
   geoPoints: 'Geo-Punkte',
   geo_point: 'Geo-Punkt',
   geoIndexProgressDetail: '{points} Punkte · {built} / {total} Indizes',
+  geoIndexProgressDetailWithCurrent:
+    '{points} Punkte · {built} / {total} Indizes · {processed} / {currentTotal} Punkte',
   geoIndexesReady: 'Geo-Indizes bereit',
   image: 'Bild',
   images: 'Bilder',

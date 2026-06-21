@@ -48,6 +48,8 @@ export type GeoIndexBuildProgress = {
   totalIndexes: number
   currentIndexId?: string
   currentIndexLabel?: string
+  currentIndexProcessedPoints?: number
+  currentIndexTotalPoints?: number
 }
 
 export type GeoIndexBuildSummary = {

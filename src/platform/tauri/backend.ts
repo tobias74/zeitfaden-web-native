@@ -87,8 +87,24 @@ class TauriCatalogBackend implements CatalogBackend {
         totalIndexes,
         currentIndexId: index.id,
         currentIndexLabel: index.label,
+        currentIndexProcessedPoints: 0,
+        currentIndexTotalPoints: points.length,
       })
-      await index.build(points)
+      await index.build(points, {
+        yieldEvery: 2_000,
+        onProgress: (progress) => {
+          onProgress?.({
+            phase: 'building',
+            pointCount: points.length,
+            builtIndexes,
+            totalIndexes,
+            currentIndexId: progress.indexId,
+            currentIndexLabel: progress.indexLabel,
+            currentIndexProcessedPoints: progress.processedPoints,
+            currentIndexTotalPoints: progress.totalPoints,
+          })
+        },
+      })
       builtIndexes += 1
       onProgress?.({
         phase: 'building',

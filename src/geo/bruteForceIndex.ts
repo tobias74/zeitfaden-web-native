@@ -1,6 +1,7 @@
 import { distanceToQueryMeters } from '../lib/distance'
 import { matchesTimeRange } from '../lib/time'
 import type {
+  GeoIndexBuildOptions,
   GeoIndexPoint,
   GeoIndexStats,
   GeoSearchQuery,
@@ -36,9 +37,24 @@ export class BruteForceGeoIndex implements GeoTemporalIndex {
   private points: GeoIndexPoint[] = []
   private lastStats: GeoIndexStats = this.emptyStats()
 
-  async build(points: GeoIndexPoint[]): Promise<void> {
+  async build(
+    points: GeoIndexPoint[],
+    options?: GeoIndexBuildOptions,
+  ): Promise<void> {
     const start = performance.now()
+    options?.onProgress?.({
+      indexId: this.id,
+      indexLabel: this.label,
+      processedPoints: 0,
+      totalPoints: points.length,
+    })
     this.points = [...points].sort((a, b) => a.mediaId.localeCompare(b.mediaId))
+    options?.onProgress?.({
+      indexId: this.id,
+      indexLabel: this.label,
+      processedPoints: points.length,
+      totalPoints: points.length,
+    })
     this.lastStats = {
       ...this.emptyStats(),
       pointCount: this.points.length,

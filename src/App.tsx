@@ -285,7 +285,20 @@ function geoIndexProgressPercent(
   if (progress.phase === 'loading' || progress.totalIndexes === 0) {
     return undefined
   }
-  return Math.min(100, (progress.builtIndexes / progress.totalIndexes) * 100)
+  const currentIndexProgress =
+    typeof progress.currentIndexProcessedPoints === 'number' &&
+    typeof progress.currentIndexTotalPoints === 'number' &&
+    progress.currentIndexTotalPoints > 0
+      ? Math.min(
+          1,
+          progress.currentIndexProcessedPoints / progress.currentIndexTotalPoints,
+        )
+      : 0
+  return Math.min(
+    100,
+    ((progress.builtIndexes + currentIndexProgress) / progress.totalIndexes) *
+      100,
+  )
 }
 
 function geoIndexProgressLabel(
@@ -304,6 +317,20 @@ function geoIndexProgressDetail(
   t: (key: TranslationKey, values?: TranslationValues) => string,
   locale: string,
 ): string {
+  if (
+    typeof progress.currentIndexProcessedPoints === 'number' &&
+    typeof progress.currentIndexTotalPoints === 'number' &&
+    progress.currentIndexTotalPoints > 0
+  ) {
+    return t('geoIndexProgressDetailWithCurrent', {
+      points: progress.pointCount.toLocaleString(locale),
+      built: progress.builtIndexes.toLocaleString(locale),
+      total: progress.totalIndexes.toLocaleString(locale),
+      processed: progress.currentIndexProcessedPoints.toLocaleString(locale),
+      currentTotal: progress.currentIndexTotalPoints.toLocaleString(locale),
+    })
+  }
+
   return t('geoIndexProgressDetail', {
     points: progress.pointCount.toLocaleString(locale),
     built: progress.builtIndexes.toLocaleString(locale),
@@ -1452,13 +1479,18 @@ function App() {
                   }`}
                   role="progressbar"
                   aria-label={t('buildingGeoIndex', { indexLabel: '' })}
-                  aria-valuemax={geoIndexProgress.totalIndexes || undefined}
+                  aria-valuemax={100}
                   aria-valuemin={0}
                   aria-valuenow={
                     geoIndexProgress.phase === 'loading'
                       ? undefined
-                      : geoIndexProgress.builtIndexes
+                      : geoIndexProgressPercent(geoIndexProgress)
                   }
+                  aria-valuetext={geoIndexProgressDetail(
+                    geoIndexProgress,
+                    t,
+                    locale,
+                  )}
                 >
                   <div
                     className="progress-fill"

@@ -91,6 +91,18 @@ export type GeoSearchResult = {
   distanceMeters: number
 }
 
+export type GeoIndexBuildStep = {
+  indexId: string
+  indexLabel: string
+  processedPoints: number
+  totalPoints: number
+}
+
+export type GeoIndexBuildOptions = {
+  onProgress?: (progress: GeoIndexBuildStep) => void
+  yieldEvery?: number
+}
+
 export type GeoIndexCapabilities = {
   exact: boolean
   persistent: boolean
@@ -127,7 +139,7 @@ export interface GeoTemporalIndex {
   label: string
   capabilities: GeoIndexCapabilities
 
-  build(points: GeoIndexPoint[]): Promise<void>
+  build(points: GeoIndexPoint[], options?: GeoIndexBuildOptions): Promise<void>
   insert(point: GeoIndexPoint): Promise<void>
   remove(mediaId: string): Promise<void>
   search(query: GeoSearchQuery): Promise<GeoSearchResult[]>
