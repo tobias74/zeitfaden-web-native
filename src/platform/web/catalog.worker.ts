@@ -967,11 +967,10 @@ function emptySqliteUpsertTiming(
   }
 }
 
-function execMultiRowUpsert(
+function execMultiRowInsert(
   activeDb: SqliteDb,
   label: string,
   insertPrefix: string,
-  conflictClause: string,
   rows: unknown[][],
   columnCount: number,
 ): SqliteUpsertTiming {
@@ -992,7 +991,6 @@ function execMultiRowUpsert(
     const sql = `
       ${insertPrefix}
       VALUES ${valuePlaceholders}
-      ${conflictClause}
     `
     const sqlBuildMs = performance.now() - sqlBuildStartedAt
     timing.sqlBuildMs += sqlBuildMs
@@ -1055,7 +1053,7 @@ function upsertMediaIntoSqlite(
   const assetRowsStartedAt = performance.now()
   const assetRows = items.map(assetBind)
   const assetRowsMs = performance.now() - assetRowsStartedAt
-  const assetTiming = execMultiRowUpsert(
+  const assetTiming = execMultiRowInsert(
     activeDb,
     'media_assets',
     `
@@ -1064,22 +1062,6 @@ function upsertMediaIntoSqlite(
       captured_at, captured_at_source, latitude, longitude, geo_source,
       thumbnail_key, last_seen_at
     )
-    `,
-    `
-    ON CONFLICT(content_hash) DO UPDATE SET
-      kind = excluded.kind,
-      mime_type = excluded.mime_type,
-      size_bytes = excluded.size_bytes,
-      width = excluded.width,
-      height = excluded.height,
-      duration_ms = excluded.duration_ms,
-      captured_at = excluded.captured_at,
-      captured_at_source = excluded.captured_at_source,
-      latitude = excluded.latitude,
-      longitude = excluded.longitude,
-      geo_source = excluded.geo_source,
-      thumbnail_key = COALESCE(excluded.thumbnail_key, media_assets.thumbnail_key),
-      last_seen_at = MAX(media_assets.last_seen_at, excluded.last_seen_at)
     `,
     assetRows,
     ASSET_BIND_COLUMNS,
@@ -1100,7 +1082,7 @@ function upsertMediaIntoSqlite(
   )
   const locationRowsMs = performance.now() - locationRowsStartedAt
 
-  const locationTiming = execMultiRowUpsert(
+  const locationTiming = execMultiRowInsert(
     activeDb,
     'media_locations',
     `
@@ -1108,16 +1090,6 @@ function upsertMediaIntoSqlite(
       id, content_hash, source_id, source_label, source_added_at,
       relative_path, display_name, last_seen_at
     )
-    `,
-    `
-    ON CONFLICT(id) DO UPDATE SET
-      content_hash = excluded.content_hash,
-      source_id = excluded.source_id,
-      source_label = excluded.source_label,
-      source_added_at = excluded.source_added_at,
-      relative_path = excluded.relative_path,
-      display_name = excluded.display_name,
-      last_seen_at = excluded.last_seen_at
     `,
     locationRows,
     LOCATION_BIND_COLUMNS,
