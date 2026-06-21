@@ -875,10 +875,10 @@ async function importFolderIntoCatalog(
   let acceptedMedia = 0
   let skippedFiles = 0
 
-  const flushBatch = () => {
+  const flushBatch = (phase: ImportProgress['phase']) => {
     if (batch.length === 0) return
     postProgress({
-      phase: 'storing',
+      phase,
       sourceLabel,
       scannedFiles,
       totalFiles,
@@ -887,6 +887,14 @@ async function importFolderIntoCatalog(
     })
     upsertMediaBatch(activeDb, batch)
     batch.length = 0
+    postProgress({
+      phase,
+      sourceLabel,
+      scannedFiles,
+      totalFiles,
+      acceptedMedia,
+      skippedFiles,
+    })
   }
 
   async function countFiles(directoryHandle: FileSystemDirectoryHandle): Promise<void> {
@@ -933,7 +941,7 @@ async function importFolderIntoCatalog(
           batch.push(item)
           acceptedMedia += 1
           if (batch.length >= IMPORT_BATCH_SIZE) {
-            flushBatch()
+            flushBatch('scanning')
           }
         } else {
           skippedFiles += 1
@@ -981,7 +989,7 @@ async function importFolderIntoCatalog(
     skippedFiles,
   })
   await walk(handle, '')
-  flushBatch()
+  flushBatch('storing')
 
   return {
     source,
@@ -1147,19 +1155,19 @@ async function importGoogleTakeoutIntoCatalog(
     emitProgress('scanning')
   }
 
-  const flushBatch = async () => {
+  const flushBatch = async (phase: ImportProgress['phase']) => {
     if (batch.length === 0) return
-    emitProgress('storing')
+    emitProgress(phase)
     upsertMediaBatch(activeDb, batch)
     acceptedMedia += batch.length
     batch.length = 0
+    emitProgress(phase)
     await yieldToEventLoop()
   }
 
   const consumePoints = async () => {
-    while (pendingPoints.length > 0) {
-      const point = pendingPoints.shift()
-      if (!point) continue
+    const points = pendingPoints.splice(0)
+    for (const point of points) {
       batch.push(
         await geoPointItemFromParsedPoint(
           source.id,
@@ -1169,7 +1177,7 @@ async function importGoogleTakeoutIntoCatalog(
         ),
       )
       if (batch.length >= IMPORT_BATCH_SIZE) {
-        await flushBatch()
+        await flushBatch('scanning')
       }
     }
   }
@@ -1209,7 +1217,7 @@ async function importGoogleTakeoutIntoCatalog(
   const final = parser.finish()
   skippedFiles = final.skippedPoints
   await consumePoints()
-  await flushBatch()
+  await flushBatch('storing')
   emitProgress('storing')
 
   return { acceptedMedia, skippedFiles }

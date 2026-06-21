@@ -2508,7 +2508,7 @@ fn import_google_takeout_streaming(
                 emit_progress(
                     window,
                     import_progress_bytes(
-                        "storing",
+                        "scanning",
                         &source_label,
                         accepted_media,
                         parser.skipped_points,
@@ -2518,6 +2518,18 @@ fn import_google_takeout_streaming(
                     ),
                 );
                 flush_media_batch(conn, &mut batch)?;
+                emit_progress(
+                    window,
+                    import_progress_bytes(
+                        "scanning",
+                        &source_label,
+                        accepted_media,
+                        parser.skipped_points,
+                        Some(source_label.clone()),
+                        scanned_bytes,
+                        total_bytes,
+                    ),
+                );
             }
         }
 
@@ -2578,7 +2590,7 @@ fn import_gpx_streaming(
                     emit_progress(
                         window,
                         import_progress_bytes(
-                            "storing",
+                            "scanning",
                             &source_label,
                             accepted_media,
                             skipped_files,
@@ -2588,6 +2600,18 @@ fn import_gpx_streaming(
                         ),
                     );
                     flush_media_batch(conn, &mut batch)?;
+                    emit_progress(
+                        window,
+                        import_progress_bytes(
+                            "scanning",
+                            &source_label,
+                            accepted_media,
+                            skipped_files,
+                            Some(source_label.clone()),
+                            position as i64,
+                            total_bytes,
+                        ),
+                    );
                 }
                 maybe_emit_byte_progress(
                     window,
@@ -2706,7 +2730,7 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
                     emit_progress(
                         &window,
                         import_progress(
-                            "storing",
+                            "scanning",
                             &source_label,
                             scanned_files,
                             total_files,
@@ -2716,6 +2740,18 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
                         ),
                     );
                     flush_media_batch(&mut conn, &mut batch)?;
+                    emit_progress(
+                        &window,
+                        import_progress(
+                            "scanning",
+                            &source_label,
+                            scanned_files,
+                            total_files,
+                            accepted_media,
+                            skipped_files,
+                            Some(current_path.clone()),
+                        ),
+                    );
                 }
             }
             Ok(None) => {
