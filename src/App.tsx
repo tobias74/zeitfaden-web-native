@@ -57,7 +57,11 @@ import {
 } from './lib/time'
 import { GeoIndexRegistry } from './geo/registry'
 import { createPlatformBackend } from './platform'
-import type { CatalogInfo, ImportProgress } from './platform/types'
+import type {
+  CatalogInfo,
+  GeoIndexBuildProgress,
+  ImportProgress,
+} from './platform/types'
 import type {
   CatalogQuery,
   CatalogSort,
@@ -266,6 +270,38 @@ function importProgressDetail(
   return `${progress.scannedFiles.toLocaleString(locale)} / ${progress.totalFiles.toLocaleString(locale)}`
 }
 
+function geoIndexProgressPercent(
+  progress: GeoIndexBuildProgress,
+): number | undefined {
+  if (progress.phase === 'loading' || progress.totalIndexes === 0) {
+    return undefined
+  }
+  return Math.min(100, (progress.builtIndexes / progress.totalIndexes) * 100)
+}
+
+function geoIndexProgressLabel(
+  progress: GeoIndexBuildProgress,
+  t: (key: TranslationKey, values?: TranslationValues) => string,
+): string {
+  if (progress.phase === 'loading') return t('loadingGeoPoints')
+  if (progress.phase === 'ready') return t('geoIndexesReady')
+  return t('buildingGeoIndex', {
+    indexLabel: progress.currentIndexLabel ?? '',
+  })
+}
+
+function geoIndexProgressDetail(
+  progress: GeoIndexBuildProgress,
+  t: (key: TranslationKey, values?: TranslationValues) => string,
+  locale: string,
+): string {
+  return t('geoIndexProgressDetail', {
+    points: progress.pointCount.toLocaleString(locale),
+    built: progress.builtIndexes.toLocaleString(locale),
+    total: progress.totalIndexes.toLocaleString(locale),
+  })
+}
+
 function formatDimensions(item: MediaItem): string | undefined {
   if (typeof item.width === 'number' && typeof item.height === 'number') {
     return `${item.width} x ${item.height}`
@@ -401,6 +437,8 @@ function App() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
   const [importProgress, setImportProgress] = useState<ImportProgress>()
+  const [geoIndexProgress, setGeoIndexProgress] =
+    useState<GeoIndexBuildProgress>()
   const [resultDisplayMode, setResultDisplayMode] =
     useState<ResultDisplayMode>(() =>
       storedString(RESULT_DISPLAY_MODE_KEY, 'cards', [
@@ -553,12 +591,23 @@ function App() {
   }, [catalog, mapCatalogQuery])
 
   const rebuildGeoIndexes = useCallback(async () => {
-    const points = await catalog.getGeoPoints()
-    setGeoPointCount(points.length)
-    await registry.buildAll(points)
-    setGeoIndexVersion((version) => version + 1)
-    setIndexStats(await registry.get(selectedIndexId).stats())
-  }, [catalog, registry, selectedIndexId])
+    setGeoIndexProgress({
+      phase: 'loading',
+      pointCount: 0,
+      builtIndexes: 0,
+      totalIndexes: registry.indexes.length,
+    })
+    try {
+      const summary = await catalog.buildGeoIndexes((progress) => {
+        setGeoIndexProgress(progress)
+      })
+      setGeoPointCount(summary.pointCount)
+      setGeoIndexVersion((version) => version + 1)
+      setIndexStats(await catalog.getGeoIndexStats(selectedIndexId))
+    } finally {
+      setGeoIndexProgress(undefined)
+    }
+  }, [catalog, registry.indexes.length, selectedIndexId])
 
   const refreshAll = useCallback(async () => {
     await Promise.all([
@@ -763,7 +812,7 @@ function App() {
           lon: queryPoint.lon,
           k: geoPointCount,
         }
-        const results = await selectedIndex.search(query)
+        const results = await catalog.searchGeoIndex(selectedIndex.id, query)
         const resultIds = results.map((result) => result.mediaId)
         const mediaLookupBatchSize = 500
         const itemChunks = await Promise.all(
@@ -794,9 +843,9 @@ function App() {
           : unboundedEnriched
         const [nextValidation, nextStats] = await Promise.all([
           kindFilter === 'all'
-            ? registry.validateSelected(selectedIndex.id, query)
+            ? catalog.validateGeoIndex(selectedIndex.id, query)
             : Promise.resolve(undefined),
-          selectedIndex.stats(),
+          catalog.getGeoIndexStats(selectedIndex.id),
         ])
 
         if (cancelled) return
@@ -832,7 +881,6 @@ function App() {
     kindFilter,
     queryPoint.lat,
     queryPoint.lon,
-    registry,
     selectedIndex,
     timeRange,
   ])
@@ -1350,7 +1398,7 @@ function App() {
           </div>
           <div
             className={`topbar-progress-slot ${
-              importProgress || error ? 'active' : 'idle'
+              importProgress || geoIndexProgress || error ? 'active' : 'idle'
             }`}
             aria-live="polite"
           >
@@ -1377,6 +1425,39 @@ function App() {
                         importProgressPercent(importProgress) === undefined
                           ? undefined
                           : `${importProgressPercent(importProgress)}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            ) : geoIndexProgress ? (
+              <div className="import-progress-strip">
+                <div className="import-progress-header">
+                  <span>{geoIndexProgressLabel(geoIndexProgress, t)}</span>
+                  <strong>
+                    {geoIndexProgressDetail(geoIndexProgress, t, locale)}
+                  </strong>
+                </div>
+                <div
+                  className={`progress-track ${
+                    geoIndexProgress.phase === 'loading' ? 'indeterminate' : ''
+                  }`}
+                  role="progressbar"
+                  aria-label={t('buildingGeoIndex', { indexLabel: '' })}
+                  aria-valuemax={geoIndexProgress.totalIndexes || undefined}
+                  aria-valuemin={0}
+                  aria-valuenow={
+                    geoIndexProgress.phase === 'loading'
+                      ? undefined
+                      : geoIndexProgress.builtIndexes
+                  }
+                >
+                  <div
+                    className="progress-fill"
+                    style={{
+                      width:
+                        geoIndexProgressPercent(geoIndexProgress) === undefined
+                          ? undefined
+                          : `${geoIndexProgressPercent(geoIndexProgress)}%`,
                     }}
                   />
                 </div>

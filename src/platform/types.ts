@@ -1,10 +1,14 @@
 import type {
   CatalogQuery,
   GeoIndexPoint,
+  GeoIndexStats,
+  GeoSearchQuery,
+  GeoSearchResult,
   MediaItem,
   MediaLocation,
   MediaSource,
   TimeRange,
+  ValidationReport,
 } from '../types'
 
 export type CatalogInfo = {
@@ -37,6 +41,20 @@ export type ImportSummary = {
   errors: string[]
 }
 
+export type GeoIndexBuildProgress = {
+  phase: 'loading' | 'building' | 'ready'
+  pointCount: number
+  builtIndexes: number
+  totalIndexes: number
+  currentIndexId?: string
+  currentIndexLabel?: string
+}
+
+export type GeoIndexBuildSummary = {
+  pointCount: number
+  buildTimeMs: number
+}
+
 export type PlatformCapabilities = {
   absolutePaths: boolean
   persistentFileHandles: boolean
@@ -54,6 +72,18 @@ export interface CatalogBackend {
   listSources(): Promise<MediaSource[]>
   removeSources(sourceIds: string[]): Promise<void>
   countMedia(): Promise<number>
+  buildGeoIndexes(
+    onProgress?: (progress: GeoIndexBuildProgress) => void,
+  ): Promise<GeoIndexBuildSummary>
+  searchGeoIndex(
+    indexId: string,
+    query: GeoSearchQuery,
+  ): Promise<GeoSearchResult[]>
+  getGeoIndexStats(indexId: string): Promise<GeoIndexStats>
+  validateGeoIndex(
+    indexId: string,
+    query: GeoSearchQuery,
+  ): Promise<ValidationReport>
   clear(): Promise<void>
   dispose(): void
 }

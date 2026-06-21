@@ -1,19 +1,29 @@
 import type {
   CatalogQuery,
   GeoIndexPoint,
+  GeoIndexStats,
+  GeoSearchQuery,
+  GeoSearchResult,
   MediaItem,
   MediaSource,
   TimeRange,
+  ValidationReport,
 } from '../../types'
-import type { CatalogInfo } from '../types'
+import type {
+  CatalogInfo,
+  GeoIndexBuildProgress,
+  GeoIndexBuildSummary,
+} from '../types'
 
 type WorkerResponse<T> =
   | { id: number; ok: true; result: T }
   | { id: number; ok: false; error: string }
+  | { id: number; type: 'progress'; progress: unknown }
 
 type PendingRequest<T> = {
   resolve: (value: T) => void
   reject: (reason?: unknown) => void
+  onProgress?: (progress: unknown) => void
 }
 
 export class CatalogClient {
@@ -57,6 +67,32 @@ export class CatalogClient {
     return this.request('countMedia')
   }
 
+  buildGeoIndexes(
+    onProgress?: (progress: GeoIndexBuildProgress) => void,
+  ): Promise<GeoIndexBuildSummary> {
+    return this.request('buildGeoIndexes', undefined, (progress) => {
+      onProgress?.(progress as GeoIndexBuildProgress)
+    })
+  }
+
+  searchGeoIndex(
+    indexId: string,
+    query: GeoSearchQuery,
+  ): Promise<GeoSearchResult[]> {
+    return this.request('searchGeoIndex', { indexId, query })
+  }
+
+  getGeoIndexStats(indexId: string): Promise<GeoIndexStats> {
+    return this.request('getGeoIndexStats', indexId)
+  }
+
+  validateGeoIndex(
+    indexId: string,
+    query: GeoSearchQuery,
+  ): Promise<ValidationReport> {
+    return this.request('validateGeoIndex', { indexId, query })
+  }
+
   clear(): Promise<void> {
     return this.request('clear')
   }
@@ -80,10 +116,15 @@ export class CatalogClient {
       const pending = this.pending.get(response.id)
       if (!pending) return
 
+      if ('type' in response && response.type === 'progress') {
+        pending.onProgress?.(response.progress)
+        return
+      }
+
       this.pending.delete(response.id)
-      if (response.ok) {
+      if ('ok' in response && response.ok) {
         pending.resolve(response.result)
-      } else {
+      } else if ('ok' in response) {
         pending.reject(new Error(response.error))
       }
     })
@@ -111,13 +152,18 @@ export class CatalogClient {
     this.pending.clear()
   }
 
-  private request<T>(type: string, payload?: unknown): Promise<T> {
+  private request<T>(
+    type: string,
+    payload?: unknown,
+    onProgress?: (progress: unknown) => void,
+  ): Promise<T> {
     const id = this.nextId++
 
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, {
         resolve: resolve as (value: unknown) => void,
         reject,
+        onProgress,
       })
       try {
         this.ensureWorker().postMessage({ id, type, payload })

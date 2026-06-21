@@ -1,12 +1,21 @@
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm'
+import { GeoIndexRegistry } from '../../geo/registry'
 import type {
   CatalogQuery,
   GeoIndexPoint,
+  GeoIndexStats,
+  GeoSearchQuery,
+  GeoSearchResult,
   MediaItem,
   MediaLocation,
   MediaSource,
   TimeRange,
+  ValidationReport,
 } from '../../types'
+import type {
+  GeoIndexBuildProgress,
+  GeoIndexBuildSummary,
+} from '../types'
 
 type WorkerRequest = {
   id: number
@@ -38,6 +47,7 @@ type SqliteDb = {
 
 let db: SqliteDb | undefined
 let initResult: InitResult | undefined
+const geoIndexRegistry = new GeoIndexRegistry()
 
 const ctx = self as unknown as {
   postMessage: (message: unknown) => void
@@ -643,6 +653,85 @@ async function getGeoPoints(range: {
   }))
 }
 
+async function buildGeoIndexes(
+  postProgress: (progress: GeoIndexBuildProgress) => void,
+): Promise<GeoIndexBuildSummary> {
+  const startedAt = performance.now()
+  const totalIndexes = geoIndexRegistry.indexes.length
+
+  postProgress({
+    phase: 'loading',
+    pointCount: 0,
+    builtIndexes: 0,
+    totalIndexes,
+  })
+
+  const points = await getGeoPoints({})
+
+  postProgress({
+    phase: 'building',
+    pointCount: points.length,
+    builtIndexes: 0,
+    totalIndexes,
+  })
+
+  let builtIndexes = 0
+  for (const index of geoIndexRegistry.indexes) {
+    postProgress({
+      phase: 'building',
+      pointCount: points.length,
+      builtIndexes,
+      totalIndexes,
+      currentIndexId: index.id,
+      currentIndexLabel: index.label,
+    })
+    await index.build(points)
+    builtIndexes += 1
+    postProgress({
+      phase: 'building',
+      pointCount: points.length,
+      builtIndexes,
+      totalIndexes,
+      currentIndexId: index.id,
+      currentIndexLabel: index.label,
+    })
+  }
+
+  const summary = {
+    pointCount: points.length,
+    buildTimeMs: performance.now() - startedAt,
+  }
+
+  postProgress({
+    phase: 'ready',
+    pointCount: points.length,
+    builtIndexes,
+    totalIndexes,
+  })
+
+  return summary
+}
+
+async function searchGeoIndex(payload: {
+  indexId: string
+  query: GeoSearchQuery
+}): Promise<GeoSearchResult[]> {
+  return geoIndexRegistry.get(payload.indexId).search(payload.query)
+}
+
+async function getGeoIndexStats(indexId: string): Promise<GeoIndexStats> {
+  return geoIndexRegistry.get(indexId).stats()
+}
+
+async function validateGeoIndex(payload: {
+  indexId: string
+  query: GeoSearchQuery
+}): Promise<ValidationReport> {
+  return geoIndexRegistry
+    .get(payload.indexId)
+    .validateAgainstBruteForce(payload.query)
+}
+
 async function listSources(): Promise<MediaSource[]> {
   await ensureDb()
   return requireDb()
@@ -712,7 +801,10 @@ async function clearCatalog(): Promise<void> {
   `)
 }
 
-async function handleRequest(request: WorkerRequest): Promise<unknown> {
+async function handleRequest(
+  request: WorkerRequest,
+  postProgress: (progress: GeoIndexBuildProgress) => void,
+): Promise<unknown> {
   switch (request.type) {
     case 'init':
       return ensureDb()
@@ -732,6 +824,18 @@ async function handleRequest(request: WorkerRequest): Promise<unknown> {
       return removeSources(request.payload as string[])
     case 'countMedia':
       return countMedia()
+    case 'buildGeoIndexes':
+      return buildGeoIndexes(postProgress)
+    case 'searchGeoIndex':
+      return searchGeoIndex(
+        request.payload as { indexId: string; query: GeoSearchQuery },
+      )
+    case 'getGeoIndexStats':
+      return getGeoIndexStats(request.payload as string)
+    case 'validateGeoIndex':
+      return validateGeoIndex(
+        request.payload as { indexId: string; query: GeoSearchQuery },
+      )
     case 'clear':
       return clearCatalog()
     default:
@@ -741,7 +845,10 @@ async function handleRequest(request: WorkerRequest): Promise<unknown> {
 
 ctx.addEventListener('message', async (event: MessageEvent<WorkerRequest>) => {
   try {
-    const result = await handleRequest(event.data)
+    const postProgress = (progress: GeoIndexBuildProgress) => {
+      ctx.postMessage({ id: event.data.id, type: 'progress', progress })
+    }
+    const result = await handleRequest(event.data, postProgress)
     ctx.postMessage({ id: event.data.id, ok: true, result })
   } catch (error) {
     ctx.postMessage({
