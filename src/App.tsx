@@ -9,7 +9,6 @@ import {
   Image as ImageIcon,
   List,
   MapPin,
-  RefreshCcw,
   Settings2,
   Trash2,
   Video,
@@ -715,6 +714,20 @@ function App() {
     window.localStorage.setItem(RESULT_PAGE_SIZE_KEY, String(size))
   }, [])
 
+  const clearSearch = useCallback(() => {
+    setStartDate('')
+    setEndDate('')
+    setSort('captured_at_desc')
+    setKindFilter('all')
+    setGeoBounds(undefined)
+    setBoundsDrawing(false)
+    setResultPage(0)
+    setSearchResults([])
+    setValidation(undefined)
+    setViewerSession(undefined)
+    setViewerNavigationPending(false)
+  }, [])
+
   const openViewerAtIndex = useCallback(
     async (absoluteIndex: number) => {
       if (absoluteIndex < 0) return
@@ -1347,9 +1360,9 @@ function App() {
                   </label>
                 </div>
               </details>
-              <button type="button" onClick={refreshAll} disabled={busy}>
-                <RefreshCcw size={17} />
-                Refresh
+              <button type="button" onClick={clearSearch} disabled={busy}>
+                <Trash2 size={17} />
+                Clear search
               </button>
             </div>
           </div>
