@@ -1211,17 +1211,7 @@ async function upsertSource(source: MediaSource): Promise<void> {
 
 async function upsertMedia(items: MediaItem[]): Promise<number> {
   await ensureDb()
-  const activeDb = requireDb()
-
-  activeDb.exec('BEGIN')
-  try {
-    upsertMediaIntoSqlite(activeDb, items)
-    activeDb.exec('COMMIT')
-  } catch (error) {
-    activeDb.exec('ROLLBACK')
-    throw error
-  }
-
+  upsertMediaIntoSqlite(requireDb(), items)
   return items.length
 }
 
@@ -1247,15 +1237,8 @@ function prepareImportSource(
   source: MediaSource,
   duplicateSourceIds: string[],
 ): void {
-  activeDb.exec('BEGIN')
-  try {
-    removeSourcesFromSqlite(activeDb, duplicateSourceIds)
-    void source
-    activeDb.exec('COMMIT')
-  } catch (error) {
-    activeDb.exec('ROLLBACK')
-    throw error
-  }
+  removeSourcesFromSqlite(activeDb, duplicateSourceIds)
+  void source
 }
 
 export async function fileContentHash(file: File): Promise<string> {
@@ -2620,24 +2603,17 @@ async function removeSources(sourceIds: string[]): Promise<void> {
 
   const placeholders = sourceIds.map(() => '?').join(', ')
   const activeDb = requireDb()
-  activeDb.exec('BEGIN')
-  try {
-    activeDb.exec({
-      sql: `DELETE FROM media_locations WHERE source_id IN (${placeholders})`,
-      bind: sourceIds,
-    })
-    activeDb.exec(`
-      DELETE FROM media_assets
-      WHERE NOT EXISTS (
-        SELECT 1 FROM media_locations l
-        WHERE l.content_hash = media_assets.content_hash
-      )
-    `)
-    activeDb.exec('COMMIT')
-  } catch (error) {
-    activeDb.exec('ROLLBACK')
-    throw error
-  }
+  activeDb.exec({
+    sql: `DELETE FROM media_locations WHERE source_id IN (${placeholders})`,
+    bind: sourceIds,
+  })
+  activeDb.exec(`
+    DELETE FROM media_assets
+    WHERE NOT EXISTS (
+      SELECT 1 FROM media_locations l
+      WHERE l.content_hash = media_assets.content_hash
+    )
+  `)
 }
 
 async function countMedia(): Promise<number> {
@@ -2672,9 +2648,8 @@ const sqliteCatalogStore: CatalogStore = {
     await ensureDb()
     prepareImportSource(requireDb(), source, duplicateSourceIds)
   },
-  async writeMediaBatch(items, options) {
+  async writeMediaBatch(items) {
     const startedAt = performance.now()
-    const transactionActive = Boolean(options?.transactionActive)
     const ensureStartedAt = performance.now()
     await ensureDb()
     const ensureDbMs = performance.now() - ensureStartedAt
@@ -2685,7 +2660,7 @@ const sqliteCatalogStore: CatalogStore = {
         timing: {
           storageMode: 'sqlite',
           items: 0,
-          transactionActive,
+          transactionActive: false,
           totalMs,
           ensureDbMs,
           requireDbMs: 0,
@@ -2699,24 +2674,7 @@ const sqliteCatalogStore: CatalogStore = {
     const activeDb = requireDb()
     const requireDbMs = performance.now() - requireStartedAt
     const writeStartedAt = performance.now()
-    let sqliteTiming: SqliteMediaWriteTiming
-    if (options?.transactionActive) {
-      sqliteTiming = upsertMediaIntoSqlite(activeDb, items)
-    } else {
-      const wrappedWriteStartedAt = performance.now()
-      activeDb.exec('BEGIN')
-      try {
-        sqliteTiming = upsertMediaIntoSqlite(activeDb, items)
-        activeDb.exec('COMMIT')
-      } catch (error) {
-        activeDb.exec('ROLLBACK')
-        throw error
-      }
-      sqliteTiming = {
-        ...sqliteTiming,
-        totalMs: performance.now() - wrappedWriteStartedAt,
-      }
-    }
+    const sqliteTiming = upsertMediaIntoSqlite(activeDb, items)
     const writeMs = performance.now() - writeStartedAt
     const totalMs = performance.now() - startedAt
     const accountedMs = ensureDbMs + requireDbMs + writeMs
@@ -2725,7 +2683,7 @@ const sqliteCatalogStore: CatalogStore = {
       timing: {
         storageMode: 'sqlite',
         items: items.length,
-        transactionActive,
+        transactionActive: false,
         totalMs,
         ensureDbMs,
         requireDbMs,
@@ -2745,7 +2703,7 @@ const sqliteCatalogStore: CatalogStore = {
       const result = await run()
       if (options?.traceId) {
         const totalMs = performance.now() - startedAt
-        logImportTrace(options.traceId, 'sqlite import transaction complete', {
+        logImportTrace(options.traceId, 'sqlite import run complete', {
           sourceLabel: options.sourceLabel,
           totalMs: roundedMs(totalMs),
           ensureDbMs: roundedMs(ensureDbMs),
@@ -2755,7 +2713,7 @@ const sqliteCatalogStore: CatalogStore = {
       return result
     } catch (error) {
       if (options?.traceId) {
-        logImportTrace(options.traceId, 'sqlite import transaction rollback', {
+        logImportTrace(options.traceId, 'sqlite import run failed', {
           sourceLabel: options.sourceLabel,
           elapsedMs: roundedMs(performance.now() - startedAt),
         })

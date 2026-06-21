@@ -1784,7 +1784,7 @@ fn sql_placeholders(row_count: usize, column_count: usize) -> String {
 }
 
 fn exec_multi_row_upsert(
-    tx: &rusqlite::Transaction<'_>,
+    conn: &Connection,
     insert_prefix: &str,
     conflict_clause: &str,
     rows: &[Vec<Value>],
@@ -1804,7 +1804,7 @@ fn exec_multi_row_upsert(
             .iter()
             .flat_map(|row| row.iter().cloned())
             .collect::<Vec<_>>();
-        tx.execute(&sql, params_from_iter(bind.iter()))
+        conn.execute(&sql, params_from_iter(bind.iter()))
             .map_err(|error| error.to_string())?;
     }
 
@@ -1854,11 +1854,10 @@ fn location_rows(item: &MediaItem) -> Vec<Vec<Value>> {
         .collect()
 }
 
-fn upsert_media_tx(conn: &mut Connection, items: &[MediaItem]) -> AppResult<usize> {
-    let tx = conn.transaction().map_err(|error| error.to_string())?;
+fn upsert_media_rows(conn: &mut Connection, items: &[MediaItem]) -> AppResult<usize> {
     let asset_rows = items.iter().map(asset_row).collect::<Vec<_>>();
     exec_multi_row_upsert(
-        &tx,
+        conn,
         "
         INSERT INTO media_assets (
           content_hash, kind, mime_type, size_bytes, width, height, duration_ms,
@@ -1888,7 +1887,7 @@ fn upsert_media_tx(conn: &mut Connection, items: &[MediaItem]) -> AppResult<usiz
 
     let location_rows = items.iter().flat_map(location_rows).collect::<Vec<_>>();
     exec_multi_row_upsert(
-        &tx,
+        conn,
         "
         INSERT INTO media_locations (
           id, content_hash, source_id, source_label, source_added_at,
@@ -1909,7 +1908,6 @@ fn upsert_media_tx(conn: &mut Connection, items: &[MediaItem]) -> AppResult<usiz
         &location_rows,
         LOCATION_BIND_COLUMNS,
     )?;
-    tx.commit().map_err(|error| error.to_string())?;
     Ok(items.len())
 }
 
@@ -1935,7 +1933,7 @@ fn upsert_source(app: AppHandle, source: MediaSource) -> AppResult<()> {
 #[tauri::command]
 fn upsert_media(app: AppHandle, items: Vec<MediaItem>) -> AppResult<usize> {
     let mut conn = connect(&app)?;
-    upsert_media_tx(&mut conn, &items)
+    upsert_media_rows(&mut conn, &items)
 }
 
 #[tauri::command]
@@ -2396,7 +2394,7 @@ fn flush_media_batch(conn: &mut Connection, batch: &mut Vec<MediaItem>) -> AppRe
     if batch.is_empty() {
         return Ok(0);
     }
-    let written = upsert_media_tx(conn, batch)?;
+    let written = upsert_media_rows(conn, batch)?;
     batch.clear();
     Ok(written)
 }
@@ -3157,8 +3155,8 @@ mod tests {
         ];
 
         upsert_source_tx(&conn, &source).unwrap();
-        upsert_media_tx(&mut conn, &items).unwrap();
-        upsert_media_tx(&mut conn, &items).unwrap();
+        upsert_media_rows(&mut conn, &items).unwrap();
+        upsert_media_rows(&mut conn, &items).unwrap();
 
         let asset_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM media_assets", [], |row| row.get(0))
@@ -3219,8 +3217,8 @@ mod tests {
 
         let first = test_item("same-hash", "source", "a/photo.jpg");
         let second = test_item("same-hash", "source", "b/photo-copy.jpg");
-        upsert_media_tx(&mut conn, &[first.clone(), second]).unwrap();
-        upsert_media_tx(&mut conn, &[first]).unwrap();
+        upsert_media_rows(&mut conn, &[first.clone(), second]).unwrap();
+        upsert_media_rows(&mut conn, &[first]).unwrap();
 
         let asset_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM media_assets", [], |row| row.get(0))
