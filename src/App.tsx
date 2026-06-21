@@ -113,7 +113,7 @@ const RESULT_METADATA_KEY = 'geo-media-index-lab:result-metadata'
 const RESULT_PAGE_SIZE_KEY = 'geo-media-index-lab:result-page-size'
 const RESULT_PAGE_SIZE_OPTIONS = [50, 100, 250, 500] as const
 const DEFAULT_RESULT_PAGE_SIZE = 100
-const MAP_POINT_LIMIT = 5_000
+const MAP_POINT_LIMIT = 500
 const DEFAULT_QUERY_POINT = {
   lat: 47.3769,
   lon: 8.5417,
