@@ -1,12 +1,20 @@
 import { CatalogClient } from './catalogClient'
 import {
   getDirectoryHandle,
+  listGeoFileHandles,
   listDirectoryHandles,
   putDirectoryHandle,
+  putGeoFileHandle,
   removeDirectoryHandle,
+  removeGeoFileHandle,
 } from './handleStore'
 import { ScannerClient } from './scannerClient'
 import type { ScanProgress } from './scanner.worker'
+import {
+  geoPointContentHash,
+  parseGpxPoints,
+  type ParsedGeoPoint,
+} from '../../lib/geoPoint'
 import type {
   ImportBackend,
   ImportProgress,
@@ -22,6 +30,26 @@ type ImportSourceRecord = {
   addedAt: number
   handle: FileSystemDirectoryHandle
   duplicateSourceIds: string[]
+}
+
+type ImportGeoFileRecord = {
+  id: string
+  label: string
+  addedAt: number
+  handle: FileSystemFileHandle
+  duplicateSourceIds: string[]
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+async function stableId(...parts: string[]): Promise<string> {
+  const encoded = new TextEncoder().encode(parts.join('\n'))
+  const digest = await crypto.subtle.digest('SHA-256', encoded)
+  return bytesToHex(new Uint8Array(digest))
 }
 
 async function sourceRecordForHandle(
@@ -65,11 +93,91 @@ async function sourceRecordForHandle(
   }
 }
 
+async function sourceRecordForGeoFileHandle(
+  handle: FileSystemFileHandle,
+): Promise<ImportGeoFileRecord> {
+  if (typeof handle.isSameEntry === 'function') {
+    const existingRecords = await listGeoFileHandles()
+    const matchingRecords = []
+
+    for (const record of existingRecords) {
+      try {
+        if (await handle.isSameEntry(record.handle)) {
+          matchingRecords.push(record)
+        }
+      } catch {
+        // Ignore stale or inaccessible handle records and keep looking.
+      }
+    }
+
+    if (matchingRecords.length > 0) {
+      matchingRecords.sort(
+        (a, b) => a.addedAt - b.addedAt || a.id.localeCompare(b.id),
+      )
+      const [primaryRecord, ...duplicateRecords] = matchingRecords
+      return {
+        id: primaryRecord.id,
+        label: handle.name || primaryRecord.label,
+        addedAt: primaryRecord.addedAt,
+        handle,
+        duplicateSourceIds: duplicateRecords.map((record) => record.id),
+      }
+    }
+  }
+
+  return {
+    id: crypto.randomUUID(),
+    label: handle.name,
+    addedAt: Date.now(),
+    handle,
+    duplicateSourceIds: [],
+  }
+}
+
 function webProgress(
   sourceLabel: string,
   progress: ScanProgress,
 ): ImportProgress {
   return { ...progress, sourceLabel }
+}
+
+async function geoPointItemFromParsedPoint(
+  sourceId: string,
+  sourceLabel: string,
+  point: ParsedGeoPoint,
+): Promise<MediaItem> {
+  const contentHash = await geoPointContentHash(
+    point.latitude,
+    point.longitude,
+    point.capturedAt,
+  )
+  const lastSeenAt = Date.now()
+  const displayName = `${sourceLabel} #${point.index}`
+  const location: MediaLocation = {
+    id: await stableId(sourceId, sourceLabel, contentHash),
+    sourceId,
+    relativePath: sourceLabel,
+    displayName,
+    lastSeenAt,
+  }
+
+  return {
+    id: contentHash,
+    contentHash,
+    sourceId,
+    relativePath: sourceLabel,
+    displayName,
+    kind: 'geo_point',
+    mimeType: 'application/gpx+xml',
+    sizeBytes: 0,
+    capturedAt: point.capturedAt,
+    capturedAtSource: 'geo-file',
+    latitude: point.latitude,
+    longitude: point.longitude,
+    geoSource: 'geo-file',
+    lastSeenAt,
+    locations: [location],
+  }
 }
 
 class WebImportBackend implements ImportBackend {
@@ -145,6 +253,101 @@ class WebImportBackend implements ImportBackend {
     }
   }
 
+  async importGeoFile(
+    onProgress?: (progress: ImportProgress) => void,
+  ): Promise<ImportSummary> {
+    if (!window.showOpenFilePicker) {
+      throw new Error('This browser does not expose the File System Access API.')
+    }
+
+    const [handle] = await window.showOpenFilePicker({
+      multiple: false,
+      types: [
+        {
+          description: 'GPX files',
+          accept: {
+            'application/gpx+xml': ['.gpx'],
+            'application/xml': ['.gpx'],
+            'text/xml': ['.gpx'],
+          },
+        },
+      ],
+    })
+    if (!handle) throw new Error('Import cancelled')
+
+    const sourceRecord = await sourceRecordForGeoFileHandle(handle)
+    const sourceLabel = sourceRecord.label
+
+    onProgress?.({
+      phase: 'counting',
+      sourceLabel,
+      scannedFiles: 0,
+      totalFiles: 1,
+      acceptedMedia: 0,
+      skippedFiles: 0,
+      currentPath: sourceLabel,
+    })
+
+    const file = await handle.getFile()
+    const parsed = parseGpxPoints(await file.text())
+    const items = await Promise.all(
+      parsed.points.map((point) =>
+        geoPointItemFromParsedPoint(sourceRecord.id, sourceLabel, point),
+      ),
+    )
+
+    onProgress?.({
+      phase: 'scanning',
+      sourceLabel,
+      scannedFiles: 1,
+      totalFiles: 1,
+      acceptedMedia: items.length,
+      skippedFiles: parsed.skippedPoints,
+      currentPath: sourceLabel,
+    })
+    onProgress?.({
+      phase: 'storing',
+      sourceLabel,
+      scannedFiles: 1,
+      totalFiles: 1,
+      acceptedMedia: items.length,
+      skippedFiles: parsed.skippedPoints,
+      currentPath: sourceLabel,
+    })
+
+    await putGeoFileHandle({
+      id: sourceRecord.id,
+      label: sourceRecord.label,
+      addedAt: sourceRecord.addedAt,
+      handle: sourceRecord.handle,
+    })
+
+    if (sourceRecord.duplicateSourceIds.length > 0) {
+      await this.catalog.removeSources(sourceRecord.duplicateSourceIds)
+      await Promise.all(
+        sourceRecord.duplicateSourceIds.map((id) => removeGeoFileHandle(id)),
+      )
+    }
+
+    const source = {
+      id: sourceRecord.id,
+      label: sourceRecord.label,
+      addedAt: sourceRecord.addedAt,
+    }
+    await this.catalog.upsertSource(source)
+    await this.catalog.upsertMedia(items)
+
+    return {
+      source,
+      sourceLabel,
+      scannedFiles: 1,
+      totalFiles: 1,
+      acceptedMedia: items.length,
+      skippedFiles: parsed.skippedPoints,
+      errors: [],
+    }
+  }
+
   dispose(): void {
     this.scanner.dispose()
   }
@@ -205,6 +408,8 @@ class WebFileLocationBackend {
     item: MediaItem,
     location?: MediaLocation,
   ): Promise<string | undefined> {
+    if (item.kind === 'geo_point') return undefined
+
     const selectedLocation = location ?? item.locations[0]
     const sourceId = selectedLocation?.sourceId ?? item.sourceId
     const relativePath = selectedLocation?.relativePath ?? item.relativePath

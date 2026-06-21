@@ -169,7 +169,9 @@ function storedPageSize(): number {
 }
 
 function filterValueToKind(value: string): MediaKind | 'all' {
-  return value === 'image' || value === 'video' ? value : 'all'
+  return value === 'image' || value === 'video' || value === 'geo_point'
+    ? value
+    : 'all'
 }
 
 function statsNumber(value: number | undefined, locale: string): string {
@@ -610,6 +612,37 @@ function App() {
     setBusy(true)
     try {
       const summary = await platform.importer.importFolder((progress) => {
+        setImportProgress(progress)
+      })
+      setResultPage(0)
+      await refreshAll()
+      recordActivity('activityImportedMediaFilesFrom', {
+        count: summary.acceptedMedia.toLocaleString(locale),
+        sourceLabel: summary.sourceLabel,
+      })
+      if (summary.errors.length > 0) {
+        setError(
+          t('filesCouldNotBeRead', {
+            count: summary.errors.length.toLocaleString(locale),
+          }),
+        )
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+      recordActivity('activityImportStopped')
+    } finally {
+      setImportProgress(undefined)
+      setBusy(false)
+    }
+  }, [locale, platform, recordActivity, refreshAll, t])
+
+  const importGeoFile = useCallback(async () => {
+    setError(undefined)
+    setImportProgress(undefined)
+
+    setBusy(true)
+    try {
+      const summary = await platform.importer.importGeoFile((progress) => {
         setImportProgress(progress)
       })
       setResultPage(0)
@@ -1206,6 +1239,14 @@ function App() {
               <FolderOpen size={17} />
               {t('importFolder')}
             </button>
+            <button
+              type="button"
+              onClick={importGeoFile}
+              disabled={busy || !catalogReady}
+            >
+              <MapPin size={17} />
+              {t('importGeoFile')}
+            </button>
             <label className="language-control" title={t('language')}>
               <span aria-hidden="true">
                 <Languages size={16} />
@@ -1411,6 +1452,7 @@ function App() {
                   <option value="all">{t('all')}</option>
                   <option value="image">{t('images')}</option>
                   <option value="video">{t('videos')}</option>
+                  <option value="geo_point">{t('geoPoints')}</option>
                 </select>
               </label>
               <label>
@@ -1651,7 +1693,9 @@ function App() {
               {resultDisplayMode !== 'images' && (
                 <div className="media-card-body">
                   <div className="media-title-row">
-                    {result.item.kind === 'video' ? (
+                    {result.item.kind === 'geo_point' ? (
+                      <MapPin size={15} />
+                    ) : result.item.kind === 'video' ? (
                       <Video size={15} />
                     ) : (
                       <ImageIcon size={15} />

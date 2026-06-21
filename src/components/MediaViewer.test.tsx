@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MediaViewer } from './MediaViewer'
 import { translate } from '../i18n'
 import type { PlatformBackend } from '../platform/types'
@@ -31,6 +31,8 @@ const result: EnrichedSearchResult = {
   mediaId: mediaItem.id,
   distanceMeters: Number.NaN,
 }
+
+afterEach(() => cleanup())
 
 function createPlatform(): PlatformBackend {
   return {
@@ -82,5 +84,56 @@ describe('MediaViewer', () => {
 
     fireEvent.click(screen.getByTitle('Previous item'))
     expect(onNavigate).toHaveBeenCalledWith(48)
+  })
+
+  it('renders geo points without resolving media URLs', async () => {
+    const platform = createPlatform()
+    const geoItem: MediaItem = {
+      ...mediaItem,
+      id: 'geo-1',
+      contentHash: 'geo-1',
+      displayName: 'track.gpx #1',
+      kind: 'geo_point',
+      mimeType: 'application/gpx+xml',
+      latitude: 48.1,
+      longitude: 11.5,
+      capturedAt: Date.parse('2026-06-21T10:00:00Z'),
+      capturedAtSource: 'geo-file',
+      geoSource: 'geo-file',
+      thumbnailKey: undefined,
+      locations: [
+        {
+          id: 'geo-location-1',
+          sourceId: 'source-1',
+          relativePath: 'track.gpx',
+          displayName: 'track.gpx #1',
+          lastSeenAt: 1,
+        },
+      ],
+    }
+    const geoResult: EnrichedSearchResult = {
+      item: geoItem,
+      mediaId: geoItem.id,
+      distanceMeters: Number.NaN,
+    }
+
+    render(
+      <MediaViewer
+        platform={platform}
+        items={[geoResult]}
+        index={0}
+        absoluteIndex={0}
+        canNavigatePrevious={false}
+        canNavigateNext={false}
+        locale="en-US"
+        t={(key, values) => translate('en', key, values)}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findAllByText('geo point')).toHaveLength(2)
+    expect(platform.files.resolveOriginalUrl).not.toHaveBeenCalled()
+    expect(platform.thumbnails.resolveThumbnailUrl).not.toHaveBeenCalled()
   })
 })

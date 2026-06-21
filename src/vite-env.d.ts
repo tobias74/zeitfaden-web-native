@@ -45,4 +45,11 @@ interface Window {
   showDirectoryPicker?: (options?: {
     mode?: FileSystemPermissionMode
   }) => Promise<FileSystemDirectoryHandle>
+  showOpenFilePicker?: (options?: {
+    multiple?: boolean
+    types?: Array<{
+      description?: string
+      accept: Record<string, string[]>
+    }>
+  }) => Promise<FileSystemFileHandle[]>
 }

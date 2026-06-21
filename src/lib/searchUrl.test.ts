@@ -103,7 +103,19 @@ describe('search URL state', () => {
       buildSearchUrlParams(
         { ...state, sort: 'captured_at_desc' },
         defaults,
-      ).toString(),
+    ).toString(),
     ).toBe('')
+  })
+
+  it('round-trips geo point kind filters', () => {
+    const state = parseSearchUrlState(
+      '?kind=geo_point',
+      defaults,
+      allowedIndexes,
+      allowedPageSizes,
+    )
+
+    expect(state.kindFilter).toBe('geo_point')
+    expect(buildSearchUrlParams(state, defaults).get('kind')).toBe('geo_point')
   })
 })

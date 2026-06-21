@@ -56,7 +56,9 @@ function sortMode(value: string | null): SearchSortMode {
 }
 
 function kindFilter(value: string | null): MediaKind | 'all' {
-  if (value === 'image' || value === 'video') return value
+  if (value === 'image' || value === 'video' || value === 'geo_point') {
+    return value
+  }
   return 'all'
 }
 

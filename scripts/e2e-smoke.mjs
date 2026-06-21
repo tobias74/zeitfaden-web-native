@@ -47,8 +47,10 @@ async function main() {
   await waitForText(page, 'zeitfaden')
   await page.locator('.language-control select').selectOption('de')
   await waitForText(page, 'Ordner importieren')
+  await waitForText(page, 'GPX importieren')
   await page.locator('.language-control select').selectOption('en')
   await waitForText(page, 'Import folder')
+  await waitForText(page, 'Import geo file')
 
   await page.getByRole('button', { name: /imprint/i }).click()
   await waitForText(page, 'tobiga UG')

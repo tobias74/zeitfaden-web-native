@@ -58,6 +58,7 @@ export interface CatalogBackend {
 
 export interface ImportBackend {
   importFolder(onProgress?: (progress: ImportProgress) => void): Promise<ImportSummary>
+  importGeoFile(onProgress?: (progress: ImportProgress) => void): Promise<ImportSummary>
   dispose(): void
 }
 

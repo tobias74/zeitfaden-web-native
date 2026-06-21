@@ -66,12 +66,25 @@ class TauriImportBackend implements ImportBackend {
   async importFolder(
     onProgress?: (progress: ImportProgress) => void,
   ): Promise<ImportSummary> {
+    return this.importWithProgress('import_folder', onProgress)
+  }
+
+  async importGeoFile(
+    onProgress?: (progress: ImportProgress) => void,
+  ): Promise<ImportSummary> {
+    return this.importWithProgress('import_geo_file', onProgress)
+  }
+
+  private async importWithProgress(
+    command: string,
+    onProgress?: (progress: ImportProgress) => void,
+  ): Promise<ImportSummary> {
     const unlisten = await listen<ImportProgress>('import-progress', (event) => {
       onProgress?.(event.payload)
     })
 
     try {
-      return await invoke('import_folder')
+      return await invoke(command)
     } finally {
       unlisten()
     }

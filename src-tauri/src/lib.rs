@@ -1,8 +1,8 @@
-use chrono::NaiveDateTime;
-use exif::{In, Reader, Tag, Value as ExifValue};
+use chrono::{DateTime, NaiveDateTime};
+use exif::{In, Reader as ExifReader, Tag, Value as ExifValue};
 use image::ImageFormat;
 use rusqlite::types::Value;
-use rusqlite::{params, params_from_iter, Connection, Row};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -130,6 +130,20 @@ struct ImportSummary {
     errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ParsedGeoPoint {
+    index: i64,
+    latitude: f64,
+    longitude: f64,
+    captured_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ParsedGpx {
+    points: Vec<ParsedGeoPoint>,
+    skipped_points: i64,
+}
+
 #[derive(Default)]
 struct NativeMetadata {
     width: Option<i64>,
@@ -215,7 +229,6 @@ fn ensure_schema(conn: &Connection) -> AppResult<()> {
           display_name TEXT NOT NULL,
           deleted_at INTEGER,
           last_seen_at INTEGER NOT NULL,
-          UNIQUE(source_id, absolute_path),
           FOREIGN KEY(content_hash) REFERENCES media_assets(content_hash) ON DELETE CASCADE
         );
 
@@ -231,6 +244,67 @@ fn ensure_schema(conn: &Connection) -> AppResult<()> {
           ON media_locations(content_hash);
         CREATE INDEX IF NOT EXISTS idx_media_locations_source
           ON media_locations(source_id);
+        CREATE INDEX IF NOT EXISTS idx_media_locations_source_path
+          ON media_locations(source_id, absolute_path);
+        CREATE INDEX IF NOT EXISTS idx_media_locations_deleted
+          ON media_locations(deleted_at);
+        ",
+    )
+    .map_err(|error| error.to_string())?;
+
+    migrate_media_locations_schema(conn)
+}
+
+fn migrate_media_locations_schema(conn: &Connection) -> AppResult<()> {
+    let table_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_locations'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+
+    if !table_sql
+        .as_deref()
+        .unwrap_or_default()
+        .contains("UNIQUE(source_id, absolute_path)")
+    {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "
+        PRAGMA foreign_keys = OFF;
+        ALTER TABLE media_locations RENAME TO media_locations_old;
+        CREATE TABLE media_locations (
+          id TEXT PRIMARY KEY,
+          content_hash TEXT NOT NULL,
+          source_id TEXT NOT NULL,
+          relative_path TEXT,
+          absolute_path TEXT NOT NULL,
+          display_name TEXT NOT NULL,
+          deleted_at INTEGER,
+          last_seen_at INTEGER NOT NULL,
+          FOREIGN KEY(content_hash) REFERENCES media_assets(content_hash) ON DELETE CASCADE
+        );
+        INSERT OR IGNORE INTO media_locations (
+          id, content_hash, source_id, relative_path, absolute_path, display_name,
+          deleted_at, last_seen_at
+        )
+        SELECT
+          id, content_hash, source_id, relative_path, absolute_path, display_name,
+          deleted_at, last_seen_at
+        FROM media_locations_old;
+        DROP TABLE media_locations_old;
+        PRAGMA foreign_keys = ON;
+
+        CREATE INDEX IF NOT EXISTS idx_media_locations_content_hash
+          ON media_locations(content_hash);
+        CREATE INDEX IF NOT EXISTS idx_media_locations_source
+          ON media_locations(source_id);
+        CREATE INDEX IF NOT EXISTS idx_media_locations_source_path
+          ON media_locations(source_id, absolute_path);
         CREATE INDEX IF NOT EXISTS idx_media_locations_deleted
           ON media_locations(deleted_at);
         ",
@@ -242,6 +316,71 @@ fn sha256_string(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn geo_point_identity_input(latitude: f64, longitude: f64, captured_at: i64) -> String {
+    format!("geo_point:v1\n{latitude:.9}\n{longitude:.9}\n{captured_at}")
+}
+
+fn geo_point_content_hash(latitude: f64, longitude: f64, captured_at: i64) -> String {
+    sha256_string(&geo_point_identity_input(latitude, longitude, captured_at))
+}
+
+fn parse_gpx_time(value: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(value.trim())
+        .ok()
+        .map(|date| date.timestamp_millis())
+}
+
+fn valid_latitude(value: f64) -> bool {
+    value.is_finite() && (-90.0..=90.0).contains(&value)
+}
+
+fn valid_longitude(value: f64) -> bool {
+    value.is_finite() && (-180.0..=180.0).contains(&value)
+}
+
+fn parse_gpx_points(xml: &str) -> AppResult<ParsedGpx> {
+    let document = roxmltree::Document::parse(xml).map_err(|error| error.to_string())?;
+    let mut points = Vec::<ParsedGeoPoint>::new();
+    let mut skipped_points = 0_i64;
+    let mut index = 0_i64;
+
+    for node in document.descendants().filter(|node| node.is_element()) {
+        if !matches!(node.tag_name().name(), "trkpt" | "rtept" | "wpt") {
+            continue;
+        }
+
+        index += 1;
+        let latitude = node.attribute("lat").and_then(|value| value.parse().ok());
+        let longitude = node.attribute("lon").and_then(|value| value.parse().ok());
+        let captured_at = node
+            .children()
+            .find(|child| child.is_element() && child.tag_name().name() == "time")
+            .and_then(|child| child.text())
+            .and_then(parse_gpx_time);
+
+        match (latitude, longitude, captured_at) {
+            (Some(latitude), Some(longitude), Some(captured_at))
+                if valid_latitude(latitude) && valid_longitude(longitude) =>
+            {
+                points.push(ParsedGeoPoint {
+                    index,
+                    latitude,
+                    longitude,
+                    captured_at,
+                });
+            }
+            _ => {
+                skipped_points += 1;
+            }
+        }
+    }
+
+    Ok(ParsedGpx {
+        points,
+        skipped_points,
+    })
 }
 
 fn file_hash(path: &Path) -> AppResult<String> {
@@ -370,7 +509,7 @@ fn read_image_metadata(path: &Path) -> NativeMetadata {
         Err(_) => return metadata,
     };
     let mut reader = BufReader::new(file);
-    let exif = match Reader::new().read_from_container(&mut reader) {
+    let exif = match ExifReader::new().read_from_container(&mut reader) {
         Ok(exif) => exif,
         Err(_) => return metadata,
     };
@@ -518,6 +657,68 @@ fn source_from_root(root: &Path) -> MediaSource {
             .unwrap_or(&absolute)
             .to_string(),
         added_at: now_ms(),
+    }
+}
+
+fn source_from_file(path: &Path) -> MediaSource {
+    let absolute = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    MediaSource {
+        id: sha256_string(&absolute),
+        label: path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(&absolute)
+            .to_string(),
+        added_at: now_ms(),
+    }
+}
+
+fn geo_point_item_from_parsed_point(
+    source: &MediaSource,
+    absolute_path: &str,
+    point: &ParsedGeoPoint,
+) -> MediaItem {
+    let content_hash = geo_point_content_hash(point.latitude, point.longitude, point.captured_at);
+    let last_seen_at = now_ms();
+    let display_name = format!("{} #{}", source.label, point.index);
+    let location = MediaLocation {
+        id: sha256_string(&format!(
+            "{}\n{}\n{}",
+            source.id, absolute_path, content_hash
+        )),
+        source_id: source.id.clone(),
+        relative_path: Some(source.label.clone()),
+        absolute_path: Some(absolute_path.to_string()),
+        display_name: display_name.clone(),
+        deleted_at: None,
+        last_seen_at,
+    };
+
+    MediaItem {
+        id: content_hash.clone(),
+        content_hash,
+        source_id: source.id.clone(),
+        relative_path: source.label.clone(),
+        display_name,
+        kind: "geo_point".to_string(),
+        mime_type: "application/gpx+xml".to_string(),
+        size_bytes: 0,
+        width: None,
+        height: None,
+        duration_ms: None,
+        captured_at: Some(point.captured_at),
+        captured_at_source: Some("geo-file".to_string()),
+        latitude: Some(point.latitude),
+        longitude: Some(point.longitude),
+        geo_source: Some("geo-file".to_string()),
+        thumbnail_key: None,
+        deleted_at: None,
+        last_seen_at,
+        locations: vec![location],
     }
 }
 
@@ -685,13 +886,6 @@ fn upsert_media_tx(conn: &mut Connection, items: &[MediaItem]) -> AppResult<usiz
                   source_id = excluded.source_id,
                   relative_path = excluded.relative_path,
                   absolute_path = excluded.absolute_path,
-                  display_name = excluded.display_name,
-                  deleted_at = excluded.deleted_at,
-                  last_seen_at = excluded.last_seen_at
-                ON CONFLICT(source_id, absolute_path) DO UPDATE SET
-                  id = excluded.id,
-                  content_hash = excluded.content_hash,
-                  relative_path = excluded.relative_path,
                   display_name = excluded.display_name,
                   deleted_at = excluded.deleted_at,
                   last_seen_at = excluded.last_seen_at
@@ -1139,6 +1333,80 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
 }
 
 #[tauri::command]
+fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("GPX files", &["gpx"])
+        .pick_file()
+    else {
+        return Err("Import cancelled".to_string());
+    };
+    let path = path.canonicalize().unwrap_or(path);
+    let absolute_path = path.to_string_lossy().to_string();
+    let source = source_from_file(&path);
+    let source_label = source.label.clone();
+
+    emit_progress(
+        &window,
+        ImportProgress {
+            phase: "counting".to_string(),
+            source_label: source_label.clone(),
+            scanned_files: 0,
+            total_files: 1,
+            accepted_media: 0,
+            skipped_files: 0,
+            current_path: Some(source_label.clone()),
+        },
+    );
+
+    let xml = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let parsed = parse_gpx_points(&xml)?;
+    let items = parsed
+        .points
+        .iter()
+        .map(|point| geo_point_item_from_parsed_point(&source, &absolute_path, point))
+        .collect::<Vec<_>>();
+
+    emit_progress(
+        &window,
+        ImportProgress {
+            phase: "scanning".to_string(),
+            source_label: source_label.clone(),
+            scanned_files: 1,
+            total_files: 1,
+            accepted_media: items.len() as i64,
+            skipped_files: parsed.skipped_points,
+            current_path: Some(source_label.clone()),
+        },
+    );
+    emit_progress(
+        &window,
+        ImportProgress {
+            phase: "storing".to_string(),
+            source_label: source_label.clone(),
+            scanned_files: 1,
+            total_files: 1,
+            accepted_media: items.len() as i64,
+            skipped_files: parsed.skipped_points,
+            current_path: Some(source_label.clone()),
+        },
+    );
+
+    let mut conn = connect(&app)?;
+    upsert_source_tx(&conn, &source)?;
+    upsert_media_tx(&mut conn, &items)?;
+
+    Ok(ImportSummary {
+        source,
+        source_label,
+        scanned_files: 1,
+        total_files: 1,
+        accepted_media: items.len() as i64,
+        skipped_files: parsed.skipped_points,
+        errors: Vec::new(),
+    })
+}
+
+#[tauri::command]
 fn resolve_thumbnail_path(app: AppHandle, thumbnail_key: String) -> AppResult<Option<String>> {
     let file_name = Path::new(&thumbnail_key)
         .file_name()
@@ -1170,6 +1438,7 @@ pub fn run() {
             count_media,
             clear_catalog,
             import_folder,
+            import_geo_file,
             resolve_thumbnail_path,
             reveal_location
         ])
@@ -1228,6 +1497,117 @@ mod tests {
         assert_eq!(detect_media_kind(Path::new("a.JPG")), Some("image"));
         assert_eq!(detect_media_kind(Path::new("clip.mp4")), Some("video"));
         assert_eq!(detect_media_kind(Path::new("notes.txt")), None);
+        assert_eq!(detect_media_kind(Path::new("track.gpx")), None);
+    }
+
+    #[test]
+    fn normalizes_geo_point_identity_with_9_decimals() {
+        assert_eq!(
+            geo_point_identity_input(48.1234567894, 11.9876543214, 1_782_036_930_123),
+            "geo_point:v1\n48.123456789\n11.987654321\n1782036930123"
+        );
+        assert_eq!(
+            geo_point_content_hash(48.1234567894, 11.9876543214, 1_782_036_930_123).len(),
+            64
+        );
+    }
+
+    #[test]
+    fn parses_timed_gpx_points_and_skips_invalid_entries() {
+        let parsed = parse_gpx_points(
+            r#"
+            <gpx>
+              <trk><trkseg>
+                <trkpt lat="48.1" lon="11.5"><time>2026-06-21T10:00:00Z</time></trkpt>
+                <trkpt lat="91" lon="11.5"><time>2026-06-21T10:01:00Z</time></trkpt>
+                <trkpt lat="48.2" lon="11.6"></trkpt>
+              </trkseg></trk>
+              <rte><rtept lat="48.3" lon="11.7"><time>2026-06-21T10:02:00Z</time></rtept></rte>
+              <wpt lat="48.4" lon="11.8"><time>2026-06-21T10:03:00Z</time></wpt>
+            </gpx>
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.skipped_points, 2);
+        assert_eq!(parsed.points.len(), 3);
+        assert_eq!(parsed.points[0].index, 1);
+        assert_eq!(parsed.points[1].index, 4);
+        assert_eq!(parsed.points[2].index, 5);
+    }
+
+    #[test]
+    fn upsert_allows_many_geo_points_from_one_source_path() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+
+        let source = MediaSource {
+            id: "gpx-source".to_string(),
+            label: "track.gpx".to_string(),
+            added_at: now_ms(),
+        };
+        let first = ParsedGeoPoint {
+            index: 1,
+            latitude: 48.1,
+            longitude: 11.5,
+            captured_at: 1_782_036_000_000,
+        };
+        let second = ParsedGeoPoint {
+            index: 2,
+            latitude: 48.2,
+            longitude: 11.6,
+            captured_at: 1_782_036_060_000,
+        };
+        let items = vec![
+            geo_point_item_from_parsed_point(&source, "/tmp/track.gpx", &first),
+            geo_point_item_from_parsed_point(&source, "/tmp/track.gpx", &second),
+        ];
+
+        upsert_source_tx(&conn, &source).unwrap();
+        upsert_media_tx(&mut conn, &items).unwrap();
+        upsert_media_tx(&mut conn, &items).unwrap();
+
+        let asset_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM media_assets", [], |row| row.get(0))
+            .unwrap();
+        let location_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM media_locations", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(asset_count, 2);
+        assert_eq!(location_count, 2);
+    }
+
+    #[test]
+    fn migrates_location_schema_to_remove_source_path_uniqueness() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE media_locations (
+              id TEXT PRIMARY KEY,
+              content_hash TEXT NOT NULL,
+              source_id TEXT NOT NULL,
+              relative_path TEXT,
+              absolute_path TEXT NOT NULL,
+              display_name TEXT NOT NULL,
+              deleted_at INTEGER,
+              last_seen_at INTEGER NOT NULL,
+              UNIQUE(source_id, absolute_path)
+            );
+            ",
+        )
+        .unwrap();
+
+        ensure_schema(&conn).unwrap();
+
+        let table_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_locations'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!table_sql.contains("UNIQUE(source_id, absolute_path)"));
     }
 
     #[test]

@@ -2,6 +2,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ExternalLink,
+  MapPin,
   X,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
@@ -141,6 +142,11 @@ export function MediaViewer({
       setActionError(undefined)
       setMediaUrl({ loading: true, source: 'none' })
 
+      if (item.kind === 'geo_point') {
+        setMediaUrl({ loading: false, source: 'none' })
+        return
+      }
+
       try {
         originalUrl = await platform.files.resolveOriginalUrl(item, location)
       } catch {
@@ -253,7 +259,13 @@ export function MediaViewer({
             {!mediaUrl.loading && mediaUrl.url && item.kind === 'video' && (
               <video src={mediaUrl.url} controls />
             )}
-            {!mediaUrl.loading && !mediaUrl.url && (
+            {!mediaUrl.loading && item.kind === 'geo_point' && (
+              <div className="media-viewer-placeholder">
+                <MapPin size={34} />
+                <span>{t('geo_point')}</span>
+              </div>
+            )}
+            {!mediaUrl.loading && !mediaUrl.url && item.kind !== 'geo_point' && (
               <div className="media-viewer-placeholder">
                 {item.kind === 'video' ? 'VID' : 'IMG'}
               </div>

@@ -1,12 +1,13 @@
-export type MediaKind = 'image' | 'video'
+export type MediaKind = 'image' | 'video' | 'geo_point'
 
 export type CapturedAtSource =
   | 'exif'
+  | 'geo-file'
   | 'video-metadata'
   | 'filesystem'
   | 'manual'
 
-export type GeoSource = 'exif' | 'video-metadata' | 'manual'
+export type GeoSource = 'exif' | 'geo-file' | 'video-metadata' | 'manual'
 
 export type MediaLocation = {
   id: string
