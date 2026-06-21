@@ -1074,8 +1074,6 @@ function App() {
     ? viewerSession.absoluteIndex - viewerSession.windowOffset
     : -1
   const mapResultItems = useMemo(() => mediaItemsToResults(mapItems), [mapItems])
-  const legalPageTitle =
-    activePage === 'privacy' ? t('privacy') : t('imprint')
   const privacyHtml = language === 'de' ? privacyDeHtml : privacyEnHtml
 
   if (activePage !== 'app') {
@@ -1097,7 +1095,6 @@ function App() {
                 zeitfaden
               </a>
             </h1>
-            <p className="subtle">{legalPageTitle}</p>
           </div>
           <div className="topbar-tools">
             <nav className="topbar-nav" aria-label="Legal">
@@ -1191,11 +1188,6 @@ function App() {
               zeitfaden
             </a>
           </h1>
-          <p className="subtle">
-            {catalogInfo
-              ? `SQLite ${catalogInfo.sqliteVersion} · ${catalogInfo.storageMode.toUpperCase()} · ${catalogInfo.filename}`
-              : t('catalogStatusStarting')}
-          </p>
         </div>
         <div className="topbar-tools">
           <nav className="topbar-nav" aria-label="Legal">

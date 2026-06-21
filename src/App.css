@@ -24,21 +24,16 @@
 }
 
 .topbar {
-  min-height: 72px;
+  min-height: 56px;
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(620px, 920px);
+  grid-template-columns: minmax(260px, 420px) minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
   gap: 16px;
   padding: 12px 14px;
 }
 
 .topbar-copy {
   min-width: 0;
-}
-
-.legal-topbar {
-  grid-template-columns: minmax(260px, 1fr) minmax(360px, 620px);
 }
 
 .legal-content {
@@ -105,6 +100,7 @@
   font-size: 22px;
   font-weight: 720;
   letter-spacing: 0;
+  line-height: 1;
   color: #111816;
 }
 
@@ -128,7 +124,7 @@
 .topbar-tools {
   min-width: 0;
   display: grid;
-  grid-template-columns: auto minmax(160px, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 18px;
 }

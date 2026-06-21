@@ -45,8 +45,6 @@ async function main() {
   await page.screenshot({ path: '/tmp/ding-e2e-initial.png', fullPage: true })
 
   await waitForText(page, 'zeitfaden')
-  await waitForText(page, 'SQLite')
-  await waitForText(page, 'OPFS')
   await page.locator('.language-control select').selectOption('de')
   await waitForText(page, 'Ordner importieren')
   await page.locator('.language-control select').selectOption('en')
