@@ -4,6 +4,7 @@ import {
   Calendar,
   ChevronLeft,
   ChevronRight,
+  FileText,
   FolderOpen,
   Images,
   Image as ImageIcon,
@@ -264,6 +265,7 @@ function App() {
   const catalog = platform.catalog
   const registry = useMemo(() => new GeoIndexRegistry(), [])
   const [language, setLanguage] = useState<Language>(() => storedLanguage())
+  const [activePage, setActivePage] = useState<'app' | 'imprint'>('app')
   const locale = languageLocale(language)
   const t = useCallback(
     (key: TranslationKey, values?: TranslationValues) =>
@@ -1012,6 +1014,57 @@ function App() {
     ? viewerSession.absoluteIndex - viewerSession.windowOffset
     : -1
 
+  if (activePage === 'imprint') {
+    return (
+      <main className="imprint-shell">
+        <header className="topbar imprint-topbar">
+          <div className="topbar-copy">
+            <h1>Geo Media Index Lab</h1>
+            <p className="subtle">{t('imprint')}</p>
+          </div>
+          <div className="imprint-actions">
+            <label className="language-control" title={t('language')}>
+              <span aria-hidden="true">
+                <Languages size={16} />
+              </span>
+              <select
+                aria-label={t('language')}
+                value={language}
+                onChange={(event) => changeLanguage(event.target.value)}
+              >
+                {LANGUAGES.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button type="button" onClick={() => setActivePage('app')}>
+              <ChevronLeft size={17} />
+              {t('backToApp')}
+            </button>
+          </div>
+        </header>
+        <section className="imprint-content">
+          <article className="imprint-panel">
+            <div>
+              <FileText size={20} />
+              <h2>{t('imprint')}</h2>
+            </div>
+            <address className="imprint-address">
+              <strong>tobiga UG (haftungsbeschränkt)</strong>
+              <span>Tobias Gassmann</span>
+              <span>Bodenseestr. 4a</span>
+              <span>81241 München</span>
+              <span>HRB 219431</span>
+              <span>USt-IdNr. DE 301206623</span>
+            </address>
+          </article>
+        </section>
+      </main>
+    )
+  }
+
   return (
     <main className="app-shell" style={resizeStyle}>
       <header className="topbar">
@@ -1078,6 +1131,17 @@ function App() {
                   >
                     <Trash2 size={16} />
                     {t('clearCatalog')}
+                  </button>
+                </div>
+                <div className="display-section">
+                  <span>{t('legal')}</span>
+                  <button
+                    type="button"
+                    className="settings-link-button"
+                    onClick={() => setActivePage('imprint')}
+                  >
+                    <FileText size={16} />
+                    {t('imprint')}
                   </button>
                 </div>
               </div>

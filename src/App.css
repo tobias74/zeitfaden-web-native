@@ -7,6 +7,14 @@
   overflow: hidden;
 }
 
+.imprint-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  padding: 12px;
+}
+
 .topbar,
 .library-strip,
 .panel {
@@ -27,6 +35,63 @@
 
 .topbar-copy {
   min-width: 0;
+}
+
+.imprint-topbar {
+  grid-template-columns: minmax(260px, 1fr) auto;
+}
+
+.imprint-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.imprint-content {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  align-items: start;
+  justify-items: center;
+  padding: 52px 12px;
+}
+
+.imprint-panel {
+  width: min(680px, 100%);
+  display: grid;
+  gap: 18px;
+  padding: 24px;
+  border: 1px solid #d9dedb;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.imprint-panel > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #1b5a4d;
+}
+
+.imprint-panel h2 {
+  color: #111816;
+  font-size: 18px;
+  font-weight: 720;
+  letter-spacing: 0;
+}
+
+.imprint-address {
+  display: grid;
+  gap: 6px;
+  color: #1d2824;
+  font-size: 15px;
+  font-style: normal;
+  line-height: 1.45;
+}
+
+.imprint-address strong {
+  font-weight: 720;
 }
 
 .topbar h1 {
@@ -547,6 +612,11 @@
   justify-content: flex-start;
 }
 
+.settings-link-button {
+  width: 100%;
+  justify-content: flex-start;
+}
+
 .segmented-control {
   min-width: 0;
   display: grid;
@@ -1024,6 +1094,7 @@
   }
 
   .topbar,
+  .imprint-topbar,
   .workspace,
   .library-header {
     grid-template-columns: 1fr;
@@ -1076,6 +1147,19 @@
   .language-control {
     flex: 1 1 150px;
     justify-content: space-between;
+  }
+
+  .imprint-actions {
+    flex-wrap: wrap;
+    justify-content: stretch;
+  }
+
+  .imprint-actions button {
+    flex: 1 1 150px;
+  }
+
+  .imprint-content {
+    padding: 18px 0;
   }
 
   .workspace {

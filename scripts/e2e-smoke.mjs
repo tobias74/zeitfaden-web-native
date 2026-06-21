@@ -52,6 +52,14 @@ async function main() {
   await page.locator('.language-control select').selectOption('en')
   await waitForText(page, 'Import folder')
 
+  await page.getByText('Settings', { exact: true }).click()
+  await page.getByRole('button', { name: /imprint/i }).click()
+  await waitForText(page, 'tobiga UG')
+  await waitForText(page, 'USt-IdNr. DE 301206623')
+  await page.screenshot({ path: '/tmp/ding-e2e-imprint.png', fullPage: true })
+  await page.getByRole('button', { name: /back to app/i }).click()
+  await waitForText(page, 'Catalog results')
+
   const verticalHandle = page.getByRole('separator', {
     name: /resize left tools and results/i,
   })
@@ -186,6 +194,7 @@ async function main() {
   console.log('E2E smoke passed')
   console.log('Screenshots:')
   console.log('/tmp/ding-e2e-initial.png')
+  console.log('/tmp/ding-e2e-imprint.png')
   console.log('/tmp/ding-e2e-settings.png')
   console.log('/tmp/ding-e2e-final.png')
 }
