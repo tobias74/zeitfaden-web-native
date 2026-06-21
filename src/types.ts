@@ -13,6 +13,8 @@ export type GeoSource = 'exif' | 'geo-file' | 'video-metadata' | 'manual'
 export type MediaLocation = {
   id: string
   sourceId: string
+  sourceLabel?: string
+  sourceAddedAt?: number
   relativePath?: string
   absolutePath?: string
   displayName: string

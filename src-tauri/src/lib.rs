@@ -4,7 +4,7 @@ use image::ImageFormat;
 use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader as XmlReader;
 use rusqlite::types::Value;
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
+use rusqlite::{params_from_iter, Connection, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
@@ -21,8 +21,8 @@ type AppResult<T> = Result<T, String>;
 
 const IMPORT_BATCH_SIZE: usize = 1000;
 const SQLITE_BIND_CHUNK_LIMIT: usize = 12000;
-const ASSET_BIND_COLUMNS: usize = 15;
-const LOCATION_BIND_COLUMNS: usize = 8;
+const ASSET_BIND_COLUMNS: usize = 14;
+const LOCATION_BIND_COLUMNS: usize = 9;
 const GEO_IMPORT_PREFIX_BYTES: usize = 512 * 1024;
 const PROGRESS_HEARTBEAT_MS: u128 = 1000;
 
@@ -47,10 +47,11 @@ struct MediaSource {
 struct MediaLocation {
     id: String,
     source_id: String,
+    source_label: Option<String>,
+    source_added_at: Option<i64>,
     relative_path: Option<String>,
     absolute_path: Option<String>,
     display_name: String,
-    deleted_at: Option<i64>,
     last_seen_at: i64,
 }
 
@@ -74,7 +75,6 @@ struct MediaItem {
     longitude: Option<f64>,
     geo_source: Option<String>,
     thumbnail_key: Option<String>,
-    deleted_at: Option<i64>,
     last_seen_at: i64,
     locations: Vec<MediaLocation>,
 }
@@ -671,7 +671,7 @@ fn app_cache_dir(app: &AppHandle) -> AppResult<PathBuf> {
 }
 
 fn catalog_path(app: &AppHandle) -> AppResult<PathBuf> {
-    Ok(app_data_dir(app)?.join("catalog.sqlite3"))
+    Ok(app_data_dir(app)?.join("catalog-v4.sqlite3"))
 }
 
 fn connect(app: &AppHandle) -> AppResult<Connection> {
@@ -684,14 +684,6 @@ fn connect(app: &AppHandle) -> AppResult<Connection> {
 fn ensure_schema(conn: &Connection) -> AppResult<()> {
     conn.execute_batch(
         "
-        PRAGMA foreign_keys = ON;
-
-        CREATE TABLE IF NOT EXISTS media_sources (
-          id TEXT PRIMARY KEY,
-          label TEXT NOT NULL,
-          added_at INTEGER NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS media_assets (
           content_hash TEXT PRIMARY KEY,
           kind TEXT NOT NULL,
@@ -706,7 +698,6 @@ fn ensure_schema(conn: &Connection) -> AppResult<()> {
           longitude REAL,
           geo_source TEXT,
           thumbnail_key TEXT,
-          deleted_at INTEGER,
           last_seen_at INTEGER NOT NULL
         );
 
@@ -714,12 +705,12 @@ fn ensure_schema(conn: &Connection) -> AppResult<()> {
           id TEXT PRIMARY KEY,
           content_hash TEXT NOT NULL,
           source_id TEXT NOT NULL,
+          source_label TEXT NOT NULL,
+          source_added_at INTEGER NOT NULL,
           relative_path TEXT,
           absolute_path TEXT NOT NULL,
           display_name TEXT NOT NULL,
-          deleted_at INTEGER,
-          last_seen_at INTEGER NOT NULL,
-          FOREIGN KEY(content_hash) REFERENCES media_assets(content_hash) ON DELETE CASCADE
+          last_seen_at INTEGER NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_media_assets_captured_at
@@ -728,75 +719,10 @@ fn ensure_schema(conn: &Connection) -> AppResult<()> {
           ON media_assets(kind);
         CREATE INDEX IF NOT EXISTS idx_media_assets_geo
           ON media_assets(latitude, longitude);
-        CREATE INDEX IF NOT EXISTS idx_media_assets_deleted
-          ON media_assets(deleted_at);
         CREATE INDEX IF NOT EXISTS idx_media_locations_content_hash
           ON media_locations(content_hash);
         CREATE INDEX IF NOT EXISTS idx_media_locations_source
           ON media_locations(source_id);
-        CREATE INDEX IF NOT EXISTS idx_media_locations_source_path
-          ON media_locations(source_id, absolute_path);
-        CREATE INDEX IF NOT EXISTS idx_media_locations_deleted
-          ON media_locations(deleted_at);
-        ",
-    )
-    .map_err(|error| error.to_string())?;
-
-    migrate_media_locations_schema(conn)
-}
-
-fn migrate_media_locations_schema(conn: &Connection) -> AppResult<()> {
-    let table_sql: Option<String> = conn
-        .query_row(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_locations'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
-
-    if !table_sql
-        .as_deref()
-        .unwrap_or_default()
-        .contains("UNIQUE(source_id, absolute_path)")
-    {
-        return Ok(());
-    }
-
-    conn.execute_batch(
-        "
-        PRAGMA foreign_keys = OFF;
-        ALTER TABLE media_locations RENAME TO media_locations_old;
-        CREATE TABLE media_locations (
-          id TEXT PRIMARY KEY,
-          content_hash TEXT NOT NULL,
-          source_id TEXT NOT NULL,
-          relative_path TEXT,
-          absolute_path TEXT NOT NULL,
-          display_name TEXT NOT NULL,
-          deleted_at INTEGER,
-          last_seen_at INTEGER NOT NULL,
-          FOREIGN KEY(content_hash) REFERENCES media_assets(content_hash) ON DELETE CASCADE
-        );
-        INSERT OR IGNORE INTO media_locations (
-          id, content_hash, source_id, relative_path, absolute_path, display_name,
-          deleted_at, last_seen_at
-        )
-        SELECT
-          id, content_hash, source_id, relative_path, absolute_path, display_name,
-          deleted_at, last_seen_at
-        FROM media_locations_old;
-        DROP TABLE media_locations_old;
-        PRAGMA foreign_keys = ON;
-
-        CREATE INDEX IF NOT EXISTS idx_media_locations_content_hash
-          ON media_locations(content_hash);
-        CREATE INDEX IF NOT EXISTS idx_media_locations_source
-          ON media_locations(source_id);
-        CREATE INDEX IF NOT EXISTS idx_media_locations_source_path
-          ON media_locations(source_id, absolute_path);
-        CREATE INDEX IF NOT EXISTS idx_media_locations_deleted
-          ON media_locations(deleted_at);
         ",
     )
     .map_err(|error| error.to_string())
@@ -1585,7 +1511,7 @@ fn write_thumbnail(app: &AppHandle, content_hash: &str, path: &Path) -> Option<S
 
 fn media_from_path(
     app: &AppHandle,
-    source_id: &str,
+    source: &MediaSource,
     root: &Path,
     path: &Path,
 ) -> AppResult<Option<MediaItem>> {
@@ -1600,15 +1526,16 @@ fn media_from_path(
         .to_string();
     let relative_path = relative_path(root, path);
     let content_hash = file_hash(path)?;
-    let location_id = sha256_string(&format!("{source_id}\n{absolute_path}"));
+    let location_id = sha256_string(&format!("{}\n{absolute_path}", source.id));
     let last_seen_at = now_ms();
     let location = MediaLocation {
         id: location_id,
-        source_id: source_id.to_string(),
+        source_id: source.id.clone(),
+        source_label: Some(source.label.clone()),
+        source_added_at: Some(source.added_at),
         relative_path: Some(relative_path.clone()),
         absolute_path: Some(absolute_path),
         display_name: display_name(path),
-        deleted_at: None,
         last_seen_at,
     };
     let size_bytes = path
@@ -1618,7 +1545,7 @@ fn media_from_path(
     let mut item = MediaItem {
         id: content_hash.clone(),
         content_hash: content_hash.clone(),
-        source_id: source_id.to_string(),
+        source_id: source.id.clone(),
         relative_path,
         display_name: location.display_name.clone(),
         kind: kind.to_string(),
@@ -1633,7 +1560,6 @@ fn media_from_path(
         longitude: None,
         geo_source: None,
         thumbnail_key: None,
-        deleted_at: None,
         last_seen_at,
         locations: vec![location],
     };
@@ -1702,10 +1628,11 @@ fn geo_point_item_from_parsed_point(
             source.id, absolute_path, content_hash
         )),
         source_id: source.id.clone(),
+        source_label: Some(source.label.clone()),
+        source_added_at: Some(source.added_at),
         relative_path: Some(source.label.clone()),
         absolute_path: Some(absolute_path.to_string()),
         display_name: display_name.clone(),
-        deleted_at: None,
         last_seen_at,
     };
 
@@ -1727,7 +1654,6 @@ fn geo_point_item_from_parsed_point(
         longitude: Some(point.longitude),
         geo_source: Some("geo-file".to_string()),
         thumbnail_key: None,
-        deleted_at: None,
         last_seen_at,
         locations: vec![location],
     }
@@ -1753,7 +1679,6 @@ fn asset_from_row(row: &Row<'_>) -> rusqlite::Result<MediaItem> {
         longitude: row.get("longitude")?,
         geo_source: row.get("geo_source")?,
         thumbnail_key: row.get("thumbnail_key")?,
-        deleted_at: row.get("deleted_at")?,
         last_seen_at: row.get("last_seen_at")?,
         locations: Vec::new(),
     })
@@ -1763,10 +1688,11 @@ fn location_from_row(row: &Row<'_>) -> rusqlite::Result<MediaLocation> {
     Ok(MediaLocation {
         id: row.get("id")?,
         source_id: row.get("source_id")?,
+        source_label: row.get("source_label")?,
+        source_added_at: row.get("source_added_at")?,
         relative_path: row.get("relative_path")?,
         absolute_path: row.get("absolute_path")?,
         display_name: row.get("display_name")?,
-        deleted_at: row.get("deleted_at")?,
         last_seen_at: row.get("last_seen_at")?,
     })
 }
@@ -1789,25 +1715,23 @@ fn attach_locations(
         "
         SELECT *
         FROM media_locations
-        WHERE deleted_at IS NULL AND content_hash IN ({placeholders})
+        WHERE content_hash IN ({placeholders})
         ORDER BY relative_path ASC, absolute_path ASC, id ASC
         "
     );
     let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
     let rows = stmt
-        .query_map(params_from_iter(hashes.iter()), location_from_row)
+        .query_map(params_from_iter(hashes.iter()), |row| {
+            Ok((
+                row.get::<_, String>("content_hash")?,
+                location_from_row(row)?,
+            ))
+        })
         .map_err(|error| error.to_string())?;
     let mut by_hash = std::collections::HashMap::<String, Vec<MediaLocation>>::new();
 
     for row in rows {
-        let location = row.map_err(|error| error.to_string())?;
-        let content_hash: String = conn
-            .query_row(
-                "SELECT content_hash FROM media_locations WHERE id = ?",
-                params![location.id],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?;
+        let (content_hash, location) = row.map_err(|error| error.to_string())?;
         by_hash.entry(content_hash).or_default().push(location);
     }
 
@@ -1839,18 +1763,7 @@ fn attach_locations(
         .collect())
 }
 
-fn upsert_source_tx(conn: &Connection, source: &MediaSource) -> AppResult<()> {
-    conn.execute(
-        "
-        INSERT INTO media_sources (id, label, added_at)
-        VALUES (?1, ?2, ?3)
-        ON CONFLICT(id) DO UPDATE SET
-          label = excluded.label,
-          added_at = excluded.added_at
-        ",
-        params![source.id, source.label, source.added_at],
-    )
-    .map_err(|error| error.to_string())?;
+fn upsert_source_tx(_conn: &Connection, _source: &MediaSource) -> AppResult<()> {
     Ok(())
 }
 
@@ -1921,7 +1834,6 @@ fn asset_row(item: &MediaItem) -> Vec<Value> {
         value_optional_f64(item.longitude),
         value_optional_text(&item.geo_source),
         value_optional_text(&item.thumbnail_key),
-        value_optional_i64(item.deleted_at),
         Value::Integer(item.last_seen_at),
     ]
 }
@@ -1939,10 +1851,11 @@ fn location_rows(item: &MediaItem) -> Vec<Vec<Value>> {
                 value_text(&location.id),
                 value_text(&item.content_hash),
                 value_text(&location.source_id),
+                value_text(location.source_label.as_deref().unwrap_or(&item.source_id)),
+                Value::Integer(location.source_added_at.unwrap_or(item.last_seen_at)),
                 value_optional_text(&location.relative_path),
                 value_text(&absolute_path),
                 value_text(&location.display_name),
-                value_optional_i64(location.deleted_at),
                 Value::Integer(location.last_seen_at),
             ]
         })
@@ -1958,7 +1871,7 @@ fn upsert_media_tx(conn: &mut Connection, items: &[MediaItem]) -> AppResult<usiz
         INSERT INTO media_assets (
           content_hash, kind, mime_type, size_bytes, width, height, duration_ms,
           captured_at, captured_at_source, latitude, longitude, geo_source,
-          thumbnail_key, deleted_at, last_seen_at
+          thumbnail_key, last_seen_at
         )
         ",
         "
@@ -1975,7 +1888,6 @@ fn upsert_media_tx(conn: &mut Connection, items: &[MediaItem]) -> AppResult<usiz
           longitude = excluded.longitude,
           geo_source = excluded.geo_source,
           thumbnail_key = COALESCE(excluded.thumbnail_key, media_assets.thumbnail_key),
-          deleted_at = excluded.deleted_at,
           last_seen_at = MAX(media_assets.last_seen_at, excluded.last_seen_at)
         ",
         &asset_rows,
@@ -1987,18 +1899,19 @@ fn upsert_media_tx(conn: &mut Connection, items: &[MediaItem]) -> AppResult<usiz
         &tx,
         "
         INSERT INTO media_locations (
-          id, content_hash, source_id, relative_path, absolute_path, display_name,
-          deleted_at, last_seen_at
+          id, content_hash, source_id, source_label, source_added_at,
+          relative_path, absolute_path, display_name, last_seen_at
         )
         ",
         "
         ON CONFLICT(id) DO UPDATE SET
           content_hash = excluded.content_hash,
           source_id = excluded.source_id,
+          source_label = excluded.source_label,
+          source_added_at = excluded.source_added_at,
           relative_path = excluded.relative_path,
           absolute_path = excluded.absolute_path,
           display_name = excluded.display_name,
-          deleted_at = excluded.deleted_at,
           last_seen_at = excluded.last_seen_at
         ",
         &location_rows,
@@ -2037,8 +1950,8 @@ fn upsert_media(app: AppHandle, items: Vec<MediaItem>) -> AppResult<usize> {
 fn list_media(app: AppHandle, query: CatalogQuery) -> AppResult<Vec<MediaItem>> {
     let conn = connect(&app)?;
     let mut where_sql = vec![
-        "a.deleted_at IS NULL".to_string(),
-        "EXISTS (SELECT 1 FROM media_locations l WHERE l.content_hash = a.content_hash AND l.deleted_at IS NULL)".to_string(),
+        "EXISTS (SELECT 1 FROM media_locations l WHERE l.content_hash = a.content_hash)"
+            .to_string(),
     ];
     let mut bind = Vec::<Value>::new();
 
@@ -2050,7 +1963,7 @@ fn list_media(app: AppHandle, query: CatalogQuery) -> AppResult<Vec<MediaItem>> 
     }
     if let Some(source_id) = query.source_id.as_ref() {
         where_sql.push(
-            "EXISTS (SELECT 1 FROM media_locations ls WHERE ls.content_hash = a.content_hash AND ls.deleted_at IS NULL AND ls.source_id = ?)".to_string(),
+            "EXISTS (SELECT 1 FROM media_locations ls WHERE ls.content_hash = a.content_hash AND ls.source_id = ?)".to_string(),
         );
         bind.push(Value::Text(source_id.clone()));
     }
@@ -2141,10 +2054,10 @@ fn get_media_by_ids(app: AppHandle, ids: Vec<String>) -> AppResult<Vec<MediaItem
 fn get_geo_points(app: AppHandle, range: TimeRange) -> AppResult<Vec<GeoIndexPoint>> {
     let conn = connect(&app)?;
     let mut where_sql = vec![
-        "a.deleted_at IS NULL".to_string(),
         "a.latitude IS NOT NULL".to_string(),
         "a.longitude IS NOT NULL".to_string(),
-        "EXISTS (SELECT 1 FROM media_locations l WHERE l.content_hash = a.content_hash AND l.deleted_at IS NULL)".to_string(),
+        "EXISTS (SELECT 1 FROM media_locations l WHERE l.content_hash = a.content_hash)"
+            .to_string(),
     ];
     let mut bind = Vec::<Value>::new();
 
@@ -2352,7 +2265,17 @@ fn validate_geo_index(index_id: String, query: GeoSearchQuery) -> AppResult<Vali
 fn list_sources(app: AppHandle) -> AppResult<Vec<MediaSource>> {
     let conn = connect(&app)?;
     let mut stmt = conn
-        .prepare("SELECT id, label, added_at FROM media_sources ORDER BY added_at DESC")
+        .prepare(
+            "
+            SELECT
+              source_id AS id,
+              source_label AS label,
+              MAX(source_added_at) AS added_at
+            FROM media_locations
+            GROUP BY source_id, source_label
+            ORDER BY added_at DESC
+            ",
+        )
         .map_err(|error| error.to_string())?;
     let rows = stmt
         .query_map([], |row| {
@@ -2396,11 +2319,6 @@ fn remove_sources(app: AppHandle, source_ids: Vec<String>) -> AppResult<()> {
         ",
     )
     .map_err(|error| error.to_string())?;
-    conn.execute(
-        &format!("DELETE FROM media_sources WHERE id IN ({placeholders})"),
-        params_from_iter(source_ids.iter()),
-    )
-    .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -2411,10 +2329,9 @@ fn count_media(app: AppHandle) -> AppResult<i64> {
         "
         SELECT COUNT(*)
         FROM media_assets a
-        WHERE a.deleted_at IS NULL
-          AND EXISTS (
+        WHERE EXISTS (
             SELECT 1 FROM media_locations l
-            WHERE l.content_hash = a.content_hash AND l.deleted_at IS NULL
+            WHERE l.content_hash = a.content_hash
           )
         ",
         [],
@@ -2430,7 +2347,6 @@ fn clear_catalog(app: AppHandle) -> AppResult<()> {
         "
         DELETE FROM media_locations;
         DELETE FROM media_assets;
-        DELETE FROM media_sources;
         ",
     )
     .map_err(|error| error.to_string())
@@ -2783,7 +2699,7 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
         let path = entry.path().to_path_buf();
         let current_path = relative_path(&root, &path);
 
-        match media_from_path(&app, &source.id, &root, &path) {
+        match media_from_path(&app, &source, &root, &path) {
             Ok(Some(item)) => {
                 batch.push(item);
                 accepted_media += 1;
@@ -2998,15 +2914,15 @@ mod tests {
             longitude: Some(8.0),
             geo_source: Some("manual".to_string()),
             thumbnail_key: Some(format!("thumbs/{content_hash}.webp")),
-            deleted_at: None,
             last_seen_at: now_ms(),
             locations: vec![MediaLocation {
                 id: location_id,
                 source_id: source_id.to_string(),
+                source_label: Some(source_id.to_string()),
+                source_added_at: Some(now_ms()),
                 relative_path: Some(path.to_string()),
                 absolute_path: Some(path.to_string()),
                 display_name: display_name(Path::new(path)),
-                deleted_at: None,
                 last_seen_at: now_ms(),
             }],
         }
@@ -3264,35 +3180,37 @@ mod tests {
     }
 
     #[test]
-    fn migrates_location_schema_to_remove_source_path_uniqueness() {
+    fn fresh_schema_has_no_source_table_or_soft_delete_columns() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "
-            CREATE TABLE media_locations (
-              id TEXT PRIMARY KEY,
-              content_hash TEXT NOT NULL,
-              source_id TEXT NOT NULL,
-              relative_path TEXT,
-              absolute_path TEXT NOT NULL,
-              display_name TEXT NOT NULL,
-              deleted_at INTEGER,
-              last_seen_at INTEGER NOT NULL,
-              UNIQUE(source_id, absolute_path)
-            );
-            ",
-        )
-        .unwrap();
-
         ensure_schema(&conn).unwrap();
 
-        let table_sql: String = conn
+        let source_table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'media_sources'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let asset_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_assets'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let location_sql: String = conn
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_locations'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(!table_sql.contains("UNIQUE(source_id, absolute_path)"));
+
+        assert_eq!(source_table_count, 0);
+        assert!(!asset_sql.contains("deleted_at"));
+        assert!(!location_sql.contains("deleted_at"));
+        assert!(location_sql.contains("source_label"));
+        assert!(location_sql.contains("source_added_at"));
     }
 
     #[test]

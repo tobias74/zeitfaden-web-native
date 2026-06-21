@@ -16,6 +16,8 @@ function sampleItem(item: Omit<MediaItem, 'contentHash' | 'locations'>): MediaIt
       {
         id: `${item.id}-location`,
         sourceId: item.sourceId,
+        sourceLabel: sampleSource.label,
+        sourceAddedAt: sampleSource.addedAt,
         relativePath: item.relativePath,
         displayName: item.displayName,
         lastSeenAt: item.lastSeenAt,

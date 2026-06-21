@@ -178,14 +178,14 @@ const geoIndexRegistry = new GeoIndexRegistry()
 const IMPORT_BATCH_SIZE = 1000
 const SQLITE_BIND_CHUNK_LIMIT = 12000
 const ASSET_BIND_COLUMNS = 14
-const LOCATION_BIND_COLUMNS = 6
+const LOCATION_BIND_COLUMNS = 8
 const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
 const GEO_IMPORT_PARSE_SLICE_MS = 250
 const PROGRESS_HEARTBEAT_MS = 1000
 const GEO_POINT_ITEM_BUILD_CHUNK_SIZE = 250
 const GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE = 250
 const GEO_IMPORT_INDEXEDDB_WRITE_BATCH_SIZE = 2000
-const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb-v2'
+const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb-v3'
 const INDEXED_DB_VERSION = 1
 
 const ctx = self as unknown as {
@@ -262,16 +262,10 @@ async function ensureDb(): Promise<InitResult> {
     )
   }
 
-  db = new opfsDb('/catalog-v3.sqlite3') as unknown as SqliteDb
+  db = new opfsDb('/catalog-v4.sqlite3') as unknown as SqliteDb
   const activeDb = db
 
   activeDb.exec(`
-    CREATE TABLE IF NOT EXISTS media_sources (
-      id TEXT PRIMARY KEY,
-      label TEXT NOT NULL,
-      added_at INTEGER NOT NULL
-    );
-
     CREATE TABLE IF NOT EXISTS media_assets (
       content_hash TEXT PRIMARY KEY,
       kind TEXT NOT NULL,
@@ -293,6 +287,8 @@ async function ensureDb(): Promise<InitResult> {
       id TEXT PRIMARY KEY,
       content_hash TEXT NOT NULL,
       source_id TEXT NOT NULL,
+      source_label TEXT NOT NULL,
+      source_added_at INTEGER NOT NULL,
       relative_path TEXT NOT NULL,
       display_name TEXT NOT NULL,
       last_seen_at INTEGER NOT NULL
@@ -399,14 +395,6 @@ async function ensureIndexedDb(): Promise<InitResult> {
     request.onupgradeneeded = () => {
       const database = request.result
 
-      if (!database.objectStoreNames.contains('sources')) {
-        const sources = database.createObjectStore('sources', { keyPath: 'id' })
-        sources.createIndex('addedAt', 'addedAt')
-      } else {
-        const sources = request.transaction?.objectStore('sources')
-        if (sources) ensureIdbIndex(sources, 'addedAt', 'addedAt')
-      }
-
       if (!database.objectStoreNames.contains('assets')) {
         const assets = database.createObjectStore('assets', {
           keyPath: 'contentHash',
@@ -512,6 +500,8 @@ function mediaLocationFromIdbLocation(location: IdbLocation): MediaLocation {
   return {
     id: location.id,
     sourceId: location.sourceId,
+    sourceLabel: location.sourceLabel,
+    sourceAddedAt: location.sourceAddedAt,
     relativePath: location.relativePath,
     absolutePath: location.absolutePath,
     displayName: location.displayName,
@@ -571,11 +561,7 @@ async function idbMediaItemsFromAssets(
 }
 
 async function idbUpsertSource(source: MediaSource): Promise<void> {
-  const database = await requireIndexedDb()
-  const transaction = database.transaction('sources', 'readwrite')
-  const done = idbTransactionDone(transaction)
-  transaction.objectStore('sources').put(source)
-  await done
+  void source
 }
 
 async function idbUpsertMedia(items: MediaItem[]): Promise<number> {
@@ -630,16 +616,9 @@ async function idbRemoveSources(sourceIds: string[]): Promise<void> {
     new Set(locationsToDelete.map((location) => location.contentHash)),
   )
 
-  const deleteTransaction = database.transaction(
-    ['sources', 'locations'],
-    'readwrite',
-  )
+  const deleteTransaction = database.transaction('locations', 'readwrite')
   const deleteDone = idbTransactionDone(deleteTransaction)
-  const sourceStore = deleteTransaction.objectStore('sources')
   const locationStore = deleteTransaction.objectStore('locations')
-  for (const sourceId of sourceIds) {
-    sourceStore.delete(sourceId)
-  }
   for (const location of locationsToDelete) {
     locationStore.delete(location.id)
   }
@@ -663,11 +642,10 @@ async function idbRemoveSources(sourceIds: string[]): Promise<void> {
 }
 
 async function idbPrepareImportSource(
-  source: MediaSource,
+  _source: MediaSource,
   duplicateSourceIds: string[],
 ): Promise<void> {
   await idbRemoveSources(duplicateSourceIds)
-  await idbUpsertSource(source)
 }
 
 function idbAssetMatchesQuery(
@@ -824,13 +802,26 @@ async function idbGetGeoPoints(range: TimeRange): Promise<GeoIndexPoint[]> {
 
 async function idbListSources(): Promise<MediaSource[]> {
   const database = await requireIndexedDb()
-  const transaction = database.transaction('sources', 'readonly')
+  const transaction = database.transaction('locations', 'readonly')
   const done = idbTransactionDone(transaction)
-  const sources = await idbRequest<MediaSource[]>(
-    transaction.objectStore('sources').getAll(),
+  const sourcesById = new Map<string, MediaSource>()
+  await iterateIdbCursor(
+    transaction.objectStore('locations').index('sourceId').openCursor(),
+    (cursor) => {
+      const location = cursor.value as IdbLocation
+      const current = sourcesById.get(location.sourceId)
+      const addedAt = location.sourceAddedAt ?? location.lastSeenAt
+      if (!current || addedAt > current.addedAt) {
+        sourcesById.set(location.sourceId, {
+          id: location.sourceId,
+          label: location.sourceLabel ?? location.sourceId,
+          addedAt,
+        })
+      }
+    },
   )
   await done
-  return sources.sort((a, b) => b.addedAt - a.addedAt)
+  return Array.from(sourcesById.values()).sort((a, b) => b.addedAt - a.addedAt)
 }
 
 async function idbCountMedia(): Promise<number> {
@@ -848,13 +839,12 @@ async function idbCountMedia(): Promise<number> {
 async function idbClear(): Promise<void> {
   const database = await requireIndexedDb()
   const transaction = database.transaction(
-    ['sources', 'assets', 'locations'],
+    ['assets', 'locations'],
     'readwrite',
   )
   const done = idbTransactionDone(transaction)
   transaction.objectStore('locations').clear()
   transaction.objectStore('assets').clear()
-  transaction.objectStore('sources').clear()
   await done
 }
 
@@ -862,6 +852,8 @@ function locationFromRow(row: Record<string, unknown>): MediaLocation {
   return {
     id: String(row.id),
     sourceId: String(row.source_id),
+    sourceLabel: toString(row.source_label),
+    sourceAddedAt: toNumber(row.source_added_at),
     relativePath: String(row.relative_path),
     displayName: String(row.display_name),
     lastSeenAt: toNumber(row.last_seen_at) ?? 0,
@@ -957,24 +949,13 @@ function itemLocations(item: MediaItem): MediaLocation[] {
     {
       id: `${item.sourceId}:${item.relativePath}`,
       sourceId: item.sourceId,
+      sourceLabel: item.sourceId,
+      sourceAddedAt: item.lastSeenAt,
       relativePath: item.relativePath,
       displayName: item.displayName,
       lastSeenAt: item.lastSeenAt,
     },
   ]
-}
-
-function upsertSourceIntoSqlite(activeDb: SqliteDb, source: MediaSource): void {
-  activeDb.exec({
-    sql: `
-      INSERT INTO media_sources (id, label, added_at)
-      VALUES (?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        label = excluded.label,
-        added_at = excluded.added_at
-    `,
-    bind: [source.id, source.label, source.addedAt],
-  })
 }
 
 function placeholders(rowCount: number, columnCount: number): string {
@@ -1126,6 +1107,8 @@ function upsertMediaIntoSqlite(
       location.id,
       item.contentHash,
       location.sourceId,
+      location.sourceLabel ?? item.sourceId,
+      location.sourceAddedAt ?? item.lastSeenAt,
       location.relativePath ?? '',
       location.displayName,
       location.lastSeenAt,
@@ -1138,13 +1121,16 @@ function upsertMediaIntoSqlite(
     'media_locations',
     `
     INSERT INTO media_locations (
-      id, content_hash, source_id, relative_path, display_name, last_seen_at
+      id, content_hash, source_id, source_label, source_added_at,
+      relative_path, display_name, last_seen_at
     )
     `,
     `
     ON CONFLICT(id) DO UPDATE SET
       content_hash = excluded.content_hash,
       source_id = excluded.source_id,
+      source_label = excluded.source_label,
+      source_added_at = excluded.source_added_at,
       relative_path = excluded.relative_path,
       display_name = excluded.display_name,
       last_seen_at = excluded.last_seen_at
@@ -1227,7 +1213,7 @@ function mediaItemsFromAssetRows(
 
 async function upsertSource(source: MediaSource): Promise<void> {
   await ensureDb()
-  upsertSourceIntoSqlite(requireDb(), source)
+  void source
 }
 
 async function upsertMedia(items: MediaItem[]): Promise<number> {
@@ -1261,10 +1247,6 @@ function removeSourcesFromSqlite(activeDb: SqliteDb, sourceIds: string[]): void 
       WHERE l.content_hash = media_assets.content_hash
     )
   `)
-  activeDb.exec({
-    sql: `DELETE FROM media_sources WHERE id IN (${placeholders})`,
-    bind: sourceIds,
-  })
 }
 
 function prepareImportSource(
@@ -1275,7 +1257,7 @@ function prepareImportSource(
   activeDb.exec('BEGIN')
   try {
     removeSourcesFromSqlite(activeDb, duplicateSourceIds)
-    upsertSourceIntoSqlite(activeDb, source)
+    void source
     activeDb.exec('COMMIT')
   } catch (error) {
     activeDb.exec('ROLLBACK')
@@ -1393,6 +1375,8 @@ async function readImageMetadata(file: File): Promise<{
 
 async function mediaFromFile(
   sourceId: string,
+  sourceLabel: string,
+  sourceAddedAt: number,
   relativePath: string,
   fileHandle: FileSystemFileHandle,
 ): Promise<MediaItem | undefined> {
@@ -1406,6 +1390,8 @@ async function mediaFromFile(
   const location = {
     id: locationId,
     sourceId,
+    sourceLabel,
+    sourceAddedAt,
     relativePath,
     displayName: pathDisplayName(relativePath),
     lastSeenAt,
@@ -1448,6 +1434,7 @@ async function mediaFromFile(
 async function geoPointItemFromParsedPoint(
   sourceId: string,
   sourceLabel: string,
+  sourceAddedAt: number,
   mimeType: string,
   point: ParsedGeoPoint,
   timing?: GeoPointItemTiming,
@@ -1474,6 +1461,8 @@ async function geoPointItemFromParsedPoint(
   const location: MediaLocation = {
     id: locationId,
     sourceId,
+    sourceLabel,
+    sourceAddedAt,
     relativePath: sourceLabel,
     displayName,
     lastSeenAt,
@@ -1506,13 +1495,21 @@ async function geoPointItemFromParsedPoint(
 async function geoPointItemsFromParsedPoints(
   sourceId: string,
   sourceLabel: string,
+  sourceAddedAt: number,
   mimeType: string,
   points: ParsedGeoPoint[],
   timing?: GeoPointItemTiming,
 ): Promise<MediaItem[]> {
   return Promise.all(
     points.map((point) =>
-      geoPointItemFromParsedPoint(sourceId, sourceLabel, mimeType, point, timing),
+      geoPointItemFromParsedPoint(
+        sourceId,
+        sourceLabel,
+        sourceAddedAt,
+        mimeType,
+        point,
+        timing,
+      ),
     ),
   )
 }
@@ -1590,6 +1587,8 @@ async function importFolderIntoCatalog(
       try {
         const item = await mediaFromFile(
           source.id,
+          sourceLabel,
+          source.addedAt,
           relativePath,
           entry as FileSystemFileHandle,
         )
@@ -2077,6 +2076,7 @@ async function importGpxIntoCatalog(
       const itemChunk = await geoPointItemsFromParsedPoints(
         source.id,
         sourceLabel,
+        source.addedAt,
         parsed.mimeType,
         parsed.points.slice(offset, offset + GEO_POINT_ITEM_BUILD_CHUNK_SIZE),
       )
@@ -2201,6 +2201,7 @@ async function importGoogleTakeoutIntoCatalog(
       const itemChunk = await geoPointItemsFromParsedPoints(
         source.id,
         sourceLabel,
+        source.addedAt,
         'application/json',
         pointChunk,
         timing,
@@ -2606,7 +2607,15 @@ async function listSources(): Promise<MediaSource[]> {
   await ensureDb()
   return requireDb()
     .selectObjects(
-      'SELECT id, label, added_at FROM media_sources ORDER BY added_at DESC',
+      `
+        SELECT
+          source_id AS id,
+          source_label AS label,
+          MAX(source_added_at) AS added_at
+        FROM media_locations
+        GROUP BY source_id, source_label
+        ORDER BY added_at DESC
+      `,
     )
     .map(sourceFromRow)
 }
@@ -2630,10 +2639,6 @@ async function removeSources(sourceIds: string[]): Promise<void> {
         WHERE l.content_hash = media_assets.content_hash
       )
     `)
-    activeDb.exec({
-      sql: `DELETE FROM media_sources WHERE id IN (${placeholders})`,
-      bind: sourceIds,
-    })
     activeDb.exec('COMMIT')
   } catch (error) {
     activeDb.exec('ROLLBACK')
@@ -2661,7 +2666,6 @@ async function clearCatalog(): Promise<void> {
   requireDb().exec(`
     DELETE FROM media_locations;
     DELETE FROM media_assets;
-    DELETE FROM media_sources;
   `)
 }
 
