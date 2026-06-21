@@ -494,6 +494,7 @@ function App() {
   const workspaceRef = useRef<HTMLElement | null>(null)
   const leftStackRef = useRef<HTMLElement | null>(null)
   const settingsMenuRef = useRef<HTMLDetailsElement | null>(null)
+  const displayMenuRef = useRef<HTMLDetailsElement | null>(null)
   const activityLogIdRef = useRef(1)
 
   const selectedIndex = registry.get(selectedIndexId)
@@ -705,14 +706,20 @@ function App() {
   }, [platform])
 
   useEffect(() => {
-    function closeSettingsOnEscape(event: globalThis.KeyboardEvent) {
-      if (event.key !== 'Escape' || !settingsMenuRef.current?.open) return
-      settingsMenuRef.current.open = false
+    function closeMenusOnEscape(event: globalThis.KeyboardEvent) {
+      if (event.key !== 'Escape') return
+      const openMenus = [settingsMenuRef.current, displayMenuRef.current]
+        .filter((menu): menu is HTMLDetailsElement => Boolean(menu?.open))
+      if (openMenus.length === 0) return
+
+      for (const menu of openMenus) {
+        menu.open = false
+      }
       event.preventDefault()
     }
 
-    window.addEventListener('keydown', closeSettingsOnEscape)
-    return () => window.removeEventListener('keydown', closeSettingsOnEscape)
+    window.addEventListener('keydown', closeMenusOnEscape)
+    return () => window.removeEventListener('keydown', closeMenusOnEscape)
   }, [])
 
   useEffect(() => {
@@ -1883,7 +1890,7 @@ function App() {
                   <ChevronRight size={17} />
                 </button>
               </div>
-              <details className="display-menu">
+              <details ref={displayMenuRef} className="display-menu">
                 <summary>
                   <Settings2 size={17} />
                   {t('display')}
