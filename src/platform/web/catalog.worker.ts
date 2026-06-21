@@ -1479,23 +1479,36 @@ async function geoPointItemFromParsedPoint(
   sourceLabel: string,
   mimeType: string,
   point: ParsedGeoPoint,
+  timing?: GeoPointItemTiming,
 ): Promise<MediaItem> {
+  const contentHashStartedAt = performance.now()
   const contentHash = await geoPointContentHash(
     point.latitude,
     point.longitude,
     point.capturedAt,
   )
+  if (timing) {
+    timing.contentHashMs += performance.now() - contentHashStartedAt
+  }
+
+  const locationHashStartedAt = performance.now()
+  const locationId = await stableId(sourceId, sourceLabel, contentHash)
+  if (timing) {
+    timing.locationHashMs += performance.now() - locationHashStartedAt
+  }
+
+  const objectStartedAt = performance.now()
   const lastSeenAt = Date.now()
   const displayName = `${sourceLabel} #${point.index}`
   const location: MediaLocation = {
-    id: await stableId(sourceId, sourceLabel, contentHash),
+    id: locationId,
     sourceId,
     relativePath: sourceLabel,
     displayName,
     lastSeenAt,
   }
 
-  return {
+  const item: MediaItem = {
     id: contentHash,
     contentHash,
     sourceId,
@@ -1512,6 +1525,11 @@ async function geoPointItemFromParsedPoint(
     lastSeenAt,
     locations: [location],
   }
+  if (timing) {
+    timing.objectBuildMs += performance.now() - objectStartedAt
+  }
+
+  return item
 }
 
 async function geoPointItemsFromParsedPoints(
@@ -1519,10 +1537,11 @@ async function geoPointItemsFromParsedPoints(
   sourceLabel: string,
   mimeType: string,
   points: ParsedGeoPoint[],
+  timing?: GeoPointItemTiming,
 ): Promise<MediaItem[]> {
   return Promise.all(
     points.map((point) =>
-      geoPointItemFromParsedPoint(sourceId, sourceLabel, mimeType, point),
+      geoPointItemFromParsedPoint(sourceId, sourceLabel, mimeType, point, timing),
     ),
   )
 }
@@ -1728,6 +1747,108 @@ function throwKnownUnsupportedJsonPrefix(prefix: string): void {
 function debugParseRate(count: number, durationMs: number): number {
   if (durationMs <= 0) return 0
   return count / (durationMs / 1000)
+}
+
+type GeoPointItemTiming = {
+  contentHashMs: number
+  locationHashMs: number
+  objectBuildMs: number
+}
+
+type GeoImportTimingMetrics = GeoPointItemTiming & {
+  sourceLabel: string
+  startedAt: number
+  lastLogAt: number
+  bytesRead: number
+  parsedPoints: number
+  skippedPoints: number
+  itemsBuilt: number
+  dbWritten: number
+  readMs: number
+  decodeMs: number
+  parserFeedMs: number
+  queueMs: number
+  batchQueueMs: number
+  dbWriteMs: number
+  dbWriteBatches: number
+}
+
+function roundedMs(value: number): number {
+  return Math.round(value * 10) / 10
+}
+
+function createGeoImportTiming(sourceLabel: string): GeoImportTimingMetrics {
+  const now = performance.now()
+  return {
+    sourceLabel,
+    startedAt: now,
+    lastLogAt: now,
+    bytesRead: 0,
+    parsedPoints: 0,
+    skippedPoints: 0,
+    itemsBuilt: 0,
+    dbWritten: 0,
+    readMs: 0,
+    decodeMs: 0,
+    parserFeedMs: 0,
+    contentHashMs: 0,
+    locationHashMs: 0,
+    objectBuildMs: 0,
+    queueMs: 0,
+    batchQueueMs: 0,
+    dbWriteMs: 0,
+    dbWriteBatches: 0,
+  }
+}
+
+function geoImportTimingSnapshot(
+  timing: GeoImportTimingMetrics,
+): Record<string, unknown> {
+  const elapsedMs = performance.now() - timing.startedAt
+  return {
+    sourceLabel: timing.sourceLabel,
+    elapsedMs: roundedMs(elapsedMs),
+    bytesRead: timing.bytesRead,
+    parsedPoints: timing.parsedPoints,
+    skippedPoints: timing.skippedPoints,
+    itemsBuilt: timing.itemsBuilt,
+    dbWritten: timing.dbWritten,
+    dbWriteBatches: timing.dbWriteBatches,
+    readMs: roundedMs(timing.readMs),
+    decodeMs: roundedMs(timing.decodeMs),
+    parserFeedMs: roundedMs(timing.parserFeedMs),
+    contentHashMs: roundedMs(timing.contentHashMs),
+    locationHashMs: roundedMs(timing.locationHashMs),
+    objectBuildMs: roundedMs(timing.objectBuildMs),
+    queueMs: roundedMs(timing.queueMs),
+    batchQueueMs: roundedMs(timing.batchQueueMs),
+    dbWriteMs: roundedMs(timing.dbWriteMs),
+    pointsPerSecond: Math.round(debugParseRate(timing.parsedPoints, elapsedMs)),
+    writesPerSecond: Math.round(debugParseRate(timing.dbWritten, elapsedMs)),
+  }
+}
+
+function logGeoImportTiming(
+  timing: GeoImportTimingMetrics,
+  phase: string,
+  extra: Record<string, unknown> = {},
+): void {
+  console.log('[geo-import-timing]', {
+    phase,
+    ...geoImportTimingSnapshot(timing),
+    ...extra,
+  })
+}
+
+function maybeLogGeoImportTiming(
+  timing: GeoImportTimingMetrics,
+  phase: string,
+  extra: Record<string, unknown> = {},
+): void {
+  const now = performance.now()
+  if (now - timing.lastLogAt < PROGRESS_HEARTBEAT_MS) return
+  timing.lastLogAt = now
+  logGeoImportTiming(timing, phase, extra)
 }
 
 async function debugParseGoogleTakeoutFile(
@@ -1937,6 +2058,7 @@ async function importGoogleTakeoutIntoCatalog(
   postProgress: (progress: ImportProgress) => void,
 ): Promise<{ acceptedMedia: number; skippedFiles: number }> {
   const sourceLabel = source.label
+  const timing = createGeoImportTiming(sourceLabel)
   const parser = new GoogleTakeoutLocationStreamParser()
   const reader = file.stream().getReader()
   const decoder = new TextDecoder()
@@ -1946,6 +2068,11 @@ async function importGoogleTakeoutIntoCatalog(
   let acceptedMedia = 0
   let skippedFiles = 0
   let lastProgressAt = 0
+
+  logGeoImportTiming(timing, 'takeout import start', {
+    sizeBytes: file.size,
+    writeBatchSize: store.geoImportWriteBatchSize,
+  })
 
   const emitProgress = (phase: ImportProgress['phase']) => {
     postProgress({
@@ -1971,9 +2098,19 @@ async function importGoogleTakeoutIntoCatalog(
   const flushBatch = async (phase: ImportProgress['phase']) => {
     if (batch.length === 0) return
     const flushedItems = batch.length
+    const writeStartedAt = performance.now()
     await store.writeMediaBatch(batch, { transactionActive: true })
+    const writeMs = performance.now() - writeStartedAt
+    timing.dbWriteMs += writeMs
+    timing.dbWriteBatches += 1
+    timing.dbWritten += flushedItems
     acceptedMedia += flushedItems
     batch.length = 0
+    logGeoImportTiming(timing, 'database batch written', {
+      batchItems: flushedItems,
+      batchWriteMs: roundedMs(writeMs),
+      phase,
+    })
     emitProgress(phase)
     await yieldToEventLoop()
   }
@@ -1995,16 +2132,26 @@ async function importGoogleTakeoutIntoCatalog(
         sourceLabel,
         'application/json',
         pointChunk,
+        timing,
       )
+      timing.itemsBuilt += itemChunk.length
 
+      let batchQueueStartedAt = performance.now()
       for (const item of itemChunk) {
         batch.push(item)
         if (batch.length >= store.geoImportWriteBatchSize) {
+          timing.batchQueueMs += performance.now() - batchQueueStartedAt
           await flushBatch('scanning')
+          batchQueueStartedAt = performance.now()
         }
       }
+      timing.batchQueueMs += performance.now() - batchQueueStartedAt
 
       maybeEmitProgress()
+      maybeLogGeoImportTiming(timing, 'building items', {
+        pendingPoints: pendingPoints.length,
+        currentChunkPoints: pointChunk.length,
+      })
       await yieldToEventLoop()
     }
   }
@@ -2012,14 +2159,24 @@ async function importGoogleTakeoutIntoCatalog(
   const consumeText = async (text: string) => {
     let chunk = text
     while (true) {
+      const feedStartedAt = performance.now()
       const result = parser.feed(chunk, {
         maxDurationMs: GEO_IMPORT_PARSE_SLICE_MS,
       })
+      timing.parserFeedMs += performance.now() - feedStartedAt
       chunk = ''
+      timing.parsedPoints += result.points.length
+      timing.skippedPoints += result.skippedPoints
       skippedFiles += result.skippedPoints
+      const queueStartedAt = performance.now()
       pendingPoints.push(...result.points)
+      timing.queueMs += performance.now() - queueStartedAt
       await consumePoints()
       maybeEmitProgress()
+      maybeLogGeoImportTiming(timing, 'parsing takeout', {
+        paused: result.paused,
+        resultPoints: result.points.length,
+      })
 
       if (!result.paused) break
       await yieldToEventLoop()
@@ -2030,24 +2187,37 @@ async function importGoogleTakeoutIntoCatalog(
 
   await store.withImportTransaction(async () => {
     while (true) {
+      const readStartedAt = performance.now()
       const { done, value } = await reader.read()
+      timing.readMs += performance.now() - readStartedAt
       if (done) break
 
       bytesRead += value.byteLength
-      await consumeText(decoder.decode(value, { stream: true }))
+      timing.bytesRead = bytesRead
+      const decodeStartedAt = performance.now()
+      const text = decoder.decode(value, { stream: true })
+      timing.decodeMs += performance.now() - decodeStartedAt
+      await consumeText(text)
     }
 
+    const finalDecodeStartedAt = performance.now()
     const finalChunk = decoder.decode()
+    timing.decodeMs += performance.now() - finalDecodeStartedAt
     if (finalChunk) {
       await consumeText(finalChunk)
     }
 
     const final = parser.finish()
     skippedFiles = final.skippedPoints
+    timing.skippedPoints = final.skippedPoints
     await consumePoints()
     await flushBatch('storing')
   })
   emitProgress('storing')
+  logGeoImportTiming(timing, 'takeout import complete', {
+    acceptedMedia,
+    skippedFiles,
+  })
 
   return { acceptedMedia, skippedFiles }
 }
@@ -2059,6 +2229,15 @@ async function importGeoFileIntoCatalog(
 ): Promise<ImportSummary> {
   const { source, duplicateSourceIds, file } = payload
   const sourceLabel = source.label
+  const startedAt = performance.now()
+
+  console.log('[geo-import-timing]', {
+    phase: 'geo import envelope start',
+    sourceLabel,
+    sizeBytes: file.size,
+    duplicateSourceIds: duplicateSourceIds.length,
+    writeBatchSize: store.geoImportWriteBatchSize,
+  })
 
   postProgress({
     phase: 'counting',
@@ -2072,12 +2251,35 @@ async function importGeoFileIntoCatalog(
     totalBytes: file.size,
   })
 
+  const prepareStartedAt = performance.now()
   await store.prepareImportSource(source, duplicateSourceIds)
+  console.log('[geo-import-timing]', {
+    phase: 'source prepared',
+    sourceLabel,
+    phaseMs: roundedMs(performance.now() - prepareStartedAt),
+    elapsedMs: roundedMs(performance.now() - startedAt),
+  })
 
+  const prefixStartedAt = performance.now()
   const prefix = await file.slice(0, GEO_IMPORT_PREFIX_BYTES).text()
+  const prefixMs = performance.now() - prefixStartedAt
+  console.log('[geo-import-timing]', {
+    phase: 'format prefix read',
+    sourceLabel,
+    phaseMs: roundedMs(prefixMs),
+    prefixBytes: Math.min(file.size, GEO_IMPORT_PREFIX_BYTES),
+    jsonLike: jsonLikePrefix(prefix),
+    elapsedMs: roundedMs(performance.now() - startedAt),
+  })
   const result = jsonLikePrefix(prefix)
     ? await (async () => {
         throwKnownUnsupportedJsonPrefix(prefix)
+        console.log('[geo-import-timing]', {
+          phase: 'format selected',
+          sourceLabel,
+          format: 'google-takeout-json',
+          elapsedMs: roundedMs(performance.now() - startedAt),
+        })
         return importGoogleTakeoutIntoCatalog(
           file,
           source,
@@ -2085,7 +2287,23 @@ async function importGeoFileIntoCatalog(
           postProgress,
         )
       })()
-    : await importGpxIntoCatalog(file, source, store, postProgress)
+    : await (async () => {
+        console.log('[geo-import-timing]', {
+          phase: 'format selected',
+          sourceLabel,
+          format: 'gpx',
+          elapsedMs: roundedMs(performance.now() - startedAt),
+        })
+        return importGpxIntoCatalog(file, source, store, postProgress)
+      })()
+
+  console.log('[geo-import-timing]', {
+    phase: 'geo import envelope complete',
+    sourceLabel,
+    acceptedMedia: result.acceptedMedia,
+    skippedFiles: result.skippedFiles,
+    elapsedMs: roundedMs(performance.now() - startedAt),
+  })
 
   return {
     source,

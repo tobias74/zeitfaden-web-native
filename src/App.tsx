@@ -669,12 +669,36 @@ function App() {
     }
   }, [catalog, registry.indexes.length, selectedIndexId])
 
-  const refreshAll = useCallback(async () => {
+  const refreshAll = useCallback(async (timingLabel?: string) => {
+    const startedAt = performance.now()
+    const logTiming = (phase: string, extra: Record<string, unknown> = {}) => {
+      if (!timingLabel) return
+      console.log('[app-import-timing]', {
+        label: timingLabel,
+        phase,
+        elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
+        ...extra,
+      })
+    }
+    const runTimed = async (phase: string, run: () => Promise<void>) => {
+      const phaseStartedAt = performance.now()
+      await run()
+      logTiming(phase, {
+        phaseMs: Math.round((performance.now() - phaseStartedAt) * 10) / 10,
+      })
+    }
+
+    logTiming('refresh all start', { distanceSortActive })
     await Promise.all([
-      refreshMedia(),
-      distanceSortActive ? Promise.resolve() : refreshMapMedia(),
-      rebuildGeoIndexes(),
+      runTimed('refresh media page', refreshMedia),
+      distanceSortActive
+        ? Promise.resolve().then(() => {
+            logTiming('refresh map skipped for distance sort')
+          })
+        : runTimed('refresh map media', refreshMapMedia),
+      runTimed('rebuild geo indexes', rebuildGeoIndexes),
     ])
+    logTiming('refresh all complete')
   }, [distanceSortActive, rebuildGeoIndexes, refreshMapMedia, refreshMedia])
 
   useEffect(() => {
@@ -818,12 +842,26 @@ function App() {
     setImportProgress(undefined)
 
     setBusy(true)
+    const startedAt = performance.now()
+    console.log('[app-import-timing]', {
+      phase: 'geo import action start',
+    })
     try {
       const summary = await platform.importer.importGeoFile((progress) => {
         setImportProgress(progress)
       })
+      console.log('[app-import-timing]', {
+        phase: 'worker geo import complete',
+        elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
+        acceptedMedia: summary.acceptedMedia,
+        skippedFiles: summary.skippedFiles,
+      })
       setResultPage(0)
-      await refreshAll()
+      await refreshAll('geo import post-refresh')
+      console.log('[app-import-timing]', {
+        phase: 'geo import action complete',
+        elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
+      })
       recordActivity('activityImportedMediaFilesFrom', {
         count: summary.acceptedMedia.toLocaleString(locale),
         sourceLabel: summary.sourceLabel,
