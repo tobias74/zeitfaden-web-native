@@ -1078,34 +1078,106 @@ function placeholders(rowCount: number, columnCount: number): string {
   return Array.from({ length: rowCount }, () => row).join(', ')
 }
 
+type SqliteUpsertTiming = {
+  label: string
+  rows: number
+  columnCount: number
+  chunks: number
+  bindValues: number
+  sqlChars: number
+  placeholderMs: number
+  sqlBuildMs: number
+  bindFlattenMs: number
+  execMs: number
+  totalMs: number
+}
+
 function execMultiRowUpsert(
   activeDb: SqliteDb,
+  label: string,
   insertPrefix: string,
   conflictClause: string,
   rows: unknown[][],
   columnCount: number,
-): void {
-  if (rows.length === 0) return
+): SqliteUpsertTiming {
+  const startedAt = performance.now()
+  const timing: SqliteUpsertTiming = {
+    label,
+    rows: rows.length,
+    columnCount,
+    chunks: 0,
+    bindValues: 0,
+    sqlChars: 0,
+    placeholderMs: 0,
+    sqlBuildMs: 0,
+    bindFlattenMs: 0,
+    execMs: 0,
+    totalMs: 0,
+  }
+  if (rows.length === 0) return timing
 
   const maxRows = Math.max(1, Math.floor(SQLITE_BIND_CHUNK_LIMIT / columnCount))
   for (let offset = 0; offset < rows.length; offset += maxRows) {
     const chunk = rows.slice(offset, offset + maxRows)
+    const placeholderStartedAt = performance.now()
+    const valuePlaceholders = placeholders(chunk.length, columnCount)
+    const placeholderMs = performance.now() - placeholderStartedAt
+    timing.placeholderMs += placeholderMs
+
+    const sqlBuildStartedAt = performance.now()
+    const sql = `
+      ${insertPrefix}
+      VALUES ${valuePlaceholders}
+      ${conflictClause}
+    `
+    const sqlBuildMs = performance.now() - sqlBuildStartedAt
+    timing.sqlBuildMs += sqlBuildMs
+
+    const bindStartedAt = performance.now()
+    const bind = chunk.flat()
+    const bindFlattenMs = performance.now() - bindStartedAt
+    timing.bindFlattenMs += bindFlattenMs
+
+    const execStartedAt = performance.now()
     activeDb.exec({
-      sql: `
-        ${insertPrefix}
-        VALUES ${placeholders(chunk.length, columnCount)}
-        ${conflictClause}
-      `,
-      bind: chunk.flat(),
+      sql,
+      bind,
+    })
+    const execMs = performance.now() - execStartedAt
+    timing.execMs += execMs
+    timing.chunks += 1
+    timing.bindValues += bind.length
+    timing.sqlChars += sql.length
+
+    console.log('[sqlite-write-timing]', {
+      phase: 'chunk executed',
+      label,
+      offset,
+      rows: chunk.length,
+      columnCount,
+      bindValues: bind.length,
+      sqlChars: sql.length,
+      placeholderMs: roundedMs(placeholderMs),
+      sqlBuildMs: roundedMs(sqlBuildMs),
+      bindFlattenMs: roundedMs(bindFlattenMs),
+      execMs: roundedMs(execMs),
     })
   }
+
+  timing.totalMs = performance.now() - startedAt
+  return timing
 }
 
 function upsertMediaIntoSqlite(activeDb: SqliteDb, items: MediaItem[]): void {
   if (items.length === 0) return
 
-  execMultiRowUpsert(
+  const startedAt = performance.now()
+  const assetRowsStartedAt = performance.now()
+  const assetRows = items.map(assetBind)
+  const assetRowsMs = performance.now() - assetRowsStartedAt
+  const assetTiming = execMultiRowUpsert(
     activeDb,
+    'media_assets',
     `
     INSERT INTO media_assets (
       content_hash, kind, mime_type, size_bytes, width, height, duration_ms,
@@ -1130,10 +1202,11 @@ function upsertMediaIntoSqlite(activeDb: SqliteDb, items: MediaItem[]): void {
       deleted_at = excluded.deleted_at,
       last_seen_at = MAX(media_assets.last_seen_at, excluded.last_seen_at)
     `,
-    items.map(assetBind),
+    assetRows,
     ASSET_BIND_COLUMNS,
   )
 
+  const locationRowsStartedAt = performance.now()
   const locationRows = items.flatMap((item) =>
     itemLocations(item).map((location) => [
       location.id,
@@ -1145,9 +1218,11 @@ function upsertMediaIntoSqlite(activeDb: SqliteDb, items: MediaItem[]): void {
       location.lastSeenAt,
     ]),
   )
+  const locationRowsMs = performance.now() - locationRowsStartedAt
 
-  execMultiRowUpsert(
+  const locationTiming = execMultiRowUpsert(
     activeDb,
+    'media_locations',
     `
     INSERT INTO media_locations (
       id, content_hash, source_id, relative_path, display_name, deleted_at,
@@ -1166,6 +1241,29 @@ function upsertMediaIntoSqlite(activeDb: SqliteDb, items: MediaItem[]): void {
     locationRows,
     LOCATION_BIND_COLUMNS,
   )
+
+  console.log('[sqlite-write-timing]', {
+    phase: 'upsert media batch complete',
+    items: items.length,
+    locations: locationRows.length,
+    totalMs: roundedMs(performance.now() - startedAt),
+    assetRowsMs: roundedMs(assetRowsMs),
+    assetPlaceholderMs: roundedMs(assetTiming.placeholderMs),
+    assetSqlBuildMs: roundedMs(assetTiming.sqlBuildMs),
+    assetBindFlattenMs: roundedMs(assetTiming.bindFlattenMs),
+    assetExecMs: roundedMs(assetTiming.execMs),
+    assetChunks: assetTiming.chunks,
+    assetBindValues: assetTiming.bindValues,
+    assetSqlChars: assetTiming.sqlChars,
+    locationRowsMs: roundedMs(locationRowsMs),
+    locationPlaceholderMs: roundedMs(locationTiming.placeholderMs),
+    locationSqlBuildMs: roundedMs(locationTiming.sqlBuildMs),
+    locationBindFlattenMs: roundedMs(locationTiming.bindFlattenMs),
+    locationExecMs: roundedMs(locationTiming.execMs),
+    locationChunks: locationTiming.chunks,
+    locationBindValues: locationTiming.bindValues,
+    locationSqlChars: locationTiming.sqlChars,
+  })
 }
 
 function timeWhere(
