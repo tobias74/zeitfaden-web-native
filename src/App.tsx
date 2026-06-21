@@ -4,7 +4,6 @@ import {
   Calendar,
   ChevronLeft,
   ChevronRight,
-  Database,
   FolderOpen,
   Images,
   Image as ImageIcon,
@@ -29,7 +28,6 @@ import './App.css'
 import { MapView } from './components/MapView'
 import { MediaViewer } from './components/MediaViewer'
 import { Thumbnail } from './components/Thumbnail'
-import { sampleMedia, sampleSource } from './demo/sampleData'
 import { formatDistance } from './lib/distance'
 import {
   buildSearchUrlParams,
@@ -52,7 +50,6 @@ import type {
   CatalogSort,
   EnrichedSearchResult,
   GeoBounds,
-  GeoIndexPoint,
   GeoIndexStats,
   MediaItem,
   MediaKind,
@@ -69,6 +66,11 @@ type QueryPoint = {
 type SortMode = CatalogSort | 'distance'
 type ResultDisplayMode = 'images' | 'cards' | 'list'
 type ResultThumbnailSize = 'small' | 'medium' | 'large'
+type ActivityLogEntry = {
+  id: number
+  message: string
+  createdAt: number
+}
 
 const defaultStats: GeoIndexStats = {
   engineId: 'none',
@@ -209,26 +211,6 @@ function timeRangeFromInputs(startDate: string, endDate: string): TimeRange {
   }
 }
 
-function mediaItemsToGeoIndexPoints(items: MediaItem[]): GeoIndexPoint[] {
-  return items.flatMap((item) => {
-    if (
-      typeof item.latitude !== 'number' ||
-      typeof item.longitude !== 'number'
-    ) {
-      return []
-    }
-
-    return [
-      {
-        mediaId: item.id,
-        lat: item.latitude,
-        lon: item.longitude,
-        capturedAt: item.capturedAt,
-      },
-    ]
-  })
-}
-
 function pathWithSearchParams(params: URLSearchParams): string {
   const search = params.toString()
   return `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`
@@ -297,7 +279,13 @@ function App() {
   const [viewerIndex, setViewerIndex] = useState<number>()
   const [indexStats, setIndexStats] = useState<GeoIndexStats>(defaultStats)
   const [validation, setValidation] = useState<ValidationReport>()
-  const [status, setStatus] = useState('Initializing catalog')
+  const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>(() => [
+    {
+      id: 0,
+      message: 'Initializing catalog',
+      createdAt: Date.now(),
+    },
+  ])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
   const [importProgress, setImportProgress] = useState<ImportProgress>()
@@ -328,6 +316,7 @@ function App() {
   )
   const workspaceRef = useRef<HTMLElement | null>(null)
   const leftStackRef = useRef<HTMLElement | null>(null)
+  const activityLogIdRef = useRef(1)
 
   const selectedIndex = registry.get(selectedIndexId)
   const catalogReady = Boolean(catalogInfo)
@@ -384,6 +373,19 @@ function App() {
   )
   const hasSyncedSearchUrlRef = useRef(false)
 
+  const recordActivity = useCallback((message: string) => {
+    setActivityLog((entries) =>
+      [
+        {
+          id: activityLogIdRef.current++,
+          message,
+          createdAt: Date.now(),
+        },
+        ...entries,
+      ].slice(0, 30),
+    )
+  }, [])
+
   const applySearchUrlState = useCallback((nextState: SearchUrlState) => {
     setSelectedIndexId(nextState.selectedIndexId)
     setQueryPoint(nextState.queryPoint)
@@ -412,11 +414,9 @@ function App() {
   const rebuildGeoIndexes = useCallback(async () => {
     const points = await catalog.getGeoPoints()
     setGeoPointCount(points.length)
-    setStatus('Building geo index engines')
     await registry.buildAll(points)
     setGeoIndexVersion((version) => version + 1)
     setIndexStats(await registry.get(selectedIndexId).stats())
-    setStatus(`Indexed ${points.length.toLocaleString()} geotagged items`)
   }, [catalog, registry, selectedIndexId])
 
   const refreshAll = useCallback(async () => {
@@ -436,7 +436,7 @@ function App() {
       } catch (caught) {
         if (!cancelled) {
           setError(caught instanceof Error ? caught.message : String(caught))
-          setStatus('Catalog failed to initialize')
+          recordActivity('Catalog failed to initialize')
         }
       }
     }
@@ -446,7 +446,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [catalog, refreshAll])
+  }, [catalog, recordActivity, refreshAll])
 
   useEffect(() => {
     return () => platform.dispose()
@@ -502,11 +502,10 @@ function App() {
     try {
       const summary = await platform.importer.importFolder((progress) => {
         setImportProgress(progress)
-        setStatus(importProgressDetail(progress))
       })
       setResultPage(0)
       await refreshAll()
-      setStatus(
+      recordActivity(
         `Imported ${summary.acceptedMedia.toLocaleString()} media files from ${summary.sourceLabel}`,
       )
       if (summary.errors.length > 0) {
@@ -514,32 +513,12 @@ function App() {
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught))
-      setStatus('Import stopped')
+      recordActivity('Import stopped')
     } finally {
       setImportProgress(undefined)
       setBusy(false)
     }
-  }, [platform, refreshAll])
-
-  const loadSampleData = useCallback(async () => {
-    setBusy(true)
-    setError(undefined)
-    try {
-      await catalog.upsertSource(sampleSource)
-      await catalog.upsertMedia(sampleMedia)
-      await registry.insertMany(mediaItemsToGeoIndexPoints(sampleMedia))
-      setResultPage(0)
-      setGeoPointCount((await catalog.getGeoPoints()).length)
-      setGeoIndexVersion((version) => version + 1)
-      setIndexStats(await registry.get(selectedIndexId).stats())
-      await refreshMedia()
-      setStatus('Loaded sample geotagged library')
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught))
-    } finally {
-      setBusy(false)
-    }
-  }, [catalog, refreshMedia, registry, selectedIndexId])
+  }, [platform, recordActivity, refreshAll])
 
   const clearCatalog = useCallback(async () => {
     setBusy(true)
@@ -552,13 +531,22 @@ function App() {
       setSearchResults([])
       setValidation(undefined)
       await refreshAll()
-      setStatus('Catalog cleared')
+      recordActivity('Catalog cleared')
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught))
     } finally {
       setBusy(false)
     }
-  }, [catalog, refreshAll])
+  }, [catalog, recordActivity, refreshAll])
+
+  const confirmClearCatalog = useCallback(() => {
+    if (busy || !catalogReady) return
+    const confirmed = window.confirm(
+      'Clear the catalog? This removes indexed media, sources, and generated thumbnails from this app. Original files stay on disk.',
+    )
+    if (!confirmed) return
+    void clearCatalog()
+  }, [busy, catalogReady, clearCatalog])
 
   useEffect(() => {
     if (!catalogInfo || !distanceSortActive) return
@@ -612,13 +600,10 @@ function App() {
         setSearchResults(enriched)
         setValidation(nextValidation)
         setIndexStats(nextStats)
-        setStatus(
-          `Sorted ${enriched.length.toLocaleString()} items by distance with ${selectedIndex.label}`,
-        )
       } catch (caught) {
         if (!cancelled) {
           setError(caught instanceof Error ? caught.message : String(caught))
-          setStatus('Distance sort failed')
+          recordActivity('Distance sort failed')
         }
       }
     }
@@ -638,6 +623,7 @@ function App() {
     kindFilter,
     queryPoint.lat,
     queryPoint.lon,
+    recordActivity,
     registry,
     selectedIndex,
     timeRange,
@@ -688,14 +674,12 @@ function App() {
     setGeoBounds(bounds)
     setBoundsDrawing(false)
     setResultPage(0)
-    setStatus('Area filter set')
   }, [])
 
   const clearMapGeoBounds = useCallback(() => {
     setGeoBounds(undefined)
     setBoundsDrawing(false)
     setResultPage(0)
-    setStatus('Area filter cleared')
   }, [])
 
   const toggleBoundsDrawing = useCallback(() => {
@@ -877,23 +861,39 @@ function App() {
               <FolderOpen size={17} />
               Import folder
             </button>
-            <button
-              type="button"
-              onClick={loadSampleData}
-              disabled={busy || !catalogReady}
-            >
-              <Database size={17} />
-              Sample data
-            </button>
-            <button
-              type="button"
-              className="danger"
-              onClick={clearCatalog}
-              disabled={busy || !catalogReady}
-            >
-              <Trash2 size={17} />
-              Clear
-            </button>
+            <details className="display-menu settings-menu">
+              <summary>
+                <Settings2 size={17} />
+                Settings
+              </summary>
+              <div className="display-popover settings-popover">
+                <div className="display-section">
+                  <span>Activity log</span>
+                  <div className="activity-log" aria-label="Activity log">
+                    {activityLog.map((entry) => (
+                      <div key={entry.id} className="activity-log-entry">
+                        <time dateTime={new Date(entry.createdAt).toISOString()}>
+                          {formatDateTime(entry.createdAt)}
+                        </time>
+                        <p>{entry.message}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="display-section">
+                  <span>Catalog data</span>
+                  <button
+                    type="button"
+                    className="danger settings-clear-button"
+                    onClick={confirmClearCatalog}
+                    disabled={busy || !catalogReady}
+                  >
+                    <Trash2 size={16} />
+                    Clear catalog
+                  </button>
+                </div>
+              </div>
+            </details>
           </div>
           <div
             className={`topbar-progress-slot ${importProgress ? 'active' : 'idle'}`}
@@ -1143,8 +1143,8 @@ function App() {
             <div>
               <h2>{visibleResults ? 'Nearest results' : 'Catalog results'}</h2>
               <p className="subtle">
-                {visibleRange} visible ·{' '}
-                {sources.length.toLocaleString()} sources · {status}
+                {visibleRange} visible · {sources.length.toLocaleString()}{' '}
+                sources
               </p>
             </div>
             <div className="library-actions">

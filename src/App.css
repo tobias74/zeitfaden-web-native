@@ -465,6 +465,10 @@
   z-index: 30;
 }
 
+.settings-popover {
+  width: 340px;
+}
+
 .display-section {
   display: grid;
   gap: 7px;
@@ -473,6 +477,40 @@
 .display-section > span {
   color: #58645f;
   font-size: 12px;
+}
+
+.activity-log {
+  max-height: 220px;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  padding-right: 2px;
+}
+
+.activity-log-entry {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid #e0e6e2;
+  border-radius: 6px;
+  background: #fbfcfb;
+}
+
+.activity-log-entry time {
+  color: #68746f;
+  font-size: 11px;
+}
+
+.activity-log-entry p {
+  color: #162018;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.settings-clear-button {
+  width: 100%;
+  justify-content: flex-start;
 }
 
 .segmented-control {
@@ -991,6 +1029,14 @@
 
   .topbar-actions button {
     flex: 1 1 150px;
+  }
+
+  .topbar-actions .display-menu {
+    flex: 1 1 150px;
+  }
+
+  .topbar-actions .display-menu summary {
+    width: 100%;
   }
 
   .workspace {

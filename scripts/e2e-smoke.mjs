@@ -94,85 +94,77 @@ async function main() {
     'Horizontal resize did not expand map panel',
   )
 
-  await page.getByRole('button', { name: /clear/i }).click()
-  await waitForText(page, 'Catalog cleared')
+  expect(
+    (await page.getByRole('button', { name: /sample data/i }).count()) === 0,
+    'Sample data button should not be visible',
+  )
+  expect(
+    (await page.getByRole('button', { name: /^clear$/i }).count()) === 0,
+    'Clear should not be a top-level action',
+  )
 
-  await page.getByRole('button', { name: /sample data/i }).click()
-  await waitForText(page, 'Loaded sample geotagged library')
-  await waitForText(page, 'Limmat evening')
-  await page.reload({ waitUntil: 'domcontentloaded' })
-  await waitForText(page, 'Limmat evening')
-  await waitForText(page, 'Indexed 5 geotagged items')
-  await page.screenshot({ path: '/tmp/ding-e2e-sample.png', fullPage: true })
+  const resultsSubtitle = await page.locator('.library-header .subtle').innerText()
+  expect(
+    !/Imported|Catalog cleared|Indexed|Building/i.test(resultsSubtitle),
+    `Results subtitle contains operation status: ${resultsSubtitle}`,
+  )
+
+  await page.getByText('Settings', { exact: true }).click()
+  await waitForText(page, 'Activity log')
+  await waitForText(page, 'Clear catalog')
+
+  let sawClearConfirmation = false
+  page.once('dialog', async (dialog) => {
+    sawClearConfirmation = true
+    expect(
+      /Clear the catalog/i.test(dialog.message()),
+      'Clear confirmation dialog had unexpected copy',
+    )
+    await dialog.accept()
+  })
+  await page.getByRole('button', { name: /clear catalog/i }).click()
+  expect(sawClearConfirmation, 'Clear catalog did not ask for confirmation')
+  await waitForText(page, 'Catalog cleared')
+  await page.screenshot({ path: '/tmp/ding-e2e-settings.png', fullPage: true })
+  await page.getByText('Settings', { exact: true }).click()
 
   await page.getByText('Display').click()
   await page.getByRole('button', { name: /list/i }).click()
   await page.getByRole('button', { name: /large/i }).click()
   await page.locator('.media-grid-list').waitFor({ timeout: 5_000 })
   await page.locator('.media-thumb-large').waitFor({ timeout: 5_000 })
-  await page
-    .locator('.media-list-columns')
-    .filter({ hasText: '47.37690, 8.54170' })
-    .first()
-    .waitFor({ timeout: 5_000 })
   await page.getByRole('button', { name: /images/i }).click()
   await page.locator('.media-grid-images').waitFor({ timeout: 5_000 })
   await page.getByLabel('Show metadata').uncheck()
-  await page.locator('.media-overlay').first().waitFor({
-    state: 'detached',
-    timeout: 5_000,
-  })
   await page.getByLabel('Show metadata').check()
   await page.getByRole('button', { name: /cards/i }).click()
   await page.getByText('Display').click()
 
   await page
     .locator('label')
-    .filter({ hasText: 'GPS' })
-    .locator('select')
-    .selectOption('no')
-  await waitForText(page, 'Kitchen no GPS')
-  await page
-    .locator('label')
-    .filter({ hasText: 'GPS' })
-    .locator('select')
-    .selectOption('all')
-
-  await page.getByRole('button', { name: /search nearest/i }).click()
-  await waitForText(page, 'Brute force is the comparison baseline')
-  await waitForText(page, '0 m')
-
-  await page
-    .locator('label')
-    .filter({ hasText: 'Engine' })
-    .locator('select')
-    .selectOption('dynamic-z-order-cells')
-  await page.getByRole('button', { name: /search nearest/i }).click()
-  await waitForText(page, 'Result order matches brute force')
-
-  const nodesText = await page
-    .locator('dt', { hasText: 'Nodes' })
-    .locator('..')
-    .locator('dd')
-    .innerText()
-  expect(
-    Number(nodesText.replace(/,/g, '')) > 0,
-    'Dynamic Z-order index visited no cells',
-  )
-
-  await page
-    .locator('label')
     .filter({ hasText: 'From' })
     .locator('input')
-    .fill('2024-01-01')
+    .fill('2024-01-01T00:00')
   await page
     .locator('label')
     .filter({ hasText: 'To' })
     .locator('input')
-    .fill('2024-12-31')
-  await page.getByRole('button', { name: /search nearest/i }).click()
-  await waitForText(page, 'Result order matches brute force')
-  await waitForText(page, 'Limmat evening')
+    .fill('2024-12-31T23:59')
+  expect(
+    page.url().includes('from=2024-01-01T00%3A00'),
+    'From time was not reflected in the URL',
+  )
+
+  await page
+    .locator('label')
+    .filter({ hasText: 'Sort' })
+    .locator('select')
+    .selectOption('distance')
+  await page
+    .locator('label')
+    .filter({ hasText: 'Engine' })
+    .locator('select')
+    .waitFor({ timeout: 5_000 })
 
   await page.screenshot({ path: '/tmp/ding-e2e-final.png', fullPage: true })
 
@@ -190,7 +182,7 @@ async function main() {
   console.log('E2E smoke passed')
   console.log('Screenshots:')
   console.log('/tmp/ding-e2e-initial.png')
-  console.log('/tmp/ding-e2e-sample.png')
+  console.log('/tmp/ding-e2e-settings.png')
   console.log('/tmp/ding-e2e-final.png')
 }
 
