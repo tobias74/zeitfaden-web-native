@@ -1,6 +1,7 @@
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm'
 import * as exifr from 'exifr'
 import { DynamicZOrderGeoIndex } from '../../geo/dynamicZOrderGeoIndex'
+import { SegmentedBallTreeGeoIndex } from '../../geo/segmentedBallTreeGeoIndex'
 import { SegmentedKdTreeGeoIndex } from '../../geo/segmentedKdTreeGeoIndex'
 import {
   createDynamicZOrderManifest,
@@ -10,6 +11,13 @@ import {
   validateDynamicZOrderManifest,
   type DynamicZOrderIndexManifest,
 } from '../../geo/dynamicZOrderPersistence'
+import {
+  createSegmentedBallTreeManifest,
+  decodeSegmentedBallTreeSnapshot,
+  encodeSegmentedBallTreeSnapshot,
+  type SegmentedBallTreeManifest,
+  validateSegmentedBallTreeManifest,
+} from '../../geo/segmentedBallTreePersistence'
 import {
   createSegmentedKdTreeManifest,
   decodeSegmentedKdTreeSnapshot,
@@ -124,7 +132,10 @@ type IdbMetadata = {
 
 type IdbIndexCache = {
   id: string
-  manifest: DynamicZOrderIndexManifest | SegmentedKdTreeManifest
+  manifest:
+    | DynamicZOrderIndexManifest
+    | SegmentedKdTreeManifest
+    | SegmentedBallTreeManifest
   data: ArrayBuffer
 }
 
@@ -222,6 +233,10 @@ type CatalogStore = {
     catalogEpoch: number,
   ): Promise<{ pointCount: number; segmentCount: number } | undefined>
   savePersistedSegmentedKdTreeIndex(catalogEpoch: number): Promise<void>
+  loadPersistedSegmentedBallTreeIndex(
+    catalogEpoch: number,
+  ): Promise<{ pointCount: number; segmentCount: number } | undefined>
+  savePersistedSegmentedBallTreeIndex(catalogEpoch: number): Promise<void>
   buildSearchIndexes(
     indexId: string,
     forceRebuild: boolean,
@@ -264,6 +279,7 @@ const IMPORT_TRACE_ENABLED = false
 const CATALOG_EPOCH_KEY = 'catalogEpoch'
 const DYNAMIC_INDEX_CACHE_KEY = 'dynamic-z-order-cells:v1'
 const SEGMENTED_KD_TREE_CACHE_KEY = 'segmented-kd-tree:v1'
+const SEGMENTED_BALL_TREE_CACHE_KEY = 'segmented-ball-tree:v1'
 
 const ctx = self as unknown as {
   postMessage: (message: unknown) => void
@@ -597,6 +613,15 @@ async function segmentedKdTreeOpfsDirectory(): Promise<FileSystemDirectoryHandle
   return engine.getDirectoryHandle('v1', { create: true })
 }
 
+async function segmentedBallTreeOpfsDirectory(): Promise<FileSystemDirectoryHandle> {
+  const root = await navigator.storage.getDirectory()
+  const indexes = await root.getDirectoryHandle('indexes', { create: true })
+  const engine = await indexes.getDirectoryHandle('segmented-ball-tree', {
+    create: true,
+  })
+  return engine.getDirectoryHandle('v1', { create: true })
+}
+
 async function readOpfsFile(
   directory: FileSystemDirectoryHandle,
   name: string,
@@ -634,6 +659,14 @@ function segmentedKdTreeIndex(): SegmentedKdTreeGeoIndex {
   const index = geoIndexRegistry.get('segmented-kd-tree')
   if (!(index instanceof SegmentedKdTreeGeoIndex)) {
     throw new Error('Segmented KD-tree index is not available.')
+  }
+  return index
+}
+
+function segmentedBallTreeIndex(): SegmentedBallTreeGeoIndex {
+  const index = geoIndexRegistry.get('segmented-ball-tree')
+  if (!(index instanceof SegmentedBallTreeGeoIndex)) {
+    throw new Error('Segmented ball-tree index is not available.')
   }
   return index
 }
@@ -735,6 +768,30 @@ async function restoreSegmentedKdTreeIndexFromData(
   }
 }
 
+async function restoreSegmentedBallTreeIndexFromData(
+  manifest: SegmentedBallTreeManifest,
+  data: ArrayBuffer,
+  catalogEpoch: number,
+): Promise<{ pointCount: number; segmentCount: number }> {
+  validateSegmentedBallTreeManifest(manifest, catalogEpoch)
+  const checksum = await sha256Hex(data)
+  if (checksum !== manifest.dataChecksum) {
+    throw new Error('Segmented ball-tree index checksum does not match manifest.')
+  }
+  const snapshot = decodeSegmentedBallTreeSnapshot(data)
+  if (
+    snapshot.pointCount !== manifest.pointCount ||
+    snapshot.segmentCount !== manifest.segmentCount
+  ) {
+    throw new Error('Segmented ball-tree index manifest count mismatch.')
+  }
+  segmentedBallTreeIndex().restore(snapshot)
+  return {
+    pointCount: snapshot.pointCount,
+    segmentCount: snapshot.segmentCount,
+  }
+}
+
 async function loadOpfsDynamicIndex(
   catalogEpoch: number,
 ): Promise<{ pointCount: number; cellCount: number } | undefined> {
@@ -777,6 +834,27 @@ async function loadOpfsSegmentedKdTreeIndex(
   }
 }
 
+async function loadOpfsSegmentedBallTreeIndex(
+  catalogEpoch: number,
+): Promise<{ pointCount: number; segmentCount: number } | undefined> {
+  try {
+    const directory = await segmentedBallTreeOpfsDirectory()
+    const [manifestFile, dataFile] = await Promise.all([
+      readOpfsFile(directory, 'manifest.json'),
+      readOpfsFile(directory, 'index.bin'),
+    ])
+    if (!manifestFile || !dataFile) return undefined
+
+    return await restoreSegmentedBallTreeIndexFromData(
+      JSON.parse(await manifestFile.text()) as SegmentedBallTreeManifest,
+      await dataFile.arrayBuffer(),
+      catalogEpoch,
+    )
+  } catch {
+    return undefined
+  }
+}
+
 async function saveOpfsDynamicIndex(catalogEpoch: number): Promise<void> {
   const index = dynamicZOrderIndex()
   const snapshot = index.snapshot()
@@ -804,6 +882,25 @@ async function saveOpfsSegmentedKdTreeIndex(catalogEpoch: number): Promise<void>
     await sha256Hex(data),
   )
   const directory = await segmentedKdTreeOpfsDirectory()
+  await writeOpfsFile(directory, 'index.bin', data)
+  await writeOpfsFile(
+    directory,
+    'manifest.json',
+    JSON.stringify(manifest),
+  )
+}
+
+async function saveOpfsSegmentedBallTreeIndex(
+  catalogEpoch: number,
+): Promise<void> {
+  const snapshot = segmentedBallTreeIndex().snapshot()
+  const data = encodeSegmentedBallTreeSnapshot(snapshot)
+  const manifest = createSegmentedBallTreeManifest(
+    snapshot,
+    catalogEpoch,
+    await sha256Hex(data),
+  )
+  const directory = await segmentedBallTreeOpfsDirectory()
   await writeOpfsFile(directory, 'index.bin', data)
   await writeOpfsFile(
     directory,
@@ -856,6 +953,28 @@ async function loadIdbSegmentedKdTreeIndex(
   }
 }
 
+async function loadIdbSegmentedBallTreeIndex(
+  catalogEpoch: number,
+): Promise<{ pointCount: number; segmentCount: number } | undefined> {
+  try {
+    const database = await requireIndexedDb()
+    const transaction = database.transaction('indexCache', 'readonly')
+    const done = idbTransactionDone(transaction)
+    const row = await idbRequest<IdbIndexCache | undefined>(
+      transaction.objectStore('indexCache').get(SEGMENTED_BALL_TREE_CACHE_KEY),
+    )
+    await done
+    if (!row) return undefined
+    return await restoreSegmentedBallTreeIndexFromData(
+      row.manifest as SegmentedBallTreeManifest,
+      row.data,
+      catalogEpoch,
+    )
+  } catch {
+    return undefined
+  }
+}
+
 async function saveIdbDynamicIndex(catalogEpoch: number): Promise<void> {
   const snapshot = dynamicZOrderIndex().snapshot()
   const data = encodeDynamicZOrderSnapshot(snapshot)
@@ -888,6 +1007,25 @@ async function saveIdbSegmentedKdTreeIndex(catalogEpoch: number): Promise<void> 
   const done = idbTransactionDone(transaction)
   transaction.objectStore('indexCache').put({
     id: SEGMENTED_KD_TREE_CACHE_KEY,
+    manifest,
+    data,
+  } satisfies IdbIndexCache)
+  await done
+}
+
+async function saveIdbSegmentedBallTreeIndex(catalogEpoch: number): Promise<void> {
+  const snapshot = segmentedBallTreeIndex().snapshot()
+  const data = encodeSegmentedBallTreeSnapshot(snapshot)
+  const manifest = createSegmentedBallTreeManifest(
+    snapshot,
+    catalogEpoch,
+    await sha256Hex(data),
+  )
+  const database = await requireIndexedDb()
+  const transaction = database.transaction('indexCache', 'readwrite')
+  const done = idbTransactionDone(transaction)
+  transaction.objectStore('indexCache').put({
+    id: SEGMENTED_BALL_TREE_CACHE_KEY,
     manifest,
     data,
   } satisfies IdbIndexCache)
@@ -3235,7 +3373,9 @@ async function buildSearchIndexes(
       ? geoIndexRegistry.get('brute-force')
       : indexId === 'segmented-kd-tree'
         ? segmentedKdTreeIndex()
-        : dynamicZOrderIndex()
+        : indexId === 'segmented-ball-tree'
+          ? segmentedBallTreeIndex()
+          : dynamicZOrderIndex()
 
   postProgress({
     phase: 'loading',
@@ -3258,6 +3398,8 @@ async function buildSearchIndexes(
       try {
         if (index.id === 'segmented-kd-tree') {
           await store.savePersistedSegmentedKdTreeIndex(catalogEpoch)
+        } else if (index.id === 'segmented-ball-tree') {
+          await store.savePersistedSegmentedBallTreeIndex(catalogEpoch)
         } else if (index.id === 'dynamic-z-order-cells') {
           await store.savePersistedDynamicIndex(catalogEpoch)
         }
@@ -3334,6 +3476,33 @@ async function buildSearchIndexes(
         engineCount: geoIndexRegistry.indexes.length + 2,
       }
     }
+  } else if (!forceRebuild && index.id === 'segmented-ball-tree') {
+    const restored = await store.loadPersistedSegmentedBallTreeIndex(
+      catalogEpoch,
+    )
+    if (restored) {
+      preparedSearchIndex = {
+        indexId: index.id,
+        catalogEpoch,
+        cacheDirty: false,
+      }
+      postProgress({
+        phase: 'ready',
+        pointCount: restored.pointCount,
+        builtIndexes: totalIndexes,
+        totalIndexes,
+        currentIndexId: index.id,
+        currentIndexLabel: index.label,
+        currentIndexProcessedPoints: restored.pointCount,
+        currentIndexTotalPoints: restored.pointCount,
+      })
+
+      return {
+        pointCount: restored.pointCount,
+        buildTimeMs: performance.now() - startedAt,
+        engineCount: geoIndexRegistry.indexes.length + 2,
+      }
+    }
   }
 
   const points = await store.getGeoPoints({})
@@ -3375,6 +3544,8 @@ async function buildSearchIndexes(
     try {
       if (index.id === 'segmented-kd-tree') {
         await store.savePersistedSegmentedKdTreeIndex(catalogEpoch)
+      } else if (index.id === 'segmented-ball-tree') {
+        await store.savePersistedSegmentedBallTreeIndex(catalogEpoch)
       } else if (index.id === 'dynamic-z-order-cells') {
         await store.savePersistedDynamicIndex(catalogEpoch)
       }
@@ -3725,6 +3896,14 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
       await ensureMode()
       return saveOpfsSegmentedKdTreeIndex(catalogEpoch)
     },
+    async loadPersistedSegmentedBallTreeIndex(catalogEpoch) {
+      await ensureMode()
+      return loadOpfsSegmentedBallTreeIndex(catalogEpoch)
+    },
+    async savePersistedSegmentedBallTreeIndex(catalogEpoch) {
+      await ensureMode()
+      return saveOpfsSegmentedBallTreeIndex(catalogEpoch)
+    },
     async buildSearchIndexes(indexId, forceRebuild, postProgress) {
       await ensureMode()
       return buildSearchIndexes(this, indexId, forceRebuild, postProgress)
@@ -3819,6 +3998,8 @@ const indexedDbCatalogStore: CatalogStore = {
   savePersistedDynamicIndex: saveIdbDynamicIndex,
   loadPersistedSegmentedKdTreeIndex: loadIdbSegmentedKdTreeIndex,
   savePersistedSegmentedKdTreeIndex: saveIdbSegmentedKdTreeIndex,
+  loadPersistedSegmentedBallTreeIndex: loadIdbSegmentedBallTreeIndex,
+  savePersistedSegmentedBallTreeIndex: saveIdbSegmentedBallTreeIndex,
   buildSearchIndexes(indexId, forceRebuild, postProgress) {
     return buildSearchIndexes(this, indexId, forceRebuild, postProgress)
   },

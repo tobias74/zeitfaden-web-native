@@ -3,6 +3,11 @@ import type { GeoIndexPoint, GeoSearchQuery, GeoTemporalIndex } from '../types'
 import { BruteForceGeoIndex } from './bruteForceIndex'
 import { DynamicZOrderGeoIndex } from './dynamicZOrderGeoIndex'
 import { GeoIndexRegistry } from './registry'
+import { SegmentedBallTreeGeoIndex } from './segmentedBallTreeGeoIndex'
+import {
+  decodeSegmentedBallTreeSnapshot,
+  encodeSegmentedBallTreeSnapshot,
+} from './segmentedBallTreePersistence'
 import { SegmentedKdTreeGeoIndex } from './segmentedKdTreeGeoIndex'
 
 const points: GeoIndexPoint[] = [
@@ -70,6 +75,13 @@ describe('geo indexes', () => {
   it('registry exposes the segmented KD-tree distance engine', () => {
     const registry = new GeoIndexRegistry()
     expect(registry.get('segmented-kd-tree').label).toBe('Segmented KD-tree')
+  })
+
+  it('registry exposes the segmented ball-tree distance engine', () => {
+    const registry = new GeoIndexRegistry()
+    expect(registry.get('segmented-ball-tree').label).toBe(
+      'Segmented ball tree',
+    )
   })
 
   it('dynamic Z-order index matches brute force for k=1', async () => {
@@ -212,6 +224,80 @@ describe('geo indexes', () => {
     const query = { lat: 47.38, lon: 8.54, k: 8 }
     const actual = await index.search(query)
     const expected = await oracle.search(query)
+    expect(actual.map((result) => result.mediaId)).toEqual(
+      expected.map((result) => result.mediaId),
+    )
+  })
+
+  it('segmented ball-tree index matches brute force for distance queries', async () => {
+    await expectMatchesBruteForce(new SegmentedBallTreeGeoIndex(), {
+      lat: 47.38,
+      lon: 8.54,
+      k: 5,
+    })
+  })
+
+  it('segmented ball-tree index matches brute force with filters and paging', async () => {
+    await expectMatchesBruteForce(
+      new SegmentedBallTreeGeoIndex({ leafSize: 2 }),
+      {
+        lat: 47.38,
+        lon: 8.54,
+        startTime: 100,
+        endTime: 650,
+        kind: 'geo_point',
+        geoBounds: { minLat: -1, maxLat: 60, minLon: -180, maxLon: 180 },
+        k: 3,
+        offset: 1,
+      },
+    )
+  })
+
+  it('segmented ball-tree supports incremental inserts', async () => {
+    const index = new SegmentedBallTreeGeoIndex({ leafSize: 2 })
+    const oracle = new BruteForceGeoIndex()
+    await index.build(points.slice(0, 2))
+    await oracle.build(points.slice(0, 2))
+
+    await index.insertMany(points.slice(2))
+    await index.flushPending(1)
+    await oracle.insertMany(points.slice(2))
+
+    const query = { lat: 47.38, lon: 8.54, k: 8 }
+    const actual = await index.search(query)
+    const expected = await oracle.search(query)
+    expect(actual.map((result) => result.mediaId)).toEqual(
+      expected.map((result) => result.mediaId),
+    )
+  })
+
+  it('segmented ball-tree snapshot round-trips', async () => {
+    const index = new SegmentedBallTreeGeoIndex({ leafSize: 2 })
+    await index.build(points)
+    const restored = new SegmentedBallTreeGeoIndex({ leafSize: 2 })
+    restored.restore(index.snapshot())
+
+    const query = { lat: 47.38, lon: 8.54, k: 8 }
+    const actual = await restored.search(query)
+    const expected = await index.search(query)
+    expect(actual.map((result) => result.mediaId)).toEqual(
+      expected.map((result) => result.mediaId),
+    )
+  })
+
+  it('segmented ball-tree binary snapshot round-trips', async () => {
+    const index = new SegmentedBallTreeGeoIndex({ leafSize: 2 })
+    await index.build(points)
+    const restored = new SegmentedBallTreeGeoIndex({ leafSize: 2 })
+    restored.restore(
+      decodeSegmentedBallTreeSnapshot(
+        encodeSegmentedBallTreeSnapshot(index.snapshot()),
+      ),
+    )
+
+    const query = { lat: 47.38, lon: 8.54, k: 8 }
+    const actual = await restored.search(query)
+    const expected = await index.search(query)
     expect(actual.map((result) => result.mediaId)).toEqual(
       expected.map((result) => result.mediaId),
     )

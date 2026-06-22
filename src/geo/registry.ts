@@ -6,6 +6,7 @@ import type {
 } from '../types'
 import { BruteForceGeoIndex } from './bruteForceIndex'
 import { DynamicZOrderGeoIndex } from './dynamicZOrderGeoIndex'
+import { SegmentedBallTreeGeoIndex } from './segmentedBallTreeGeoIndex'
 import { SegmentedKdTreeGeoIndex } from './segmentedKdTreeGeoIndex'
 
 export class GeoIndexRegistry {
@@ -16,6 +17,7 @@ export class GeoIndexRegistry {
       new BruteForceGeoIndex(),
       new DynamicZOrderGeoIndex(),
       new SegmentedKdTreeGeoIndex(),
+      new SegmentedBallTreeGeoIndex(),
     ]
   }
 

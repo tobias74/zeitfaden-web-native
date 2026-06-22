@@ -7,6 +7,7 @@ const options = {
     'brute-force',
     'dynamic-z-order-cells',
     'segmented-kd-tree',
+    'segmented-ball-tree',
   ],
   defaultSelectedIndexId: 'brute-force',
   defaultQueryPoint: { lat: 47.3769, lon: 8.5417 },

@@ -100,6 +100,7 @@ const DISTANCE_ENGINE_IDS = [
   'brute-force',
   'dynamic-z-order-cells',
   'segmented-kd-tree',
+  'segmented-ball-tree',
 ] as const
 const DEFAULT_QUERY_POINT = {
   lat: 47.3769,
@@ -1431,6 +1432,9 @@ function App() {
                     <option value="segmented-kd-tree">
                       {t('segmentedKdTree')}
                     </option>
+                    <option value="segmented-ball-tree">
+                      {t('segmentedBallTree')}
+                    </option>
                     <option value="brute-force">{t('bruteForceOracle')}</option>
                   </select>
                 </label>
@@ -1543,7 +1547,8 @@ function App() {
                   </div>
                 )}
               </dl>
-              {selectedIndexId === 'segmented-kd-tree' && (
+              {(selectedIndexId === 'segmented-kd-tree' ||
+                selectedIndexId === 'segmented-ball-tree') && (
                 <button
                   type="button"
                   className="secondary"

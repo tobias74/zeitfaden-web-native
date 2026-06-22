@@ -12,6 +12,7 @@ const allowedIndexes = [
   'brute-force',
   'dynamic-z-order-cells',
   'segmented-kd-tree',
+  'segmented-ball-tree',
 ]
 const allowedPageSizes = [50, 100, 250, 500]
 

@@ -32,6 +32,9 @@ const DYNAMIC_INDEX_FORMAT_VERSION: u32 = 1;
 const SEGMENTED_KD_TREE_SEGMENT_LIMIT: usize = 100_000;
 const SEGMENTED_KD_TREE_DELTA_LIMIT: usize = 50_000;
 const SEGMENTED_KD_TREE_LEAF_SIZE: usize = 64;
+const SEGMENTED_BALL_TREE_SEGMENT_LIMIT: usize = 100_000;
+const SEGMENTED_BALL_TREE_DELTA_LIMIT: usize = 50_000;
+const SEGMENTED_BALL_TREE_LEAF_SIZE: usize = 64;
 static IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
 static IMPORT_COMMIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -238,6 +241,12 @@ struct SearchIndexStats {
     candidates_inspected: i64,
     pruned_by_geo: i64,
     pruned_by_time: i64,
+    segment_count: Option<usize>,
+    delta_segment_count: Option<usize>,
+    loaded_segments: Option<usize>,
+    max_leaf_size: Option<usize>,
+    pending_point_count: Option<usize>,
+    needs_optimization: Option<bool>,
     query_purpose: Option<String>,
     storage_mode: Option<String>,
     query_time_ms: Option<f64>,
@@ -411,6 +420,41 @@ struct NativeSegmentedKdTreeIndex {
     last_stats: GeoIndexStats,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct NativeBallNode {
+    left: Option<usize>,
+    right: Option<usize>,
+    point_start: usize,
+    point_end: usize,
+    center_lat: f64,
+    center_lon: f64,
+    radius_meters: f64,
+    lat_min: f64,
+    lat_max: f64,
+    lon_min: f64,
+    lon_max: f64,
+    min_timestamp: Option<i64>,
+    max_timestamp: Option<i64>,
+    kind_mask: u8,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct NativeBallSegment {
+    id: String,
+    is_delta: bool,
+    nodes: Vec<NativeBallNode>,
+    points: Vec<GeoIndexPoint>,
+    point_count: usize,
+    max_leaf_size: usize,
+}
+
+#[derive(Clone)]
+struct NativeSegmentedBallTreeIndex {
+    segments: Vec<NativeBallSegment>,
+    pending_points: Vec<GeoIndexPoint>,
+    last_stats: GeoIndexStats,
+}
+
 #[derive(Serialize, Deserialize)]
 struct NativeSegmentedKdTreeSnapshot {
     engine_id: String,
@@ -421,6 +465,19 @@ struct NativeSegmentedKdTreeSnapshot {
     point_count: usize,
     segment_count: usize,
     segments: Vec<NativeKdSegment>,
+    pending_points: Vec<GeoIndexPoint>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct NativeSegmentedBallTreeSnapshot {
+    engine_id: String,
+    engine_version: u32,
+    segment_point_limit: usize,
+    delta_flush_point_limit: usize,
+    leaf_size: usize,
+    point_count: usize,
+    segment_count: usize,
+    segments: Vec<NativeBallSegment>,
     pending_points: Vec<GeoIndexPoint>,
 }
 
@@ -436,11 +493,24 @@ struct SegmentedKdTreeManifest {
     data_checksum: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SegmentedBallTreeManifest {
+    engine_id: String,
+    engine_version: u32,
+    catalog_epoch: i64,
+    point_count: usize,
+    segment_count: usize,
+    created_at: i64,
+    data_checksum: String,
+}
+
 #[derive(Clone)]
 struct NativeGeoIndexRegistry {
     brute_force: NativeBruteForceIndex,
     dynamic_z_order: NativeDynamicZOrderIndex,
     segmented_kd_tree: NativeSegmentedKdTreeIndex,
+    segmented_ball_tree: NativeSegmentedBallTreeIndex,
 }
 
 const EARTH_RADIUS_METERS: f64 = 6_371_008.8;
@@ -459,6 +529,7 @@ impl Default for NativeGeoIndexRegistry {
             brute_force: NativeBruteForceIndex::default(),
             dynamic_z_order: NativeDynamicZOrderIndex::default(),
             segmented_kd_tree: NativeSegmentedKdTreeIndex::default(),
+            segmented_ball_tree: NativeSegmentedBallTreeIndex::default(),
         }
     }
 }
@@ -488,6 +559,16 @@ impl Default for NativeSegmentedKdTreeIndex {
             segments: Vec::new(),
             pending_points: Vec::new(),
             last_stats: empty_geo_index_stats("segmented-kd-tree", 0),
+        }
+    }
+}
+
+impl Default for NativeSegmentedBallTreeIndex {
+    fn default() -> Self {
+        Self {
+            segments: Vec::new(),
+            pending_points: Vec::new(),
+            last_stats: empty_geo_index_stats("segmented-ball-tree", 0),
         }
     }
 }
@@ -534,6 +615,12 @@ fn empty_search_index_stats(engine_id: &str, engine_label: &str) -> SearchIndexS
         candidates_inspected: 0,
         pruned_by_geo: 0,
         pruned_by_time: 0,
+        segment_count: None,
+        delta_segment_count: None,
+        loaded_segments: None,
+        max_leaf_size: None,
+        pending_point_count: None,
+        needs_optimization: None,
         query_purpose: None,
         storage_mode: None,
         query_time_ms: None,
@@ -568,6 +655,12 @@ fn search_stats_from_geo(
         candidates_inspected: stats.candidates_inspected,
         pruned_by_geo: stats.pruned_by_geo,
         pruned_by_time: stats.pruned_by_time,
+        segment_count: stats.segment_count,
+        delta_segment_count: stats.delta_segment_count,
+        loaded_segments: stats.loaded_segments,
+        max_leaf_size: stats.max_leaf_size,
+        pending_point_count: stats.pending_point_count,
+        needs_optimization: stats.needs_optimization,
         query_purpose: None,
         storage_mode: None,
         query_time_ms: None,
@@ -641,14 +734,18 @@ fn normalize_lon(lon: f64) -> f64 {
     }
 }
 
-fn distance_meters(point: &GeoIndexPoint, query: &GeoSearchQuery) -> f64 {
-    let point_lat = to_radians(point.lat);
-    let query_lat = to_radians(query.lat);
-    let delta_lat = to_radians(query.lat - point.lat);
-    let delta_lon = to_radians(query.lon - point.lon);
+fn distance_between_coords(a_lat: f64, a_lon: f64, b_lat: f64, b_lon: f64) -> f64 {
+    let point_lat = to_radians(a_lat);
+    let query_lat = to_radians(b_lat);
+    let delta_lat = to_radians(b_lat - a_lat);
+    let delta_lon = to_radians(b_lon - a_lon);
     let a = (delta_lat / 2.0).sin().powi(2)
         + point_lat.cos() * query_lat.cos() * (delta_lon / 2.0).sin().powi(2);
     2.0 * EARTH_RADIUS_METERS * a.sqrt().atan2((1.0 - a).sqrt())
+}
+
+fn distance_meters(point: &GeoIndexPoint, query: &GeoSearchQuery) -> f64 {
+    distance_between_coords(point.lat, point.lon, query.lat, query.lon)
 }
 
 fn matches_time_range(timestamp: Option<i64>, query: &GeoSearchQuery) -> bool {
@@ -687,6 +784,30 @@ fn matches_geo_search_query(point: &GeoIndexPoint, query: &GeoSearchQuery) -> bo
     matches_time_range(point.timestamp, query)
         && matches_kind(point, query)
         && matches_geo_bounds(point, query)
+}
+
+fn kind_mask(kind: Option<&str>) -> u8 {
+    match kind {
+        Some("image") => 1,
+        Some("video") => 2,
+        Some("geo_point") => 4,
+        _ => 8,
+    }
+}
+
+fn query_kind_mask(query: &GeoSearchQuery) -> u8 {
+    match query.kind.as_deref() {
+        None | Some("all") => 15,
+        Some("media") => 1 | 2,
+        Some(kind) => kind_mask(Some(kind)),
+    }
+}
+
+fn ball_node_overlaps_geo_bounds(node: &NativeBallNode, bounds: &GeoBounds) -> bool {
+    !(node.lat_max < bounds.min_lat
+        || node.lat_min > bounds.max_lat
+        || node.lon_max < bounds.min_lon
+        || node.lon_min > bounds.max_lon)
 }
 
 fn overlaps_time_range(
@@ -950,6 +1071,454 @@ impl NativeSegmentedKdTreeIndex {
             ..empty_geo_index_stats("segmented-kd-tree", self.point_count())
         }
     }
+}
+
+impl NativeSegmentedBallTreeIndex {
+    fn build(
+        &mut self,
+        points: &[GeoIndexPoint],
+        mut on_progress: impl FnMut(usize) -> AppResult<()>,
+    ) -> AppResult<()> {
+        let start = Instant::now();
+        self.segments.clear();
+        self.pending_points.clear();
+        on_progress(0)?;
+        for (segment_index, chunk) in points.chunks(SEGMENTED_BALL_TREE_SEGMENT_LIMIT).enumerate() {
+            if let Some(segment) = self.build_segment(
+                format!("segment-{segment_index:06}"),
+                chunk
+                    .iter()
+                    .filter_map(normalized_geo_index_point)
+                    .collect::<Vec<_>>(),
+                false,
+            ) {
+                self.segments.push(segment);
+            }
+            on_progress(
+                ((segment_index + 1) * SEGMENTED_BALL_TREE_SEGMENT_LIMIT).min(points.len()),
+            )?;
+        }
+        self.last_stats =
+            self.stats_with_timing(Some(start.elapsed().as_secs_f64() * 1000.0), None);
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn insert_many(&mut self, points: &[GeoIndexPoint]) {
+        let start = Instant::now();
+        self.pending_points
+            .extend(points.iter().filter_map(normalized_geo_index_point));
+        if self.pending_points.len() >= SEGMENTED_BALL_TREE_DELTA_LIMIT {
+            self.flush_pending();
+        }
+        self.last_stats =
+            self.stats_with_timing(None, Some(start.elapsed().as_secs_f64() * 1000.0));
+    }
+
+    #[allow(dead_code)]
+    fn flush_pending(&mut self) {
+        if self.pending_points.is_empty() {
+            return;
+        }
+        let points = std::mem::take(&mut self.pending_points);
+        if let Some(segment) = self.build_segment(
+            format!(
+                "delta-{}-{}",
+                current_timestamp_millis(),
+                self.segments.len()
+            ),
+            points,
+            true,
+        ) {
+            self.segments.push(segment);
+        }
+        self.last_stats = self.stats_with_timing(None, None);
+    }
+
+    fn search(&mut self, original_query: &GeoSearchQuery) -> Vec<GeoSearchResult> {
+        let start = Instant::now();
+        let query = GeoSearchQuery {
+            lon: normalize_lon(original_query.lon),
+            ..original_query.clone()
+        };
+        let offset = query.offset.unwrap_or(0).max(0) as usize;
+        let limit = query.k.max(0) as usize;
+        let retained_limit = offset + limit;
+        let mut stats = self.stats_with_timing(None, None);
+        if limit == 0 || self.point_count() == 0 {
+            stats.last_query_time_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+            self.last_stats = stats;
+            return Vec::new();
+        }
+
+        let mut top_k = Vec::<GeoSearchResult>::new();
+        let mut queue = Vec::<(usize, usize, f64)>::new();
+        for (segment_index, segment) in self.segments.iter().enumerate() {
+            if !segment.nodes.is_empty() {
+                enqueue_ball_node(segment, segment_index, 0, &query, &mut stats, &mut queue);
+            }
+        }
+
+        while !queue.is_empty() {
+            queue.sort_by(|a, b| {
+                b.2.partial_cmp(&a.2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.1.cmp(&a.1))
+            });
+            let (segment_index, node_index, lower_bound) = queue.pop().unwrap();
+            let worst = if top_k.len() == retained_limit {
+                top_k
+                    .last()
+                    .map(|result| result.distance_meters)
+                    .unwrap_or(f64::INFINITY)
+            } else {
+                f64::INFINITY
+            };
+            if top_k.len() == retained_limit && lower_bound > worst {
+                stats.pruned_by_geo += (queue.len() + 1) as i64;
+                break;
+            }
+
+            let segment = &self.segments[segment_index];
+            let node = &segment.nodes[node_index];
+            stats.nodes_visited += 1;
+            if node.left.is_some() || node.right.is_some() {
+                if let Some(left) = node.left {
+                    enqueue_ball_node(segment, segment_index, left, &query, &mut stats, &mut queue);
+                }
+                if let Some(right) = node.right {
+                    enqueue_ball_node(
+                        segment,
+                        segment_index,
+                        right,
+                        &query,
+                        &mut stats,
+                        &mut queue,
+                    );
+                }
+                continue;
+            }
+
+            stats.pages_read += 1;
+            for point in &segment.points[node.point_start..node.point_end] {
+                stats.candidates_inspected += 1;
+                if !matches_geo_search_query(point, &query) {
+                    continue;
+                }
+                stats.distance_computations += 1;
+                top_k.push(GeoSearchResult {
+                    media_id: point.media_id.clone(),
+                    distance_meters: distance_meters(point, &query),
+                });
+                if top_k.len() >= retained_limit {
+                    sort_geo_results(&mut top_k);
+                    top_k.truncate(retained_limit);
+                }
+            }
+        }
+
+        for point in &self.pending_points {
+            stats.candidates_inspected += 1;
+            if !matches_geo_search_query(point, &query) {
+                continue;
+            }
+            stats.distance_computations += 1;
+            top_k.push(GeoSearchResult {
+                media_id: point.media_id.clone(),
+                distance_meters: distance_meters(point, &query),
+            });
+            if top_k.len() >= retained_limit {
+                sort_geo_results(&mut top_k);
+                top_k.truncate(retained_limit);
+            }
+        }
+
+        sort_geo_results(&mut top_k);
+        stats.last_query_time_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+        self.last_stats = stats;
+        top_k
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>()
+    }
+
+    fn snapshot(&self) -> NativeSegmentedBallTreeSnapshot {
+        NativeSegmentedBallTreeSnapshot {
+            engine_id: "segmented-ball-tree".to_string(),
+            engine_version: 1,
+            segment_point_limit: SEGMENTED_BALL_TREE_SEGMENT_LIMIT,
+            delta_flush_point_limit: SEGMENTED_BALL_TREE_DELTA_LIMIT,
+            leaf_size: SEGMENTED_BALL_TREE_LEAF_SIZE,
+            point_count: self.point_count(),
+            segment_count: self.segments.len(),
+            segments: self.segments.clone(),
+            pending_points: self.pending_points.clone(),
+        }
+    }
+
+    fn restore(&mut self, snapshot: NativeSegmentedBallTreeSnapshot) -> AppResult<()> {
+        if snapshot.engine_id != "segmented-ball-tree"
+            || snapshot.engine_version != 1
+            || snapshot.leaf_size != SEGMENTED_BALL_TREE_LEAF_SIZE
+        {
+            return Err("Segmented ball-tree index snapshot is incompatible.".to_string());
+        }
+        self.segments = snapshot.segments;
+        self.pending_points = snapshot.pending_points;
+        if snapshot.point_count != self.point_count()
+            || snapshot.segment_count != self.segments.len()
+        {
+            self.segments.clear();
+            self.pending_points.clear();
+            return Err("Segmented ball-tree index snapshot is incomplete.".to_string());
+        }
+        self.last_stats = self.stats_with_timing(Some(0.0), None);
+        Ok(())
+    }
+
+    fn build_segment(
+        &self,
+        id: String,
+        points: Vec<GeoIndexPoint>,
+        is_delta: bool,
+    ) -> Option<NativeBallSegment> {
+        if points.is_empty() {
+            return None;
+        }
+        let mut segment = NativeBallSegment {
+            id,
+            is_delta,
+            nodes: Vec::new(),
+            points: Vec::new(),
+            point_count: points.len(),
+            max_leaf_size: 0,
+        };
+        self.build_node(&mut segment, points);
+        Some(segment)
+    }
+
+    fn build_node(&self, segment: &mut NativeBallSegment, points: Vec<GeoIndexPoint>) -> usize {
+        let node_base = ball_node_for_points(&points);
+        let node_index = segment.nodes.len();
+        segment.nodes.push(node_base.clone());
+
+        if points.len() <= SEGMENTED_BALL_TREE_LEAF_SIZE {
+            let point_start = segment.points.len();
+            let mut sorted_points = points;
+            sorted_points.sort_by(|a, b| a.media_id.cmp(&b.media_id));
+            let point_end = point_start + sorted_points.len();
+            segment.max_leaf_size = segment.max_leaf_size.max(sorted_points.len());
+            segment.points.extend(sorted_points);
+            segment.nodes[node_index] = NativeBallNode {
+                point_start,
+                point_end,
+                ..node_base
+            };
+            return node_index;
+        }
+
+        let (left_points, right_points) = split_ball_points(points, &node_base);
+        let left = self.build_node(segment, left_points);
+        let right = self.build_node(segment, right_points);
+        segment.nodes[node_index] = NativeBallNode {
+            left: Some(left),
+            right: Some(right),
+            ..node_base
+        };
+        node_index
+    }
+
+    fn point_count(&self) -> usize {
+        self.segments
+            .iter()
+            .map(|segment| segment.point_count)
+            .sum::<usize>()
+            + self.pending_points.len()
+    }
+
+    fn delta_segment_count(&self) -> usize {
+        self.segments
+            .iter()
+            .filter(|segment| segment.is_delta)
+            .count()
+    }
+
+    fn max_leaf_size(&self) -> usize {
+        self.segments
+            .iter()
+            .map(|segment| segment.max_leaf_size)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn stats_with_timing(
+        &self,
+        build_time_ms: Option<f64>,
+        insert_time_ms: Option<f64>,
+    ) -> GeoIndexStats {
+        GeoIndexStats {
+            build_time_ms,
+            insert_time_ms,
+            index_size_bytes: Some(self.point_count() * 48 + self.segments.len() * 120),
+            segment_count: Some(self.segments.len()),
+            delta_segment_count: Some(self.delta_segment_count()),
+            loaded_segments: Some(self.segments.len()),
+            max_leaf_size: Some(self.max_leaf_size()),
+            pending_point_count: Some(self.pending_points.len()),
+            needs_optimization: Some(self.delta_segment_count() >= 8),
+            ..empty_geo_index_stats("segmented-ball-tree", self.point_count())
+        }
+    }
+}
+
+fn enqueue_ball_node(
+    segment: &NativeBallSegment,
+    segment_index: usize,
+    node_index: usize,
+    query: &GeoSearchQuery,
+    stats: &mut GeoIndexStats,
+    queue: &mut Vec<(usize, usize, f64)>,
+) {
+    let Some(node) = segment.nodes.get(node_index) else {
+        return;
+    };
+    if !overlaps_time_range(node.min_timestamp, node.max_timestamp, query) {
+        stats.pruned_by_time += 1;
+        return;
+    }
+    if node.kind_mask & query_kind_mask(query) == 0 {
+        stats.pruned_by_geo += 1;
+        return;
+    }
+    if let Some(bounds) = query.geo_bounds.as_ref() {
+        if !ball_node_overlaps_geo_bounds(node, bounds) {
+            stats.pruned_by_geo += 1;
+            return;
+        }
+    }
+    let lower_bound =
+        (distance_between_coords(node.center_lat, node.center_lon, query.lat, query.lon)
+            - node.radius_meters)
+            .max(0.0);
+    queue.push((segment_index, node_index, lower_bound));
+}
+
+fn ball_node_for_points(points: &[GeoIndexPoint]) -> NativeBallNode {
+    let mut lat_min = f64::INFINITY;
+    let mut lat_max = f64::NEG_INFINITY;
+    let mut lon_min = f64::INFINITY;
+    let mut lon_max = f64::NEG_INFINITY;
+    let mut lat_sum = 0.0;
+    let mut lon_sum = 0.0;
+    let mut min_timestamp = None;
+    let mut max_timestamp = None;
+    let mut node_kind_mask = 0_u8;
+
+    for point in points {
+        lat_min = lat_min.min(point.lat);
+        lat_max = lat_max.max(point.lat);
+        lon_min = lon_min.min(point.lon);
+        lon_max = lon_max.max(point.lon);
+        lat_sum += point.lat;
+        lon_sum += point.lon;
+        node_kind_mask |= kind_mask(point.kind.as_deref());
+        if let Some(timestamp) = point.timestamp {
+            if min_timestamp.is_none_or(|value| timestamp < value) {
+                min_timestamp = Some(timestamp);
+            }
+            if max_timestamp.is_none_or(|value| timestamp > value) {
+                max_timestamp = Some(timestamp);
+            }
+        }
+    }
+
+    let center_lat = lat_sum / points.len() as f64;
+    let center_lon = normalize_lon(lon_sum / points.len() as f64);
+    let radius_meters = points
+        .iter()
+        .map(|point| distance_between_coords(point.lat, point.lon, center_lat, center_lon))
+        .fold(0.0, f64::max);
+
+    NativeBallNode {
+        left: None,
+        right: None,
+        point_start: 0,
+        point_end: 0,
+        center_lat,
+        center_lon,
+        radius_meters,
+        lat_min,
+        lat_max,
+        lon_min,
+        lon_max,
+        min_timestamp,
+        max_timestamp,
+        kind_mask: node_kind_mask,
+    }
+}
+
+fn split_ball_points(
+    points: Vec<GeoIndexPoint>,
+    node: &NativeBallNode,
+) -> (Vec<GeoIndexPoint>, Vec<GeoIndexPoint>) {
+    let seed = points[0].clone();
+    let pivot_a = farthest_ball_point(&seed, &points);
+    let pivot_b = farthest_ball_point(&pivot_a, &points);
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+
+    for point in points {
+        let distance_a = distance_between_coords(point.lat, point.lon, pivot_a.lat, pivot_a.lon);
+        let distance_b = distance_between_coords(point.lat, point.lon, pivot_b.lat, pivot_b.lon);
+        if distance_a < distance_b
+            || (distance_a == distance_b && point.media_id <= pivot_a.media_id)
+        {
+            left.push(point);
+        } else {
+            right.push(point);
+        }
+    }
+
+    if !left.is_empty() && !right.is_empty() {
+        return (left, right);
+    }
+
+    let mut sorted = left;
+    sorted.extend(right);
+    if node.lon_max - node.lon_min > node.lat_max - node.lat_min {
+        sorted.sort_by(|a, b| {
+            a.lon
+                .partial_cmp(&b.lon)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.media_id.cmp(&b.media_id))
+        });
+    } else {
+        sorted.sort_by(|a, b| {
+            a.lat
+                .partial_cmp(&b.lat)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.media_id.cmp(&b.media_id))
+        });
+    }
+    let middle = (sorted.len() / 2).max(1);
+    let right = sorted.split_off(middle);
+    (sorted, right)
+}
+
+fn farthest_ball_point(from: &GeoIndexPoint, points: &[GeoIndexPoint]) -> GeoIndexPoint {
+    let mut farthest = points[0].clone();
+    let mut farthest_distance = -1.0;
+    for point in points {
+        let distance = distance_between_coords(point.lat, point.lon, from.lat, from.lon);
+        if distance > farthest_distance
+            || (distance == farthest_distance && point.media_id < farthest.media_id)
+        {
+            farthest = point.clone();
+            farthest_distance = distance;
+        }
+    }
+    farthest
 }
 
 fn normalized_geo_index_point(point: &GeoIndexPoint) -> Option<GeoIndexPoint> {
@@ -1378,6 +1947,15 @@ fn segmented_kd_tree_index_dir(app: &AppHandle) -> AppResult<PathBuf> {
     Ok(dir)
 }
 
+fn segmented_ball_tree_index_dir(app: &AppHandle) -> AppResult<PathBuf> {
+    let dir = app_data_dir(app)?
+        .join("indexes")
+        .join("segmented-ball-tree")
+        .join("v1");
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    Ok(dir)
+}
+
 fn validate_dynamic_manifest(manifest: &DynamicIndexManifest, catalog_epoch: i64) -> AppResult<()> {
     if manifest.engine_id != "dynamic-z-order-cells"
         || manifest.engine_version != 1
@@ -1537,6 +2115,98 @@ fn save_persisted_segmented_kd_tree_index(app: &AppHandle, catalog_epoch: i64) -
     let data = serde_json::to_vec(&snapshot).map_err(|error| error.to_string())?;
     let manifest = SegmentedKdTreeManifest {
         engine_id: "segmented-kd-tree".to_string(),
+        engine_version: 1,
+        catalog_epoch,
+        point_count: snapshot.point_count,
+        segment_count: snapshot.segment_count,
+        created_at: current_timestamp_millis(),
+        data_checksum: checksum_hex(&data),
+    };
+    drop(registry);
+
+    let mut data_file = File::create(dir.join("index.json")).map_err(|error| error.to_string())?;
+    data_file
+        .write_all(&data)
+        .map_err(|error| error.to_string())?;
+    fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn validate_segmented_ball_tree_manifest(
+    manifest: &SegmentedBallTreeManifest,
+    catalog_epoch: i64,
+) -> AppResult<()> {
+    if manifest.engine_id != "segmented-ball-tree"
+        || manifest.engine_version != 1
+        || manifest.catalog_epoch != catalog_epoch
+    {
+        return Err("Segmented ball-tree index manifest does not match catalog.".to_string());
+    }
+    Ok(())
+}
+
+fn load_persisted_segmented_ball_tree_index(
+    app: &AppHandle,
+    catalog_epoch: i64,
+) -> AppResult<Option<(usize, usize)>> {
+    let dir = segmented_ball_tree_index_dir(app)?;
+    let manifest_path = dir.join("manifest.json");
+    let data_path = dir.join("index.json");
+    if !manifest_path.exists() || !data_path.exists() {
+        return Ok(None);
+    }
+
+    let manifest = match fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<SegmentedBallTreeManifest>(&content).ok())
+    {
+        Some(manifest) => manifest,
+        None => return Ok(None),
+    };
+    if validate_segmented_ball_tree_manifest(&manifest, catalog_epoch).is_err() {
+        return Ok(None);
+    }
+
+    let data = match fs::read(&data_path) {
+        Ok(data) => data,
+        Err(_) => return Ok(None),
+    };
+    if checksum_hex(&data) != manifest.data_checksum {
+        return Ok(None);
+    }
+
+    let snapshot = match serde_json::from_slice::<NativeSegmentedBallTreeSnapshot>(&data) {
+        Ok(snapshot) => snapshot,
+        Err(_) => return Ok(None),
+    };
+    if snapshot.point_count != manifest.point_count
+        || snapshot.segment_count != manifest.segment_count
+    {
+        return Ok(None);
+    }
+
+    let point_count = snapshot.point_count;
+    let segment_count = snapshot.segment_count;
+    let mut registry = geo_index_registry()
+        .lock()
+        .map_err(|error| error.to_string())?;
+    registry.segmented_ball_tree.restore(snapshot)?;
+    Ok(Some((point_count, segment_count)))
+}
+
+fn save_persisted_segmented_ball_tree_index(app: &AppHandle, catalog_epoch: i64) -> AppResult<()> {
+    let dir = segmented_ball_tree_index_dir(app)?;
+    let registry = geo_index_registry()
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let snapshot = registry.segmented_ball_tree.snapshot();
+    let data = serde_json::to_vec(&snapshot).map_err(|error| error.to_string())?;
+    let manifest = SegmentedBallTreeManifest {
+        engine_id: "segmented-ball-tree".to_string(),
         engine_version: 1,
         catalog_epoch,
         point_count: snapshot.point_count,
@@ -3057,6 +3727,7 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
         let (engine_label, exact, persistent) = match engine_id.as_str() {
             "brute-force" => ("Brute force oracle", true, false),
             "segmented-kd-tree" => ("Segmented KD-tree", true, true),
+            "segmented-ball-tree" => ("Segmented ball tree", true, true),
             _ => ("Dynamic Z-order cells", true, true),
         };
         let rows = enriched_distance_rows(items, results);
@@ -3301,11 +3972,13 @@ fn build_search_indexes(
     let selected_index_id = match index_id.as_str() {
         "brute-force" => "brute-force",
         "segmented-kd-tree" => "segmented-kd-tree",
+        "segmented-ball-tree" => "segmented-ball-tree",
         _ => "dynamic-z-order-cells",
     };
     let selected_index_label = match selected_index_id {
         "brute-force" => "Brute force oracle",
         "segmented-kd-tree" => "Segmented KD-tree",
+        "segmented-ball-tree" => "Segmented ball tree",
         _ => "Dynamic Z-order cells",
     };
     emit_geo_index_progress(
@@ -3324,6 +3997,7 @@ fn build_search_indexes(
 
     let epoch = if selected_index_id == "dynamic-z-order-cells"
         || selected_index_id == "segmented-kd-tree"
+        || selected_index_id == "segmented-ball-tree"
     {
         let conn = connect(&app)?;
         Some(catalog_epoch(&conn)?)
@@ -3332,16 +4006,19 @@ fn build_search_indexes(
     };
     if let Some(epoch) = epoch {
         let should_restore = !force_rebuild.unwrap_or(false);
-        let restored = if selected_index_id == "segmented-kd-tree" {
-            should_restore
+        let restored = match selected_index_id {
+            "segmented-kd-tree" => should_restore
                 .then(|| load_persisted_segmented_kd_tree_index(&app, epoch))
                 .transpose()?
-                .flatten()
-        } else {
-            should_restore
+                .flatten(),
+            "segmented-ball-tree" => should_restore
+                .then(|| load_persisted_segmented_ball_tree_index(&app, epoch))
+                .transpose()?
+                .flatten(),
+            _ => should_restore
                 .then(|| load_persisted_dynamic_index(&app, epoch))
                 .transpose()?
-                .flatten()
+                .flatten(),
         };
         if let Some((point_count, _unit_count)) = restored {
             emit_geo_index_progress(
@@ -3360,7 +4037,7 @@ fn build_search_indexes(
             return Ok(SearchIndexBuildSummary {
                 point_count,
                 build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
-                engine_count: 5,
+                engine_count: 6,
             });
         }
     }
@@ -3411,6 +4088,25 @@ fn build_search_indexes(
                     );
                     Ok(())
                 })?;
+        } else if selected_index_id == "segmented-ball-tree" {
+            registry
+                .segmented_ball_tree
+                .build(&points, |processed_points| {
+                    emit_geo_index_progress(
+                        &window,
+                        GeoIndexBuildProgress {
+                            phase: "building".to_string(),
+                            point_count: points.len(),
+                            built_indexes: 0,
+                            total_indexes,
+                            current_index_id: Some(selected_index_id.to_string()),
+                            current_index_label: Some(selected_index_label.to_string()),
+                            current_index_processed_points: Some(processed_points),
+                            current_index_total_points: Some(points.len()),
+                        },
+                    );
+                    Ok(())
+                })?;
         } else {
             registry
                 .dynamic_z_order
@@ -3434,10 +4130,10 @@ fn build_search_indexes(
     }
 
     if let Some(epoch) = epoch {
-        let _ = if selected_index_id == "segmented-kd-tree" {
-            save_persisted_segmented_kd_tree_index(&app, epoch)
-        } else {
-            save_persisted_dynamic_index(&app, epoch)
+        let _ = match selected_index_id {
+            "segmented-kd-tree" => save_persisted_segmented_kd_tree_index(&app, epoch),
+            "segmented-ball-tree" => save_persisted_segmented_ball_tree_index(&app, epoch),
+            _ => save_persisted_dynamic_index(&app, epoch),
         };
     }
     let summary = GeoIndexBuildSummary {
@@ -3461,7 +4157,7 @@ fn build_search_indexes(
     Ok(SearchIndexBuildSummary {
         point_count: summary.point_count,
         build_time_ms: summary.build_time_ms,
-        engine_count: 5,
+        engine_count: 6,
     })
 }
 
@@ -3473,6 +4169,7 @@ fn search_geo_index(index_id: String, query: GeoSearchQuery) -> AppResult<Vec<Ge
     let results = match index_id.as_str() {
         "dynamic-z-order-cells" => registry.dynamic_z_order.search(&query),
         "segmented-kd-tree" => registry.segmented_kd_tree.search(&query),
+        "segmented-ball-tree" => registry.segmented_ball_tree.search(&query),
         _ => registry.brute_force.search(&query),
     };
     Ok(results)
@@ -3486,6 +4183,7 @@ fn get_geo_index_stats(index_id: String) -> AppResult<GeoIndexStats> {
     Ok(match index_id.as_str() {
         "dynamic-z-order-cells" => registry.dynamic_z_order.last_stats.clone(),
         "segmented-kd-tree" => registry.segmented_kd_tree.last_stats.clone(),
+        "segmented-ball-tree" => registry.segmented_ball_tree.last_stats.clone(),
         _ => registry.brute_force.last_stats.clone(),
     })
 }
@@ -3516,6 +4214,12 @@ fn get_search_index_stats() -> AppResult<Vec<SearchIndexStats>> {
             true,
             true,
         ),
+        search_stats_from_geo(
+            registry.segmented_ball_tree.last_stats.clone(),
+            "Segmented ball tree",
+            true,
+            true,
+        ),
     ])
 }
 
@@ -3533,7 +4237,11 @@ fn validate_geo_index(index_id: String, query: GeoSearchQuery) -> AppResult<Vali
     let mut registry = geo_index_registry()
         .lock()
         .map_err(|error| error.to_string())?;
-    let actual = registry.dynamic_z_order.search(&query);
+    let actual = match index_id.as_str() {
+        "segmented-kd-tree" => registry.segmented_kd_tree.search(&query),
+        "segmented-ball-tree" => registry.segmented_ball_tree.search(&query),
+        _ => registry.dynamic_z_order.search(&query),
+    };
     let expected = registry.brute_force.search(&query);
     let equal = actual.len() == expected.len()
         && actual
@@ -4513,6 +5221,65 @@ mod tests {
         let encoded = serde_json::to_vec(&snapshot).unwrap();
         let decoded = serde_json::from_slice::<NativeSegmentedKdTreeSnapshot>(&encoded).unwrap();
         let mut restored = NativeSegmentedKdTreeIndex::default();
+        restored.restore(decoded).unwrap();
+
+        assert_eq!(restored.search(&query), expected);
+    }
+
+    #[test]
+    fn native_segmented_ball_tree_matches_brute_force() {
+        let points = test_geo_points();
+        let query = GeoSearchQuery {
+            lat: 48.15,
+            lon: 11.55,
+            k: 10,
+            offset: None,
+            kind: None,
+            geo_bounds: None,
+            start_time: None,
+            end_time: None,
+        };
+        let mut oracle = NativeBruteForceIndex::default();
+        oracle.build(&points);
+        let expected = oracle.search(&query);
+
+        let mut index = NativeSegmentedBallTreeIndex::default();
+        index.build(&points, |_| Ok(())).unwrap();
+
+        assert_eq!(
+            index
+                .search(&query)
+                .iter()
+                .map(|result| result.media_id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|result| result.media_id.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn native_segmented_ball_tree_snapshot_round_trips_search_results() {
+        let points = test_geo_points();
+        let query = GeoSearchQuery {
+            lat: 48.15,
+            lon: 11.55,
+            k: 10,
+            offset: None,
+            kind: None,
+            geo_bounds: None,
+            start_time: None,
+            end_time: None,
+        };
+        let mut fresh = NativeSegmentedBallTreeIndex::default();
+        fresh.build(&points, |_| Ok(())).unwrap();
+        let expected = fresh.search(&query);
+
+        let snapshot = fresh.snapshot();
+        let encoded = serde_json::to_vec(&snapshot).unwrap();
+        let decoded = serde_json::from_slice::<NativeSegmentedBallTreeSnapshot>(&encoded).unwrap();
+        let mut restored = NativeSegmentedBallTreeIndex::default();
         restored.restore(decoded).unwrap();
 
         assert_eq!(restored.search(&query), expected);
