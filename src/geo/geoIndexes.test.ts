@@ -253,6 +253,27 @@ describe('geo indexes', () => {
     )
   })
 
+  it('segmented ball-tree builds duplicate-coordinate clusters without stack overflow', async () => {
+    const duplicatePoints = Array.from({ length: 5_000 }, (_, index) => ({
+      mediaId: `duplicate-${index.toString().padStart(5, '0')}`,
+      kind: 'geo_point' as const,
+      lat: 48.137,
+      lon: 11.576,
+      timestamp: index,
+    }))
+    const index = new SegmentedBallTreeGeoIndex({ leafSize: 16 })
+    await index.build(duplicatePoints)
+
+    const results = await index.search({ lat: 48.137, lon: 11.576, k: 5 })
+    expect(results.map((result) => result.mediaId)).toEqual([
+      'duplicate-00000',
+      'duplicate-00001',
+      'duplicate-00002',
+      'duplicate-00003',
+      'duplicate-00004',
+    ])
+  })
+
   it('segmented ball-tree supports incremental inserts', async () => {
     const index = new SegmentedBallTreeGeoIndex({ leafSize: 2 })
     const oracle = new BruteForceGeoIndex()

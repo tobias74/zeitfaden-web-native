@@ -1299,34 +1299,37 @@ impl NativeSegmentedBallTreeIndex {
     }
 
     fn build_node(&self, segment: &mut NativeBallSegment, points: Vec<GeoIndexPoint>) -> usize {
-        let node_base = ball_node_for_points(&points);
-        let node_index = segment.nodes.len();
-        segment.nodes.push(node_base.clone());
+        let root_index = segment.nodes.len();
+        segment.nodes.push(ball_node_for_points(&points));
+        let mut stack = vec![(root_index, points)];
 
-        if points.len() <= SEGMENTED_BALL_TREE_LEAF_SIZE {
-            let point_start = segment.points.len();
-            let mut sorted_points = points;
-            sorted_points.sort_by(|a, b| a.media_id.cmp(&b.media_id));
-            let point_end = point_start + sorted_points.len();
-            segment.max_leaf_size = segment.max_leaf_size.max(sorted_points.len());
-            segment.points.extend(sorted_points);
+        while let Some((node_index, frame_points)) = stack.pop() {
+            let node_base = segment.nodes[node_index].clone();
+            if frame_points.len() <= SEGMENTED_BALL_TREE_LEAF_SIZE {
+                write_ball_leaf(segment, node_index, node_base, frame_points);
+                continue;
+            }
+
+            let (left_points, right_points) = split_ball_points(frame_points.clone(), &node_base);
+            if left_points.is_empty() || right_points.is_empty() {
+                write_ball_leaf(segment, node_index, node_base, frame_points);
+                continue;
+            }
+
+            let left = segment.nodes.len();
+            segment.nodes.push(ball_node_for_points(&left_points));
+            let right = segment.nodes.len();
+            segment.nodes.push(ball_node_for_points(&right_points));
             segment.nodes[node_index] = NativeBallNode {
-                point_start,
-                point_end,
+                left: Some(left),
+                right: Some(right),
                 ..node_base
             };
-            return node_index;
+            stack.push((right, right_points));
+            stack.push((left, left_points));
         }
 
-        let (left_points, right_points) = split_ball_points(points, &node_base);
-        let left = self.build_node(segment, left_points);
-        let right = self.build_node(segment, right_points);
-        segment.nodes[node_index] = NativeBallNode {
-            left: Some(left),
-            right: Some(right),
-            ..node_base
-        };
-        node_index
+        root_index
     }
 
     fn point_count(&self) -> usize {
@@ -1404,6 +1407,24 @@ fn enqueue_ball_node(
     queue.push((segment_index, node_index, lower_bound));
 }
 
+fn write_ball_leaf(
+    segment: &mut NativeBallSegment,
+    node_index: usize,
+    node_base: NativeBallNode,
+    mut points: Vec<GeoIndexPoint>,
+) {
+    let point_start = segment.points.len();
+    points.sort_by(|a, b| a.media_id.cmp(&b.media_id));
+    let point_end = point_start + points.len();
+    segment.max_leaf_size = segment.max_leaf_size.max(points.len());
+    segment.points.extend(points);
+    segment.nodes[node_index] = NativeBallNode {
+        point_start,
+        point_end,
+        ..node_base
+    };
+}
+
 fn ball_node_for_points(points: &[GeoIndexPoint]) -> NativeBallNode {
     let mut lat_min = f64::INFINITY;
     let mut lat_max = f64::NEG_INFINITY;
@@ -1465,6 +1486,7 @@ fn split_ball_points(
     let seed = points[0].clone();
     let pivot_a = farthest_ball_point(&seed, &points);
     let pivot_b = farthest_ball_point(&pivot_a, &points);
+    let points_len = points.len();
     let mut left = Vec::new();
     let mut right = Vec::new();
 
@@ -1480,7 +1502,9 @@ fn split_ball_points(
         }
     }
 
-    if !left.is_empty() && !right.is_empty() {
+    let smallest_partition = left.len().min(right.len());
+    let min_balanced_partition = (points_len / 8).max(1);
+    if !left.is_empty() && !right.is_empty() && smallest_partition >= min_balanced_partition {
         return (left, right);
     }
 
@@ -5256,6 +5280,46 @@ mod tests {
                 .iter()
                 .map(|result| result.media_id.as_str())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn native_segmented_ball_tree_builds_duplicate_coordinate_clusters() {
+        let points = (0..5_000)
+            .map(|index| GeoIndexPoint {
+                media_id: format!("duplicate-{index:05}"),
+                kind: Some("geo_point".to_string()),
+                lat: 48.137,
+                lon: 11.576,
+                timestamp: Some(index),
+            })
+            .collect::<Vec<_>>();
+        let query = GeoSearchQuery {
+            lat: 48.137,
+            lon: 11.576,
+            k: 5,
+            offset: None,
+            kind: None,
+            geo_bounds: None,
+            start_time: None,
+            end_time: None,
+        };
+        let mut index = NativeSegmentedBallTreeIndex::default();
+        index.build(&points, |_| Ok(())).unwrap();
+
+        assert_eq!(
+            index
+                .search(&query)
+                .iter()
+                .map(|result| result.media_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "duplicate-00000",
+                "duplicate-00001",
+                "duplicate-00002",
+                "duplicate-00003",
+                "duplicate-00004",
+            ]
         );
     }
 

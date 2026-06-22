@@ -596,34 +596,68 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
     segment: SegmentedBallTreeSegment,
     points: GeoIndexPoint[],
   ): number {
-    const nodeBase = this.nodeForPoints(points)
-    const nodeIndex = segment.nodes.length
-    segment.nodes.push(nodeBase)
+    const rootIndex = segment.nodes.length
+    segment.nodes.push(this.nodeForPoints(points))
+    const stack: Array<{ nodeIndex: number; points: GeoIndexPoint[] }> = [
+      { nodeIndex: rootIndex, points },
+    ]
 
-    if (points.length <= this.leafSize) {
-      const pointStart = segment.points.length
-      const sortedPoints = [...points].sort((a, b) =>
-        a.mediaId.localeCompare(b.mediaId),
-      )
-      segment.points.push(...sortedPoints)
-      segment.nodes[nodeIndex] = {
-        ...nodeBase,
-        pointStart,
-        pointEnd: pointStart + sortedPoints.length,
+    while (stack.length > 0) {
+      const frame = stack.pop()
+      if (!frame) break
+      const nodeBase = segment.nodes[frame.nodeIndex]
+
+      if (frame.points.length <= this.leafSize) {
+        const pointStart = segment.points.length
+        const sortedPoints = [...frame.points].sort((a, b) =>
+          a.mediaId.localeCompare(b.mediaId),
+        )
+        segment.points.push(...sortedPoints)
+        segment.nodes[frame.nodeIndex] = {
+          ...nodeBase,
+          pointStart,
+          pointEnd: pointStart + sortedPoints.length,
+        }
+        segment.maxLeafSize = Math.max(
+          segment.maxLeafSize,
+          sortedPoints.length,
+        )
+        continue
       }
-      segment.maxLeafSize = Math.max(segment.maxLeafSize, sortedPoints.length)
-      return nodeIndex
+
+      const [leftPoints, rightPoints] = this.splitPoints(frame.points, nodeBase)
+      if (leftPoints.length === 0 || rightPoints.length === 0) {
+        const pointStart = segment.points.length
+        const sortedPoints = [...frame.points].sort((a, b) =>
+          a.mediaId.localeCompare(b.mediaId),
+        )
+        segment.points.push(...sortedPoints)
+        segment.nodes[frame.nodeIndex] = {
+          ...nodeBase,
+          pointStart,
+          pointEnd: pointStart + sortedPoints.length,
+        }
+        segment.maxLeafSize = Math.max(
+          segment.maxLeafSize,
+          sortedPoints.length,
+        )
+        continue
+      }
+
+      const left = segment.nodes.length
+      segment.nodes.push(this.nodeForPoints(leftPoints))
+      const right = segment.nodes.length
+      segment.nodes.push(this.nodeForPoints(rightPoints))
+      segment.nodes[frame.nodeIndex] = {
+        ...nodeBase,
+        left,
+        right,
+      }
+      stack.push({ nodeIndex: right, points: rightPoints })
+      stack.push({ nodeIndex: left, points: leftPoints })
     }
 
-    const [leftPoints, rightPoints] = this.splitPoints(points, nodeBase)
-    const left = this.buildNode(segment, leftPoints)
-    const right = this.buildNode(segment, rightPoints)
-    segment.nodes[nodeIndex] = {
-      ...nodeBase,
-      left,
-      right,
-    }
-    return nodeIndex
+    return rootIndex
   }
 
   private splitPoints(
@@ -649,7 +683,15 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
       }
     }
 
-    if (left.length > 0 && right.length > 0) return [left, right]
+    const smallestPartition = Math.min(left.length, right.length)
+    const minBalancedPartition = Math.max(1, Math.floor(points.length / 8))
+    if (
+      left.length > 0 &&
+      right.length > 0 &&
+      smallestPartition >= minBalancedPartition
+    ) {
+      return [left, right]
+    }
 
     const axis =
       node.lonMax - node.lonMin > node.latMax - node.latMin ? 'lon' : 'lat'
