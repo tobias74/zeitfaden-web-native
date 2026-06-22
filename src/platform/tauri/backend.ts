@@ -87,6 +87,21 @@ class TauriCatalogBackend implements CatalogBackend {
     indexId: string,
     onProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<SearchIndexBuildSummary> {
+    return this.runSearchIndexBuild(indexId, false, onProgress)
+  }
+
+  async rebuildSearchIndex(
+    indexId: string,
+    onProgress?: (progress: GeoIndexBuildProgress) => void,
+  ): Promise<SearchIndexBuildSummary> {
+    return this.runSearchIndexBuild(indexId, true, onProgress)
+  }
+
+  private async runSearchIndexBuild(
+    indexId: string,
+    forceRebuild: boolean,
+    onProgress?: (progress: GeoIndexBuildProgress) => void,
+  ): Promise<SearchIndexBuildSummary> {
     const unlisten = await listen<GeoIndexBuildProgress>(
       'geo-index-progress',
       (event) => {
@@ -95,7 +110,7 @@ class TauriCatalogBackend implements CatalogBackend {
     )
 
     try {
-      return await invoke('build_search_indexes', { indexId })
+      return await invoke('build_search_indexes', { indexId, forceRebuild })
     } finally {
       unlisten()
     }

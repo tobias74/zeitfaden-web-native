@@ -1,6 +1,7 @@
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm'
 import * as exifr from 'exifr'
 import { DynamicZOrderGeoIndex } from '../../geo/dynamicZOrderGeoIndex'
+import { SegmentedKdTreeGeoIndex } from '../../geo/segmentedKdTreeGeoIndex'
 import {
   createDynamicZOrderManifest,
   decodeDynamicZOrderSnapshot,
@@ -9,6 +10,13 @@ import {
   validateDynamicZOrderManifest,
   type DynamicZOrderIndexManifest,
 } from '../../geo/dynamicZOrderPersistence'
+import {
+  createSegmentedKdTreeManifest,
+  decodeSegmentedKdTreeSnapshot,
+  encodeSegmentedKdTreeSnapshot,
+  type SegmentedKdTreeManifest,
+  validateSegmentedKdTreeManifest,
+} from '../../geo/segmentedKdTreePersistence'
 import { GeoIndexRegistry } from '../../geo/registry'
 import {
   geoPointContentHash,
@@ -116,7 +124,7 @@ type IdbMetadata = {
 
 type IdbIndexCache = {
   id: string
-  manifest: DynamicZOrderIndexManifest
+  manifest: DynamicZOrderIndexManifest | SegmentedKdTreeManifest
   data: ArrayBuffer
 }
 
@@ -210,8 +218,13 @@ type CatalogStore = {
     catalogEpoch: number,
   ): Promise<{ pointCount: number; cellCount: number } | undefined>
   savePersistedDynamicIndex(catalogEpoch: number): Promise<void>
+  loadPersistedSegmentedKdTreeIndex(
+    catalogEpoch: number,
+  ): Promise<{ pointCount: number; segmentCount: number } | undefined>
+  savePersistedSegmentedKdTreeIndex(catalogEpoch: number): Promise<void>
   buildSearchIndexes(
     indexId: string,
+    forceRebuild: boolean,
     postProgress: (progress: GeoIndexBuildProgress) => void,
   ): Promise<GeoIndexBuildSummary & { engineCount: number }>
   getSearchIndexStats(): Promise<SearchIndexStats[]>
@@ -250,6 +263,7 @@ const INDEXED_DB_VERSION = 1
 const IMPORT_TRACE_ENABLED = false
 const CATALOG_EPOCH_KEY = 'catalogEpoch'
 const DYNAMIC_INDEX_CACHE_KEY = 'dynamic-z-order-cells:v1'
+const SEGMENTED_KD_TREE_CACHE_KEY = 'segmented-kd-tree:v1'
 
 const ctx = self as unknown as {
   postMessage: (message: unknown) => void
@@ -574,6 +588,15 @@ async function dynamicIndexOpfsDirectory(): Promise<FileSystemDirectoryHandle> {
   return engine.getDirectoryHandle('v1', { create: true })
 }
 
+async function segmentedKdTreeOpfsDirectory(): Promise<FileSystemDirectoryHandle> {
+  const root = await navigator.storage.getDirectory()
+  const indexes = await root.getDirectoryHandle('indexes', { create: true })
+  const engine = await indexes.getDirectoryHandle('segmented-kd-tree', {
+    create: true,
+  })
+  return engine.getDirectoryHandle('v1', { create: true })
+}
+
 async function readOpfsFile(
   directory: FileSystemDirectoryHandle,
   name: string,
@@ -603,6 +626,14 @@ function dynamicZOrderIndex(): DynamicZOrderGeoIndex {
   const index = geoIndexRegistry.get('dynamic-z-order-cells')
   if (!(index instanceof DynamicZOrderGeoIndex)) {
     throw new Error('Dynamic Z-order index is not available.')
+  }
+  return index
+}
+
+function segmentedKdTreeIndex(): SegmentedKdTreeGeoIndex {
+  const index = geoIndexRegistry.get('segmented-kd-tree')
+  if (!(index instanceof SegmentedKdTreeGeoIndex)) {
+    throw new Error('Segmented KD-tree index is not available.')
   }
   return index
 }
@@ -643,15 +674,12 @@ async function applyIncrementalSearchIndexUpdate(
     return point ? [point] : []
   })
 
-  for (const point of points) {
-    await index.insert(point)
-  }
+  await index.insertMany(points)
 
   preparedSearchIndex = {
     indexId: index.id,
     catalogEpoch,
-    cacheDirty:
-      preparedSearchIndex.cacheDirty || index.id === 'dynamic-z-order-cells',
+    cacheDirty: preparedSearchIndex.cacheDirty || index.capabilities.persistent,
   }
 }
 
@@ -683,6 +711,30 @@ async function restoreDynamicIndexFromData(
   }
 }
 
+async function restoreSegmentedKdTreeIndexFromData(
+  manifest: SegmentedKdTreeManifest,
+  data: ArrayBuffer,
+  catalogEpoch: number,
+): Promise<{ pointCount: number; segmentCount: number }> {
+  validateSegmentedKdTreeManifest(manifest, catalogEpoch)
+  const checksum = await sha256Hex(data)
+  if (checksum !== manifest.dataChecksum) {
+    throw new Error('Segmented KD-tree index checksum does not match manifest.')
+  }
+  const snapshot = decodeSegmentedKdTreeSnapshot(data)
+  if (
+    snapshot.pointCount !== manifest.pointCount ||
+    snapshot.segmentCount !== manifest.segmentCount
+  ) {
+    throw new Error('Segmented KD-tree index manifest count mismatch.')
+  }
+  segmentedKdTreeIndex().restore(snapshot)
+  return {
+    pointCount: snapshot.pointCount,
+    segmentCount: snapshot.segmentCount,
+  }
+}
+
 async function loadOpfsDynamicIndex(
   catalogEpoch: number,
 ): Promise<{ pointCount: number; cellCount: number } | undefined> {
@@ -696,6 +748,27 @@ async function loadOpfsDynamicIndex(
 
     return await restoreDynamicIndexFromData(
       JSON.parse(await manifestFile.text()) as DynamicZOrderIndexManifest,
+      await dataFile.arrayBuffer(),
+      catalogEpoch,
+    )
+  } catch {
+    return undefined
+  }
+}
+
+async function loadOpfsSegmentedKdTreeIndex(
+  catalogEpoch: number,
+): Promise<{ pointCount: number; segmentCount: number } | undefined> {
+  try {
+    const directory = await segmentedKdTreeOpfsDirectory()
+    const [manifestFile, dataFile] = await Promise.all([
+      readOpfsFile(directory, 'manifest.json'),
+      readOpfsFile(directory, 'index.bin'),
+    ])
+    if (!manifestFile || !dataFile) return undefined
+
+    return await restoreSegmentedKdTreeIndexFromData(
+      JSON.parse(await manifestFile.text()) as SegmentedKdTreeManifest,
       await dataFile.arrayBuffer(),
       catalogEpoch,
     )
@@ -722,6 +795,23 @@ async function saveOpfsDynamicIndex(catalogEpoch: number): Promise<void> {
   )
 }
 
+async function saveOpfsSegmentedKdTreeIndex(catalogEpoch: number): Promise<void> {
+  const snapshot = segmentedKdTreeIndex().snapshot()
+  const data = encodeSegmentedKdTreeSnapshot(snapshot)
+  const manifest = createSegmentedKdTreeManifest(
+    snapshot,
+    catalogEpoch,
+    await sha256Hex(data),
+  )
+  const directory = await segmentedKdTreeOpfsDirectory()
+  await writeOpfsFile(directory, 'index.bin', data)
+  await writeOpfsFile(
+    directory,
+    'manifest.json',
+    JSON.stringify(manifest),
+  )
+}
+
 async function loadIdbDynamicIndex(
   catalogEpoch: number,
 ): Promise<{ pointCount: number; cellCount: number } | undefined> {
@@ -735,7 +825,29 @@ async function loadIdbDynamicIndex(
     await done
     if (!row) return undefined
     return await restoreDynamicIndexFromData(
-      row.manifest,
+      row.manifest as DynamicZOrderIndexManifest,
+      row.data,
+      catalogEpoch,
+    )
+  } catch {
+    return undefined
+  }
+}
+
+async function loadIdbSegmentedKdTreeIndex(
+  catalogEpoch: number,
+): Promise<{ pointCount: number; segmentCount: number } | undefined> {
+  try {
+    const database = await requireIndexedDb()
+    const transaction = database.transaction('indexCache', 'readonly')
+    const done = idbTransactionDone(transaction)
+    const row = await idbRequest<IdbIndexCache | undefined>(
+      transaction.objectStore('indexCache').get(SEGMENTED_KD_TREE_CACHE_KEY),
+    )
+    await done
+    if (!row) return undefined
+    return await restoreSegmentedKdTreeIndexFromData(
+      row.manifest as SegmentedKdTreeManifest,
       row.data,
       catalogEpoch,
     )
@@ -757,6 +869,25 @@ async function saveIdbDynamicIndex(catalogEpoch: number): Promise<void> {
   const done = idbTransactionDone(transaction)
   transaction.objectStore('indexCache').put({
     id: DYNAMIC_INDEX_CACHE_KEY,
+    manifest,
+    data,
+  } satisfies IdbIndexCache)
+  await done
+}
+
+async function saveIdbSegmentedKdTreeIndex(catalogEpoch: number): Promise<void> {
+  const snapshot = segmentedKdTreeIndex().snapshot()
+  const data = encodeSegmentedKdTreeSnapshot(snapshot)
+  const manifest = createSegmentedKdTreeManifest(
+    snapshot,
+    catalogEpoch,
+    await sha256Hex(data),
+  )
+  const database = await requireIndexedDb()
+  const transaction = database.transaction('indexCache', 'readwrite')
+  const done = idbTransactionDone(transaction)
+  transaction.objectStore('indexCache').put({
+    id: SEGMENTED_KD_TREE_CACHE_KEY,
     manifest,
     data,
   } satisfies IdbIndexCache)
@@ -3094,6 +3225,7 @@ async function buildGeoIndexes(
 async function buildSearchIndexes(
   store: CatalogStore,
   indexId: string,
+  forceRebuild: boolean,
   postProgress: (progress: GeoIndexBuildProgress) => void,
 ): Promise<GeoIndexBuildSummary & { engineCount: number }> {
   const startedAt = performance.now()
@@ -3101,7 +3233,9 @@ async function buildSearchIndexes(
   const index =
     indexId === 'brute-force'
       ? geoIndexRegistry.get('brute-force')
-      : dynamicZOrderIndex()
+      : indexId === 'segmented-kd-tree'
+        ? segmentedKdTreeIndex()
+        : dynamicZOrderIndex()
 
   postProgress({
     phase: 'loading',
@@ -3114,16 +3248,19 @@ async function buildSearchIndexes(
 
   const catalogEpoch = await store.catalogEpoch()
   if (
+    !forceRebuild &&
     preparedSearchIndex?.indexId === index.id &&
     preparedSearchIndex.catalogEpoch === catalogEpoch
   ) {
+    await index.flushPending(catalogEpoch)
     const stats = await index.stats()
-    if (
-      index.id === 'dynamic-z-order-cells' &&
-      preparedSearchIndex.cacheDirty
-    ) {
+    if (index.capabilities.persistent && preparedSearchIndex.cacheDirty) {
       try {
-        await store.savePersistedDynamicIndex(catalogEpoch)
+        if (index.id === 'segmented-kd-tree') {
+          await store.savePersistedSegmentedKdTreeIndex(catalogEpoch)
+        } else if (index.id === 'dynamic-z-order-cells') {
+          await store.savePersistedDynamicIndex(catalogEpoch)
+        }
         preparedSearchIndex = { ...preparedSearchIndex, cacheDirty: false }
       } catch {
         // The index cache is disposable. Search remains correct with the in-memory index.
@@ -3147,8 +3284,33 @@ async function buildSearchIndexes(
     }
   }
 
-  if (index.id === 'dynamic-z-order-cells') {
+  if (!forceRebuild && index.id === 'dynamic-z-order-cells') {
     const restored = await store.loadPersistedDynamicIndex(catalogEpoch)
+    if (restored) {
+      preparedSearchIndex = {
+        indexId: index.id,
+        catalogEpoch,
+        cacheDirty: false,
+      }
+      postProgress({
+        phase: 'ready',
+        pointCount: restored.pointCount,
+        builtIndexes: totalIndexes,
+        totalIndexes,
+        currentIndexId: index.id,
+        currentIndexLabel: index.label,
+        currentIndexProcessedPoints: restored.pointCount,
+        currentIndexTotalPoints: restored.pointCount,
+      })
+
+      return {
+        pointCount: restored.pointCount,
+        buildTimeMs: performance.now() - startedAt,
+        engineCount: geoIndexRegistry.indexes.length + 2,
+      }
+    }
+  } else if (!forceRebuild && index.id === 'segmented-kd-tree') {
+    const restored = await store.loadPersistedSegmentedKdTreeIndex(catalogEpoch)
     if (restored) {
       preparedSearchIndex = {
         indexId: index.id,
@@ -3206,12 +3368,16 @@ async function buildSearchIndexes(
   preparedSearchIndex = {
     indexId: index.id,
     catalogEpoch,
-    cacheDirty: index.id === 'dynamic-z-order-cells',
+    cacheDirty: index.capabilities.persistent,
   }
 
-  if (index.id === 'dynamic-z-order-cells') {
+  if (index.capabilities.persistent) {
     try {
-      await store.savePersistedDynamicIndex(catalogEpoch)
+      if (index.id === 'segmented-kd-tree') {
+        await store.savePersistedSegmentedKdTreeIndex(catalogEpoch)
+      } else if (index.id === 'dynamic-z-order-cells') {
+        await store.savePersistedDynamicIndex(catalogEpoch)
+      }
       preparedSearchIndex = { ...preparedSearchIndex, cacheDirty: false }
     } catch {
       // The index cache is disposable. Search remains correct with the in-memory index.
@@ -3551,9 +3717,17 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
       await ensureMode()
       return saveOpfsDynamicIndex(catalogEpoch)
     },
-    async buildSearchIndexes(indexId, postProgress) {
+    async loadPersistedSegmentedKdTreeIndex(catalogEpoch) {
       await ensureMode()
-      return buildSearchIndexes(this, indexId, postProgress)
+      return loadOpfsSegmentedKdTreeIndex(catalogEpoch)
+    },
+    async savePersistedSegmentedKdTreeIndex(catalogEpoch) {
+      await ensureMode()
+      return saveOpfsSegmentedKdTreeIndex(catalogEpoch)
+    },
+    async buildSearchIndexes(indexId, forceRebuild, postProgress) {
+      await ensureMode()
+      return buildSearchIndexes(this, indexId, forceRebuild, postProgress)
     },
     async getSearchIndexStats() {
       return getSearchIndexStats()
@@ -3643,8 +3817,10 @@ const indexedDbCatalogStore: CatalogStore = {
   bumpCatalogEpoch: idbBumpCatalogEpoch,
   loadPersistedDynamicIndex: loadIdbDynamicIndex,
   savePersistedDynamicIndex: saveIdbDynamicIndex,
-  buildSearchIndexes(indexId, postProgress) {
-    return buildSearchIndexes(this, indexId, postProgress)
+  loadPersistedSegmentedKdTreeIndex: loadIdbSegmentedKdTreeIndex,
+  savePersistedSegmentedKdTreeIndex: saveIdbSegmentedKdTreeIndex,
+  buildSearchIndexes(indexId, forceRebuild, postProgress) {
+    return buildSearchIndexes(this, indexId, forceRebuild, postProgress)
   },
   getSearchIndexStats,
   listSources: idbListSources,
@@ -3713,6 +3889,10 @@ async function handleRequest(
       return store.buildSearchIndexes(
         (request.payload as { indexId?: string } | undefined)?.indexId ??
           'dynamic-z-order-cells',
+        Boolean(
+          (request.payload as { forceRebuild?: boolean } | undefined)
+            ?.forceRebuild,
+        ),
         postProgress,
       )
     case 'searchGeoIndex':

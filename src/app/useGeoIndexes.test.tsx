@@ -33,7 +33,12 @@ function createCatalog(): CatalogBackend {
     buildSearchIndexes: vi.fn(async () => ({
       pointCount: 123,
       buildTimeMs: 1,
-      engineCount: 4,
+      engineCount: 5,
+    })),
+    rebuildSearchIndex: vi.fn(async () => ({
+      pointCount: 123,
+      buildTimeMs: 1,
+      engineCount: 5,
     })),
     getSearchIndexStats: vi.fn(async () => [
       stats,

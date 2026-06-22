@@ -206,6 +206,24 @@ export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
     }
   }
 
+  async insertMany(points: GeoIndexPoint[]): Promise<void> {
+    const start = performance.now()
+    for (const point of points) {
+      this.insertInternal(point)
+    }
+    this.lastStats = {
+      ...this.lastStats,
+      pointCount: this.pointsById.size,
+      indexSizeBytes: this.estimateSizeBytes(),
+      insertTimeMs: performance.now() - start,
+    }
+  }
+
+  async flushPending(_catalogEpoch = 0): Promise<void> {
+    void _catalogEpoch
+    // Dynamic Z-order inserts directly into its active cells.
+  }
+
   async remove(mediaId: string): Promise<void> {
     const start = performance.now()
     this.removeInternal(mediaId)

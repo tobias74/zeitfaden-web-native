@@ -96,7 +96,11 @@ const RESULT_PAGE_SIZE_OPTIONS = [50, 100, 250, 500] as const
 const DEFAULT_RESULT_PAGE_SIZE = 100
 const MAP_POINT_LIMIT = 500
 const DEFAULT_DISTANCE_ENGINE_ID = 'dynamic-z-order-cells'
-const DISTANCE_ENGINE_IDS = ['brute-force', 'dynamic-z-order-cells'] as const
+const DISTANCE_ENGINE_IDS = [
+  'brute-force',
+  'dynamic-z-order-cells',
+  'segmented-kd-tree',
+] as const
 const DEFAULT_QUERY_POINT = {
   lat: 47.3769,
   lon: 8.5417,
@@ -514,6 +518,7 @@ function App() {
     geoIndexVersion,
     geoIndexProgress,
     indexStats,
+    optimizeIndex,
     resetIndexState,
   } = useGeoIndexes({
     catalog,
@@ -1423,6 +1428,9 @@ function App() {
                     <option value="dynamic-z-order-cells">
                       {t('dynamicZOrderCells')}
                     </option>
+                    <option value="segmented-kd-tree">
+                      {t('segmentedKdTree')}
+                    </option>
                     <option value="brute-force">{t('bruteForceOracle')}</option>
                   </select>
                 </label>
@@ -1504,7 +1512,49 @@ function App() {
                     )}
                   </dd>
                 </div>
+                {typeof effectiveIndexStats.segmentCount === 'number' && (
+                  <div>
+                    <dt>{t('segments')}</dt>
+                    <dd>
+                      {statsNumber(effectiveIndexStats.segmentCount, locale)}
+                    </dd>
+                  </div>
+                )}
+                {typeof effectiveIndexStats.deltaSegmentCount === 'number' && (
+                  <div>
+                    <dt>{t('deltas')}</dt>
+                    <dd>
+                      {statsNumber(
+                        effectiveIndexStats.deltaSegmentCount,
+                        locale,
+                      )}
+                    </dd>
+                  </div>
+                )}
+                {typeof effectiveIndexStats.pendingPointCount === 'number' && (
+                  <div>
+                    <dt>{t('pending')}</dt>
+                    <dd>
+                      {statsNumber(
+                        effectiveIndexStats.pendingPointCount,
+                        locale,
+                      )}
+                    </dd>
+                  </div>
+                )}
               </dl>
+              {selectedIndexId === 'segmented-kd-tree' &&
+                effectiveIndexStats.needsOptimization && (
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => {
+                    void optimizeIndex().catch(reportError)
+                  }}
+                >
+                  {t('optimizeDistanceIndex')}
+                </button>
+              )}
               {explainSqlQueries && effectiveIndexStats.sqlPlan && (
                 <div className="sql-plan-panel">
                   <div>

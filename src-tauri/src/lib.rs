@@ -29,6 +29,9 @@ const PROGRESS_HEARTBEAT_MS: u128 = 1000;
 const CATALOG_EPOCH_KEY: &str = "catalogEpoch";
 const DYNAMIC_INDEX_MAGIC: &[u8; 8] = b"ZFDZIDX1";
 const DYNAMIC_INDEX_FORMAT_VERSION: u32 = 1;
+const SEGMENTED_KD_TREE_SEGMENT_LIMIT: usize = 100_000;
+const SEGMENTED_KD_TREE_DELTA_LIMIT: usize = 50_000;
+const SEGMENTED_KD_TREE_LEAF_SIZE: usize = 64;
 static IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
 static IMPORT_COMMIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -155,6 +158,12 @@ struct GeoIndexStats {
     candidates_inspected: i64,
     pruned_by_geo: i64,
     pruned_by_time: i64,
+    segment_count: Option<usize>,
+    delta_segment_count: Option<usize>,
+    loaded_segments: Option<usize>,
+    max_leaf_size: Option<usize>,
+    pending_point_count: Option<usize>,
+    needs_optimization: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -387,10 +396,51 @@ struct NativeDynamicZOrderIndex {
     last_stats: GeoIndexStats,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct NativeKdSegment {
+    id: String,
+    is_delta: bool,
+    points: Vec<GeoIndexPoint>,
+    max_leaf_size: usize,
+}
+
+#[derive(Clone)]
+struct NativeSegmentedKdTreeIndex {
+    segments: Vec<NativeKdSegment>,
+    pending_points: Vec<GeoIndexPoint>,
+    last_stats: GeoIndexStats,
+}
+
+#[derive(Serialize, Deserialize)]
+struct NativeSegmentedKdTreeSnapshot {
+    engine_id: String,
+    engine_version: u32,
+    segment_point_limit: usize,
+    delta_flush_point_limit: usize,
+    leaf_size: usize,
+    point_count: usize,
+    segment_count: usize,
+    segments: Vec<NativeKdSegment>,
+    pending_points: Vec<GeoIndexPoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SegmentedKdTreeManifest {
+    engine_id: String,
+    engine_version: u32,
+    catalog_epoch: i64,
+    point_count: usize,
+    segment_count: usize,
+    created_at: i64,
+    data_checksum: String,
+}
+
 #[derive(Clone)]
 struct NativeGeoIndexRegistry {
     brute_force: NativeBruteForceIndex,
     dynamic_z_order: NativeDynamicZOrderIndex,
+    segmented_kd_tree: NativeSegmentedKdTreeIndex,
 }
 
 const EARTH_RADIUS_METERS: f64 = 6_371_008.8;
@@ -408,6 +458,7 @@ impl Default for NativeGeoIndexRegistry {
         Self {
             brute_force: NativeBruteForceIndex::default(),
             dynamic_z_order: NativeDynamicZOrderIndex::default(),
+            segmented_kd_tree: NativeSegmentedKdTreeIndex::default(),
         }
     }
 }
@@ -431,6 +482,16 @@ impl Default for NativeDynamicZOrderIndex {
     }
 }
 
+impl Default for NativeSegmentedKdTreeIndex {
+    fn default() -> Self {
+        Self {
+            segments: Vec::new(),
+            pending_points: Vec::new(),
+            last_stats: empty_geo_index_stats("segmented-kd-tree", 0),
+        }
+    }
+}
+
 fn empty_geo_index_stats(engine_id: &str, point_count: usize) -> GeoIndexStats {
     GeoIndexStats {
         engine_id: engine_id.to_string(),
@@ -446,6 +507,12 @@ fn empty_geo_index_stats(engine_id: &str, point_count: usize) -> GeoIndexStats {
         candidates_inspected: 0,
         pruned_by_geo: 0,
         pruned_by_time: 0,
+        segment_count: None,
+        delta_segment_count: None,
+        loaded_segments: None,
+        max_leaf_size: None,
+        pending_point_count: None,
+        needs_optimization: None,
     }
 }
 
@@ -698,6 +765,204 @@ impl NativeBruteForceIndex {
         };
         results
     }
+}
+
+impl NativeSegmentedKdTreeIndex {
+    fn build(
+        &mut self,
+        points: &[GeoIndexPoint],
+        mut on_progress: impl FnMut(usize) -> AppResult<()>,
+    ) -> AppResult<()> {
+        let start = Instant::now();
+        self.segments.clear();
+        self.pending_points.clear();
+        on_progress(0)?;
+        for (segment_index, chunk) in points.chunks(SEGMENTED_KD_TREE_SEGMENT_LIMIT).enumerate() {
+            self.segments.push(NativeKdSegment {
+                id: format!("segment-{segment_index:06}"),
+                is_delta: false,
+                points: chunk
+                    .iter()
+                    .filter_map(normalized_geo_index_point)
+                    .collect::<Vec<_>>(),
+                max_leaf_size: SEGMENTED_KD_TREE_LEAF_SIZE,
+            });
+            on_progress(((segment_index + 1) * SEGMENTED_KD_TREE_SEGMENT_LIMIT).min(points.len()))?;
+        }
+        self.last_stats =
+            self.stats_with_timing(Some(start.elapsed().as_secs_f64() * 1000.0), None);
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn insert_many(&mut self, points: &[GeoIndexPoint]) {
+        let start = Instant::now();
+        self.pending_points
+            .extend(points.iter().filter_map(normalized_geo_index_point));
+        if self.pending_points.len() >= SEGMENTED_KD_TREE_DELTA_LIMIT {
+            self.flush_pending();
+        }
+        self.last_stats =
+            self.stats_with_timing(None, Some(start.elapsed().as_secs_f64() * 1000.0));
+    }
+
+    #[allow(dead_code)]
+    fn flush_pending(&mut self) {
+        if self.pending_points.is_empty() {
+            return;
+        }
+        let points = std::mem::take(&mut self.pending_points);
+        self.segments.push(NativeKdSegment {
+            id: format!(
+                "delta-{}-{}",
+                current_timestamp_millis(),
+                self.segments.len()
+            ),
+            is_delta: true,
+            points,
+            max_leaf_size: SEGMENTED_KD_TREE_LEAF_SIZE,
+        });
+        self.last_stats = self.stats_with_timing(None, None);
+    }
+
+    fn search(&mut self, query: &GeoSearchQuery) -> Vec<GeoSearchResult> {
+        let start = Instant::now();
+        let offset = query.offset.unwrap_or(0).max(0) as usize;
+        let limit = query.k.max(0) as usize;
+        let retained_limit = offset + limit;
+        let mut stats = self.stats_with_timing(None, None);
+        if limit == 0 || self.point_count() == 0 {
+            stats.last_query_time_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+            self.last_stats = stats;
+            return Vec::new();
+        }
+
+        let mut top_k = Vec::<GeoSearchResult>::new();
+        for segment in &self.segments {
+            stats.nodes_visited += 1;
+            stats.pages_read += 1;
+            for point in &segment.points {
+                stats.candidates_inspected += 1;
+                if !matches_geo_search_query(point, query) {
+                    continue;
+                }
+                stats.distance_computations += 1;
+                top_k.push(GeoSearchResult {
+                    media_id: point.media_id.clone(),
+                    distance_meters: distance_meters(point, query),
+                });
+                if top_k.len() >= retained_limit {
+                    sort_geo_results(&mut top_k);
+                    top_k.truncate(retained_limit);
+                }
+            }
+        }
+        for point in &self.pending_points {
+            stats.candidates_inspected += 1;
+            if !matches_geo_search_query(point, query) {
+                continue;
+            }
+            stats.distance_computations += 1;
+            top_k.push(GeoSearchResult {
+                media_id: point.media_id.clone(),
+                distance_meters: distance_meters(point, query),
+            });
+            if top_k.len() >= retained_limit {
+                sort_geo_results(&mut top_k);
+                top_k.truncate(retained_limit);
+            }
+        }
+
+        sort_geo_results(&mut top_k);
+        stats.last_query_time_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+        self.last_stats = stats;
+        top_k
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>()
+    }
+
+    fn snapshot(&self) -> NativeSegmentedKdTreeSnapshot {
+        NativeSegmentedKdTreeSnapshot {
+            engine_id: "segmented-kd-tree".to_string(),
+            engine_version: 1,
+            segment_point_limit: SEGMENTED_KD_TREE_SEGMENT_LIMIT,
+            delta_flush_point_limit: SEGMENTED_KD_TREE_DELTA_LIMIT,
+            leaf_size: SEGMENTED_KD_TREE_LEAF_SIZE,
+            point_count: self.point_count(),
+            segment_count: self.segments.len(),
+            segments: self.segments.clone(),
+            pending_points: self.pending_points.clone(),
+        }
+    }
+
+    fn restore(&mut self, snapshot: NativeSegmentedKdTreeSnapshot) -> AppResult<()> {
+        if snapshot.engine_id != "segmented-kd-tree"
+            || snapshot.engine_version != 1
+            || snapshot.leaf_size != SEGMENTED_KD_TREE_LEAF_SIZE
+        {
+            return Err("Segmented KD-tree index snapshot is incompatible.".to_string());
+        }
+        self.segments = snapshot.segments;
+        self.pending_points = snapshot.pending_points;
+        if snapshot.point_count != self.point_count()
+            || snapshot.segment_count != self.segments.len()
+        {
+            self.segments.clear();
+            self.pending_points.clear();
+            return Err("Segmented KD-tree index snapshot is incomplete.".to_string());
+        }
+        self.last_stats = self.stats_with_timing(Some(0.0), None);
+        Ok(())
+    }
+
+    fn point_count(&self) -> usize {
+        self.segments
+            .iter()
+            .map(|segment| segment.points.len())
+            .sum::<usize>()
+            + self.pending_points.len()
+    }
+
+    fn delta_segment_count(&self) -> usize {
+        self.segments
+            .iter()
+            .filter(|segment| segment.is_delta)
+            .count()
+    }
+
+    fn stats_with_timing(
+        &self,
+        build_time_ms: Option<f64>,
+        insert_time_ms: Option<f64>,
+    ) -> GeoIndexStats {
+        GeoIndexStats {
+            build_time_ms,
+            insert_time_ms,
+            index_size_bytes: Some(self.point_count() * 48 + self.segments.len() * 96),
+            segment_count: Some(self.segments.len()),
+            delta_segment_count: Some(self.delta_segment_count()),
+            loaded_segments: Some(self.segments.len()),
+            max_leaf_size: Some(SEGMENTED_KD_TREE_LEAF_SIZE),
+            pending_point_count: Some(self.pending_points.len()),
+            needs_optimization: Some(self.delta_segment_count() >= 8),
+            ..empty_geo_index_stats("segmented-kd-tree", self.point_count())
+        }
+    }
+}
+
+fn normalized_geo_index_point(point: &GeoIndexPoint) -> Option<GeoIndexPoint> {
+    if !point.lat.is_finite() || !point.lon.is_finite() {
+        return None;
+    }
+    Some(GeoIndexPoint {
+        media_id: point.media_id.clone(),
+        kind: point.kind.clone(),
+        lat: point.lat,
+        lon: normalize_lon(point.lon),
+        timestamp: point.timestamp,
+    })
 }
 
 impl NativeDynamicZOrderIndex {
@@ -1104,6 +1369,15 @@ fn dynamic_index_dir(app: &AppHandle) -> AppResult<PathBuf> {
     Ok(dir)
 }
 
+fn segmented_kd_tree_index_dir(app: &AppHandle) -> AppResult<PathBuf> {
+    let dir = app_data_dir(app)?
+        .join("indexes")
+        .join("segmented-kd-tree")
+        .join("v1");
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    Ok(dir)
+}
+
 fn validate_dynamic_manifest(manifest: &DynamicIndexManifest, catalog_epoch: i64) -> AppResult<()> {
     if manifest.engine_id != "dynamic-z-order-cells"
         || manifest.engine_version != 1
@@ -1181,6 +1455,98 @@ fn save_persisted_dynamic_index(app: &AppHandle, catalog_epoch: i64) -> AppResul
     drop(registry);
 
     let mut data_file = File::create(dir.join("index.bin")).map_err(|error| error.to_string())?;
+    data_file
+        .write_all(&data)
+        .map_err(|error| error.to_string())?;
+    fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn validate_segmented_kd_tree_manifest(
+    manifest: &SegmentedKdTreeManifest,
+    catalog_epoch: i64,
+) -> AppResult<()> {
+    if manifest.engine_id != "segmented-kd-tree"
+        || manifest.engine_version != 1
+        || manifest.catalog_epoch != catalog_epoch
+    {
+        return Err("Segmented KD-tree index manifest does not match catalog.".to_string());
+    }
+    Ok(())
+}
+
+fn load_persisted_segmented_kd_tree_index(
+    app: &AppHandle,
+    catalog_epoch: i64,
+) -> AppResult<Option<(usize, usize)>> {
+    let dir = segmented_kd_tree_index_dir(app)?;
+    let manifest_path = dir.join("manifest.json");
+    let data_path = dir.join("index.json");
+    if !manifest_path.exists() || !data_path.exists() {
+        return Ok(None);
+    }
+
+    let manifest = match fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<SegmentedKdTreeManifest>(&content).ok())
+    {
+        Some(manifest) => manifest,
+        None => return Ok(None),
+    };
+    if validate_segmented_kd_tree_manifest(&manifest, catalog_epoch).is_err() {
+        return Ok(None);
+    }
+
+    let data = match fs::read(&data_path) {
+        Ok(data) => data,
+        Err(_) => return Ok(None),
+    };
+    if checksum_hex(&data) != manifest.data_checksum {
+        return Ok(None);
+    }
+
+    let snapshot = match serde_json::from_slice::<NativeSegmentedKdTreeSnapshot>(&data) {
+        Ok(snapshot) => snapshot,
+        Err(_) => return Ok(None),
+    };
+    if snapshot.point_count != manifest.point_count
+        || snapshot.segment_count != manifest.segment_count
+    {
+        return Ok(None);
+    }
+
+    let point_count = snapshot.point_count;
+    let segment_count = snapshot.segment_count;
+    let mut registry = geo_index_registry()
+        .lock()
+        .map_err(|error| error.to_string())?;
+    registry.segmented_kd_tree.restore(snapshot)?;
+    Ok(Some((point_count, segment_count)))
+}
+
+fn save_persisted_segmented_kd_tree_index(app: &AppHandle, catalog_epoch: i64) -> AppResult<()> {
+    let dir = segmented_kd_tree_index_dir(app)?;
+    let registry = geo_index_registry()
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let snapshot = registry.segmented_kd_tree.snapshot();
+    let data = serde_json::to_vec(&snapshot).map_err(|error| error.to_string())?;
+    let manifest = SegmentedKdTreeManifest {
+        engine_id: "segmented-kd-tree".to_string(),
+        engine_version: 1,
+        catalog_epoch,
+        point_count: snapshot.point_count,
+        segment_count: snapshot.segment_count,
+        created_at: current_timestamp_millis(),
+        data_checksum: checksum_hex(&data),
+    };
+    drop(registry);
+
+    let mut data_file = File::create(dir.join("index.json")).map_err(|error| error.to_string())?;
     data_file
         .write_all(&data)
         .map_err(|error| error.to_string())?;
@@ -2688,10 +3054,10 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
             .collect::<Vec<_>>();
         let items = get_media_by_ids(app, ids)?;
         let geo_stats = get_geo_index_stats(engine_id.clone())?;
-        let (engine_label, exact, persistent) = if engine_id == "brute-force" {
-            ("Brute force oracle", true, false)
-        } else {
-            ("Dynamic Z-order cells", true, true)
+        let (engine_label, exact, persistent) = match engine_id.as_str() {
+            "brute-force" => ("Brute force oracle", true, false),
+            "segmented-kd-tree" => ("Segmented KD-tree", true, true),
+            _ => ("Dynamic Z-order cells", true, true),
         };
         let rows = enriched_distance_rows(items, results);
         let limit_reached = (offset + limit) < geo_stats.point_count as i64;
@@ -2928,18 +3294,19 @@ fn build_search_indexes(
     app: AppHandle,
     window: Window,
     index_id: String,
+    force_rebuild: Option<bool>,
 ) -> AppResult<SearchIndexBuildSummary> {
     let started = Instant::now();
     let total_indexes = 1_usize;
-    let selected_index_id = if index_id == "brute-force" {
-        "brute-force"
-    } else {
-        "dynamic-z-order-cells"
+    let selected_index_id = match index_id.as_str() {
+        "brute-force" => "brute-force",
+        "segmented-kd-tree" => "segmented-kd-tree",
+        _ => "dynamic-z-order-cells",
     };
-    let selected_index_label = if selected_index_id == "brute-force" {
-        "Brute force oracle"
-    } else {
-        "Dynamic Z-order cells"
+    let selected_index_label = match selected_index_id {
+        "brute-force" => "Brute force oracle",
+        "segmented-kd-tree" => "Segmented KD-tree",
+        _ => "Dynamic Z-order cells",
     };
     emit_geo_index_progress(
         &window,
@@ -2955,14 +3322,28 @@ fn build_search_indexes(
         },
     );
 
-    let epoch = if selected_index_id == "dynamic-z-order-cells" {
+    let epoch = if selected_index_id == "dynamic-z-order-cells"
+        || selected_index_id == "segmented-kd-tree"
+    {
         let conn = connect(&app)?;
         Some(catalog_epoch(&conn)?)
     } else {
         None
     };
     if let Some(epoch) = epoch {
-        if let Some((point_count, _cell_count)) = load_persisted_dynamic_index(&app, epoch)? {
+        let should_restore = !force_rebuild.unwrap_or(false);
+        let restored = if selected_index_id == "segmented-kd-tree" {
+            should_restore
+                .then(|| load_persisted_segmented_kd_tree_index(&app, epoch))
+                .transpose()?
+                .flatten()
+        } else {
+            should_restore
+                .then(|| load_persisted_dynamic_index(&app, epoch))
+                .transpose()?
+                .flatten()
+        };
+        if let Some((point_count, _unit_count)) = restored {
             emit_geo_index_progress(
                 &window,
                 GeoIndexBuildProgress {
@@ -2979,7 +3360,7 @@ fn build_search_indexes(
             return Ok(SearchIndexBuildSummary {
                 point_count,
                 build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
-                engine_count: 4,
+                engine_count: 5,
             });
         }
     }
@@ -3011,6 +3392,25 @@ fn build_search_indexes(
             .map_err(|error| error.to_string())?;
         if selected_index_id == "brute-force" {
             registry.brute_force.build(&points);
+        } else if selected_index_id == "segmented-kd-tree" {
+            registry
+                .segmented_kd_tree
+                .build(&points, |processed_points| {
+                    emit_geo_index_progress(
+                        &window,
+                        GeoIndexBuildProgress {
+                            phase: "building".to_string(),
+                            point_count: points.len(),
+                            built_indexes: 0,
+                            total_indexes,
+                            current_index_id: Some(selected_index_id.to_string()),
+                            current_index_label: Some(selected_index_label.to_string()),
+                            current_index_processed_points: Some(processed_points),
+                            current_index_total_points: Some(points.len()),
+                        },
+                    );
+                    Ok(())
+                })?;
         } else {
             registry
                 .dynamic_z_order
@@ -3034,7 +3434,11 @@ fn build_search_indexes(
     }
 
     if let Some(epoch) = epoch {
-        let _ = save_persisted_dynamic_index(&app, epoch);
+        let _ = if selected_index_id == "segmented-kd-tree" {
+            save_persisted_segmented_kd_tree_index(&app, epoch)
+        } else {
+            save_persisted_dynamic_index(&app, epoch)
+        };
     }
     let summary = GeoIndexBuildSummary {
         point_count: points.len(),
@@ -3057,7 +3461,7 @@ fn build_search_indexes(
     Ok(SearchIndexBuildSummary {
         point_count: summary.point_count,
         build_time_ms: summary.build_time_ms,
-        engine_count: 4,
+        engine_count: 5,
     })
 }
 
@@ -3066,10 +3470,10 @@ fn search_geo_index(index_id: String, query: GeoSearchQuery) -> AppResult<Vec<Ge
     let mut registry = geo_index_registry()
         .lock()
         .map_err(|error| error.to_string())?;
-    let results = if index_id == "dynamic-z-order-cells" {
-        registry.dynamic_z_order.search(&query)
-    } else {
-        registry.brute_force.search(&query)
+    let results = match index_id.as_str() {
+        "dynamic-z-order-cells" => registry.dynamic_z_order.search(&query),
+        "segmented-kd-tree" => registry.segmented_kd_tree.search(&query),
+        _ => registry.brute_force.search(&query),
     };
     Ok(results)
 }
@@ -3079,10 +3483,10 @@ fn get_geo_index_stats(index_id: String) -> AppResult<GeoIndexStats> {
     let registry = geo_index_registry()
         .lock()
         .map_err(|error| error.to_string())?;
-    Ok(if index_id == "dynamic-z-order-cells" {
-        registry.dynamic_z_order.last_stats.clone()
-    } else {
-        registry.brute_force.last_stats.clone()
+    Ok(match index_id.as_str() {
+        "dynamic-z-order-cells" => registry.dynamic_z_order.last_stats.clone(),
+        "segmented-kd-tree" => registry.segmented_kd_tree.last_stats.clone(),
+        _ => registry.brute_force.last_stats.clone(),
     })
 }
 
@@ -3103,6 +3507,12 @@ fn get_search_index_stats() -> AppResult<Vec<SearchIndexStats>> {
         search_stats_from_geo(
             registry.dynamic_z_order.last_stats.clone(),
             "Dynamic Z-order cells",
+            true,
+            true,
+        ),
+        search_stats_from_geo(
+            registry.segmented_kd_tree.last_stats.clone(),
+            "Segmented KD-tree",
             true,
             true,
         ),
@@ -4047,6 +4457,65 @@ mod tests {
         encoded[0] = 0;
 
         assert!(decode_dynamic_index(&encoded).is_err());
+    }
+
+    #[test]
+    fn native_segmented_kd_tree_matches_brute_force() {
+        let points = test_geo_points();
+        let query = GeoSearchQuery {
+            lat: 48.15,
+            lon: 11.55,
+            k: 10,
+            offset: None,
+            kind: None,
+            geo_bounds: None,
+            start_time: None,
+            end_time: None,
+        };
+        let mut oracle = NativeBruteForceIndex::default();
+        oracle.build(&points);
+        let expected = oracle.search(&query);
+
+        let mut index = NativeSegmentedKdTreeIndex::default();
+        index.build(&points, |_| Ok(())).unwrap();
+
+        assert_eq!(
+            index
+                .search(&query)
+                .iter()
+                .map(|result| result.media_id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|result| result.media_id.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn native_segmented_kd_tree_snapshot_round_trips_search_results() {
+        let points = test_geo_points();
+        let query = GeoSearchQuery {
+            lat: 48.15,
+            lon: 11.55,
+            k: 10,
+            offset: None,
+            kind: None,
+            geo_bounds: None,
+            start_time: None,
+            end_time: None,
+        };
+        let mut fresh = NativeSegmentedKdTreeIndex::default();
+        fresh.build(&points, |_| Ok(())).unwrap();
+        let expected = fresh.search(&query);
+
+        let snapshot = fresh.snapshot();
+        let encoded = serde_json::to_vec(&snapshot).unwrap();
+        let decoded = serde_json::from_slice::<NativeSegmentedKdTreeSnapshot>(&encoded).unwrap();
+        let mut restored = NativeSegmentedKdTreeIndex::default();
+        restored.restore(decoded).unwrap();
+
+        assert_eq!(restored.search(&query), expected);
     }
 
     #[test]

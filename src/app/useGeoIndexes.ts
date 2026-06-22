@@ -39,6 +39,7 @@ export function useGeoIndexes({
   geoIndexVersion: number
   geoIndexProgress: GeoIndexBuildProgress | undefined
   indexStats: SearchIndexStats
+  optimizeIndex(): Promise<void>
   resetIndexState(): void
 } {
   const [geoPointCount, setGeoPointCount] = useState(0)
@@ -54,6 +55,37 @@ export function useGeoIndexes({
     setIndexStats(defaultStats)
   }, [])
 
+  const runIndexBuild = useCallback(
+    async (forceRebuild: boolean, isCancelled: () => boolean = () => false) => {
+      if (isCancelled()) return
+      setGeoIndexProgress({
+        phase: 'loading',
+        pointCount: 0,
+        builtIndexes: 0,
+        totalIndexes: 1,
+        currentIndexId: selectedIndexId,
+      })
+      try {
+        const summary = await (forceRebuild
+          ? catalog.rebuildSearchIndex
+          : catalog.buildSearchIndexes
+        ).call(catalog, selectedIndexId, (progress) => {
+          if (!isCancelled()) setGeoIndexProgress(progress)
+        })
+        if (isCancelled()) return
+        setGeoPointCount(summary.pointCount)
+        setGeoIndexVersion((version) => version + 1)
+      } finally {
+        if (!isCancelled()) setGeoIndexProgress(undefined)
+      }
+    },
+    [catalog, selectedIndexId],
+  )
+
+  const optimizeIndex = useCallback(async () => {
+    await runIndexBuild(true)
+  }, [runIndexBuild])
+
   useEffect(() => {
     if (!catalogInfo) {
       const resetTimer = window.setTimeout(resetIndexState, 0)
@@ -62,33 +94,11 @@ export function useGeoIndexes({
 
     let cancelled = false
     const timer = window.setTimeout(() => {
-      setGeoIndexProgress({
-        phase: 'loading',
-        pointCount: 0,
-        builtIndexes: 0,
-        totalIndexes: 1,
-        currentIndexId: selectedIndexId,
+      runIndexBuild(false, () => cancelled).catch((caught) => {
+        if (!cancelled) {
+          onError(caught instanceof Error ? caught.message : String(caught))
+        }
       })
-
-      catalog
-        .buildSearchIndexes(selectedIndexId, (progress) => {
-          if (!cancelled) setGeoIndexProgress(progress)
-        })
-        .then(
-          (summary) => {
-            if (cancelled) return
-            setGeoPointCount(summary.pointCount)
-            setGeoIndexVersion((version) => version + 1)
-          },
-          (caught) => {
-            if (!cancelled) {
-              onError(caught instanceof Error ? caught.message : String(caught))
-            }
-          },
-        )
-        .finally(() => {
-          if (!cancelled) setGeoIndexProgress(undefined)
-        })
     }, 0)
 
     return () => {
@@ -101,6 +111,7 @@ export function useGeoIndexes({
     catalogRevision,
     onError,
     resetIndexState,
+    runIndexBuild,
     selectedIndexId,
   ])
 
@@ -135,6 +146,7 @@ export function useGeoIndexes({
     geoIndexVersion,
     geoIndexProgress,
     indexStats,
+    optimizeIndex,
     resetIndexState,
   }
 }

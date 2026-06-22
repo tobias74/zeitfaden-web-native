@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useSearchState } from './useSearchState'
 
 const options = {
-  allowedIndexIds: ['brute-force', 'dynamic-z-order-cells'],
+  allowedIndexIds: [
+    'brute-force',
+    'dynamic-z-order-cells',
+    'segmented-kd-tree',
+  ],
   defaultSelectedIndexId: 'brute-force',
   defaultQueryPoint: { lat: 47.3769, lon: 8.5417 },
   defaultResultPageSize: 100,

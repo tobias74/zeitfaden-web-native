@@ -86,6 +86,10 @@ export interface CatalogBackend {
     indexId: string,
     onProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<SearchIndexBuildSummary>
+  rebuildSearchIndex(
+    indexId: string,
+    onProgress?: (progress: GeoIndexBuildProgress) => void,
+  ): Promise<SearchIndexBuildSummary>
   getSearchIndexStats(): Promise<SearchIndexStats[]>
   listMedia(query: CatalogQuery): Promise<MediaItem[]>
   getMediaByIds(ids: string[]): Promise<MediaItem[]>

@@ -104,6 +104,25 @@ export class BruteForceGeoIndex implements GeoTemporalIndex {
     }
   }
 
+  async insertMany(points: GeoIndexPoint[]): Promise<void> {
+    const start = performance.now()
+    const incomingIds = new Set(points.map((point) => point.mediaId))
+    this.points = [
+      ...this.points.filter((point) => !incomingIds.has(point.mediaId)),
+      ...points,
+    ].sort((a, b) => a.mediaId.localeCompare(b.mediaId))
+    this.lastStats = {
+      ...this.lastStats,
+      pointCount: this.points.length,
+      insertTimeMs: performance.now() - start,
+    }
+  }
+
+  async flushPending(_catalogEpoch = 0): Promise<void> {
+    void _catalogEpoch
+    // Brute force keeps all points in memory immediately.
+  }
+
   async remove(mediaId: string): Promise<void> {
     const start = performance.now()
     this.points = this.points.filter((point) => point.mediaId !== mediaId)

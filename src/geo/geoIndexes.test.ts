@@ -3,6 +3,7 @@ import type { GeoIndexPoint, GeoSearchQuery, GeoTemporalIndex } from '../types'
 import { BruteForceGeoIndex } from './bruteForceIndex'
 import { DynamicZOrderGeoIndex } from './dynamicZOrderGeoIndex'
 import { GeoIndexRegistry } from './registry'
+import { SegmentedKdTreeGeoIndex } from './segmentedKdTreeGeoIndex'
 
 const points: GeoIndexPoint[] = [
   { mediaId: 'zurich-a', lat: 47.3769, lon: 8.5417, timestamp: 100 },
@@ -57,15 +58,18 @@ describe('geo indexes', () => {
     )
   })
 
-  it('registry exposes only incrementally updateable engines', () => {
+  it('registry exposes only incrementally insertable engines', () => {
     const registry = new GeoIndexRegistry()
     expect(
       registry.indexes.every(
-        (index) =>
-          index.capabilities.incrementalInsert &&
-          index.capabilities.incrementalDelete,
+        (index) => index.capabilities.incrementalInsert,
       ),
     ).toBe(true)
+  })
+
+  it('registry exposes the segmented KD-tree distance engine', () => {
+    const registry = new GeoIndexRegistry()
+    expect(registry.get('segmented-kd-tree').label).toBe('Segmented KD-tree')
   })
 
   it('dynamic Z-order index matches brute force for k=1', async () => {
@@ -172,5 +176,44 @@ describe('geo indexes', () => {
     expect(processedCounts[0]).toBe(0)
     expect(processedCounts).toContain(50_000)
     expect(processedCounts.at(-1)).toBe(densePoints.length)
+  })
+
+  it('segmented KD-tree index matches brute force for distance queries', async () => {
+    await expectMatchesBruteForce(new SegmentedKdTreeGeoIndex(), {
+      lat: 47.38,
+      lon: 8.54,
+      k: 5,
+    })
+  })
+
+  it('segmented KD-tree index matches brute force with filters and paging', async () => {
+    await expectMatchesBruteForce(new SegmentedKdTreeGeoIndex({ leafSize: 2 }), {
+      lat: 47.38,
+      lon: 8.54,
+      startTime: 100,
+      endTime: 650,
+      kind: 'geo_point',
+      geoBounds: { minLat: -1, maxLat: 60, minLon: -180, maxLon: 180 },
+      k: 3,
+      offset: 1,
+    })
+  })
+
+  it('segmented KD-tree supports incremental inserts', async () => {
+    const index = new SegmentedKdTreeGeoIndex({ leafSize: 2 })
+    const oracle = new BruteForceGeoIndex()
+    await index.build(points.slice(0, 2))
+    await oracle.build(points.slice(0, 2))
+
+    await index.insertMany(points.slice(2))
+    await index.flushPending(1)
+    await oracle.insertMany(points.slice(2))
+
+    const query = { lat: 47.38, lon: 8.54, k: 8 }
+    const actual = await index.search(query)
+    const expected = await oracle.search(query)
+    expect(actual.map((result) => result.mediaId)).toEqual(
+      expected.map((result) => result.mediaId),
+    )
   })
 })

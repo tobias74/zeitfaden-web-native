@@ -106,6 +106,19 @@ export class CatalogClient {
     })
   }
 
+  rebuildSearchIndex(
+    indexId: string,
+    onProgress?: (progress: GeoIndexBuildProgress) => void,
+  ): Promise<SearchIndexBuildSummary> {
+    return this.request(
+      'buildSearchIndexes',
+      { indexId, forceRebuild: true },
+      (progress) => {
+        onProgress?.(progress as GeoIndexBuildProgress)
+      },
+    )
+  }
+
   getSearchIndexStats(): Promise<SearchIndexStats[]> {
     return this.request('getSearchIndexStats')
   }

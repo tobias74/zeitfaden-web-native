@@ -146,6 +146,12 @@ export type GeoIndexStats = {
   candidatesInspected: number
   prunedByGeo: number
   prunedByTime: number
+  segmentCount?: number
+  deltaSegmentCount?: number
+  loadedSegments?: number
+  maxLeafSize?: number
+  pendingPointCount?: number
+  needsOptimization?: boolean
 }
 
 export type SearchStorageMode = 'sqlite' | 'indexeddb' | 'native'
@@ -199,6 +205,8 @@ export interface GeoTemporalIndex {
 
   build(points: GeoIndexPoint[], options?: GeoIndexBuildOptions): Promise<void>
   insert(point: GeoIndexPoint): Promise<void>
+  insertMany(points: GeoIndexPoint[]): Promise<void>
+  flushPending(catalogEpoch: number): Promise<void>
   remove(mediaId: string): Promise<void>
   search(query: GeoSearchQuery): Promise<GeoSearchResult[]>
   stats(): Promise<GeoIndexStats>

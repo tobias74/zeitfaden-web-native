@@ -8,7 +8,11 @@ const defaults: SearchUrlDefaults = {
   queryPoint: { lat: 47.3769, lon: 8.5417 },
 }
 
-const allowedIndexes = ['brute-force', 'dynamic-z-order-cells']
+const allowedIndexes = [
+  'brute-force',
+  'dynamic-z-order-cells',
+  'segmented-kd-tree',
+]
 const allowedPageSizes = [50, 100, 250, 500]
 
 describe('search URL state', () => {

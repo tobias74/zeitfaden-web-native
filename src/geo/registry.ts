@@ -6,12 +6,17 @@ import type {
 } from '../types'
 import { BruteForceGeoIndex } from './bruteForceIndex'
 import { DynamicZOrderGeoIndex } from './dynamicZOrderGeoIndex'
+import { SegmentedKdTreeGeoIndex } from './segmentedKdTreeGeoIndex'
 
 export class GeoIndexRegistry {
   readonly indexes: GeoTemporalIndex[]
 
   constructor() {
-    this.indexes = [new BruteForceGeoIndex(), new DynamicZOrderGeoIndex()]
+    this.indexes = [
+      new BruteForceGeoIndex(),
+      new DynamicZOrderGeoIndex(),
+      new SegmentedKdTreeGeoIndex(),
+    ]
   }
 
   get(id: string): GeoTemporalIndex {
@@ -23,9 +28,7 @@ export class GeoIndexRegistry {
   }
 
   async insertMany(points: GeoIndexPoint[]): Promise<void> {
-    for (const point of points) {
-      await Promise.all(this.indexes.map((index) => index.insert(point)))
-    }
+    await Promise.all(this.indexes.map((index) => index.insertMany(points)))
   }
 
   async removeMany(mediaIds: string[]): Promise<void> {
