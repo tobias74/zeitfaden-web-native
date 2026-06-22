@@ -136,6 +136,13 @@ export type GeoIndexStats = {
   engineId: string
   pointCount: number
   indexSizeBytes?: number
+  residentBytes?: number
+  diskReadBytes?: number
+  diskReadCount?: number
+  pageCacheHits?: number
+  pageCacheMisses?: number
+  loadedPages?: number
+  indexStorage?: 'memory' | 'disk'
   buildTimeMs?: number
   insertTimeMs?: number
   deleteTimeMs?: number

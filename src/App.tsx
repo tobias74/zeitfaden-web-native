@@ -1546,6 +1546,60 @@ function App() {
                     </dd>
                   </div>
                 )}
+                {effectiveIndexStats.indexStorage && (
+                  <div>
+                    <dt>{t('indexStorage')}</dt>
+                    <dd>{effectiveIndexStats.indexStorage}</dd>
+                  </div>
+                )}
+                {typeof effectiveIndexStats.residentBytes === 'number' && (
+                  <div>
+                    <dt>{t('resident')}</dt>
+                    <dd>
+                      {formatBytes(effectiveIndexStats.residentBytes, locale)}
+                    </dd>
+                  </div>
+                )}
+                {typeof effectiveIndexStats.diskReadBytes === 'number' && (
+                  <div>
+                    <dt>{t('diskRead')}</dt>
+                    <dd>
+                      {formatBytes(effectiveIndexStats.diskReadBytes, locale)}
+                    </dd>
+                  </div>
+                )}
+                {typeof effectiveIndexStats.diskReadCount === 'number' && (
+                  <div>
+                    <dt>{t('diskReads')}</dt>
+                    <dd>
+                      {statsNumber(effectiveIndexStats.diskReadCount, locale)}
+                    </dd>
+                  </div>
+                )}
+                {typeof effectiveIndexStats.pageCacheHits === 'number' && (
+                  <div>
+                    <dt>{t('cacheHits')}</dt>
+                    <dd>
+                      {statsNumber(effectiveIndexStats.pageCacheHits, locale)}
+                    </dd>
+                  </div>
+                )}
+                {typeof effectiveIndexStats.pageCacheMisses === 'number' && (
+                  <div>
+                    <dt>{t('cacheMisses')}</dt>
+                    <dd>
+                      {statsNumber(effectiveIndexStats.pageCacheMisses, locale)}
+                    </dd>
+                  </div>
+                )}
+                {typeof effectiveIndexStats.loadedPages === 'number' && (
+                  <div>
+                    <dt>{t('loadedPages')}</dt>
+                    <dd>
+                      {statsNumber(effectiveIndexStats.loadedPages, locale)}
+                    </dd>
+                  </div>
+                )}
               </dl>
               {(selectedIndexId === 'segmented-kd-tree' ||
                 selectedIndexId === 'segmented-ball-tree') && (

@@ -8,7 +8,7 @@ use rusqlite::{params, params_from_iter, Connection, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -151,6 +151,13 @@ struct GeoIndexStats {
     engine_id: String,
     point_count: usize,
     index_size_bytes: Option<usize>,
+    resident_bytes: Option<usize>,
+    disk_read_bytes: Option<usize>,
+    disk_read_count: Option<usize>,
+    page_cache_hits: Option<usize>,
+    page_cache_misses: Option<usize>,
+    loaded_pages: Option<usize>,
+    index_storage: Option<String>,
     build_time_ms: Option<f64>,
     insert_time_ms: Option<f64>,
     delete_time_ms: Option<f64>,
@@ -231,6 +238,13 @@ struct SearchIndexStats {
     persistent: Option<bool>,
     point_count: usize,
     index_size_bytes: Option<usize>,
+    resident_bytes: Option<usize>,
+    disk_read_bytes: Option<usize>,
+    disk_read_count: Option<usize>,
+    page_cache_hits: Option<usize>,
+    page_cache_misses: Option<usize>,
+    loaded_pages: Option<usize>,
+    index_storage: Option<String>,
     build_time_ms: Option<f64>,
     insert_time_ms: Option<f64>,
     delete_time_ms: Option<f64>,
@@ -417,6 +431,9 @@ struct NativeKdSegment {
 struct NativeSegmentedKdTreeIndex {
     segments: Vec<NativeKdSegment>,
     pending_points: Vec<GeoIndexPoint>,
+    disk_manifest: Option<NativeDiskSegmentedManifest>,
+    disk_dir: Option<PathBuf>,
+    segment_cache: VecDeque<(String, NativeKdSegment)>,
     last_stats: GeoIndexStats,
 }
 
@@ -452,6 +469,9 @@ struct NativeBallSegment {
 struct NativeSegmentedBallTreeIndex {
     segments: Vec<NativeBallSegment>,
     pending_points: Vec<GeoIndexPoint>,
+    disk_manifest: Option<NativeDiskSegmentedManifest>,
+    disk_dir: Option<PathBuf>,
+    segment_cache: VecDeque<(String, NativeBallSegment)>,
     last_stats: GeoIndexStats,
 }
 
@@ -503,6 +523,41 @@ struct SegmentedBallTreeManifest {
     segment_count: usize,
     created_at: i64,
     data_checksum: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeSegmentSummary {
+    lat_min: f64,
+    lat_max: f64,
+    lon_min: f64,
+    lon_max: f64,
+    min_timestamp: Option<i64>,
+    max_timestamp: Option<i64>,
+    kind_mask: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeDiskSegmentRef {
+    id: String,
+    is_delta: bool,
+    point_count: usize,
+    max_leaf_size: usize,
+    byte_len: usize,
+    summary: NativeSegmentSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeDiskSegmentedManifest {
+    engine_id: String,
+    engine_version: u32,
+    catalog_epoch: i64,
+    point_count: usize,
+    segment_count: usize,
+    created_at: i64,
+    segments: Vec<NativeDiskSegmentRef>,
 }
 
 #[derive(Clone)]
@@ -558,6 +613,9 @@ impl Default for NativeSegmentedKdTreeIndex {
         Self {
             segments: Vec::new(),
             pending_points: Vec::new(),
+            disk_manifest: None,
+            disk_dir: None,
+            segment_cache: VecDeque::new(),
             last_stats: empty_geo_index_stats("segmented-kd-tree", 0),
         }
     }
@@ -568,6 +626,9 @@ impl Default for NativeSegmentedBallTreeIndex {
         Self {
             segments: Vec::new(),
             pending_points: Vec::new(),
+            disk_manifest: None,
+            disk_dir: None,
+            segment_cache: VecDeque::new(),
             last_stats: empty_geo_index_stats("segmented-ball-tree", 0),
         }
     }
@@ -578,6 +639,13 @@ fn empty_geo_index_stats(engine_id: &str, point_count: usize) -> GeoIndexStats {
         engine_id: engine_id.to_string(),
         point_count,
         index_size_bytes: None,
+        resident_bytes: None,
+        disk_read_bytes: None,
+        disk_read_count: None,
+        page_cache_hits: None,
+        page_cache_misses: None,
+        loaded_pages: None,
+        index_storage: None,
         build_time_ms: None,
         insert_time_ms: None,
         delete_time_ms: None,
@@ -605,6 +673,13 @@ fn empty_search_index_stats(engine_id: &str, engine_label: &str) -> SearchIndexS
         persistent: Some(true),
         point_count: 0,
         index_size_bytes: None,
+        resident_bytes: None,
+        disk_read_bytes: None,
+        disk_read_count: None,
+        page_cache_hits: None,
+        page_cache_misses: None,
+        loaded_pages: None,
+        index_storage: None,
         build_time_ms: None,
         insert_time_ms: None,
         delete_time_ms: None,
@@ -645,6 +720,13 @@ fn search_stats_from_geo(
         persistent: Some(persistent),
         point_count: stats.point_count,
         index_size_bytes: stats.index_size_bytes,
+        resident_bytes: stats.resident_bytes,
+        disk_read_bytes: stats.disk_read_bytes,
+        disk_read_count: stats.disk_read_count,
+        page_cache_hits: stats.page_cache_hits,
+        page_cache_misses: stats.page_cache_misses,
+        loaded_pages: stats.loaded_pages,
+        index_storage: stats.index_storage,
         build_time_ms: stats.build_time_ms,
         insert_time_ms: stats.insert_time_ms,
         delete_time_ms: stats.delete_time_ms,
@@ -897,6 +979,9 @@ impl NativeSegmentedKdTreeIndex {
         let start = Instant::now();
         self.segments.clear();
         self.pending_points.clear();
+        self.disk_manifest = None;
+        self.disk_dir = None;
+        self.segment_cache.clear();
         on_progress(0)?;
         for (segment_index, chunk) in points.chunks(SEGMENTED_KD_TREE_SEGMENT_LIMIT).enumerate() {
             self.segments.push(NativeKdSegment {
@@ -918,6 +1003,9 @@ impl NativeSegmentedKdTreeIndex {
     #[allow(dead_code)]
     fn insert_many(&mut self, points: &[GeoIndexPoint]) {
         let start = Instant::now();
+        self.disk_manifest = None;
+        self.disk_dir = None;
+        self.segment_cache.clear();
         self.pending_points
             .extend(points.iter().filter_map(normalized_geo_index_point));
         if self.pending_points.len() >= SEGMENTED_KD_TREE_DELTA_LIMIT {
@@ -947,6 +1035,9 @@ impl NativeSegmentedKdTreeIndex {
     }
 
     fn search(&mut self, query: &GeoSearchQuery) -> Vec<GeoSearchResult> {
+        if self.disk_manifest.is_some() {
+            return self.search_disk(query).unwrap_or_default();
+        }
         let start = Instant::now();
         let offset = query.offset.unwrap_or(0).max(0) as usize;
         let limit = query.k.max(0) as usize;
@@ -1018,6 +1109,7 @@ impl NativeSegmentedKdTreeIndex {
         }
     }
 
+    #[allow(dead_code)]
     fn restore(&mut self, snapshot: NativeSegmentedKdTreeSnapshot) -> AppResult<()> {
         if snapshot.engine_id != "segmented-kd-tree"
             || snapshot.engine_version != 1
@@ -1027,6 +1119,9 @@ impl NativeSegmentedKdTreeIndex {
         }
         self.segments = snapshot.segments;
         self.pending_points = snapshot.pending_points;
+        self.disk_manifest = None;
+        self.disk_dir = None;
+        self.segment_cache.clear();
         if snapshot.point_count != self.point_count()
             || snapshot.segment_count != self.segments.len()
         {
@@ -1039,6 +1134,9 @@ impl NativeSegmentedKdTreeIndex {
     }
 
     fn point_count(&self) -> usize {
+        if let Some(manifest) = self.disk_manifest.as_ref() {
+            return manifest.point_count + self.pending_points.len();
+        }
         self.segments
             .iter()
             .map(|segment| segment.points.len())
@@ -1047,6 +1145,13 @@ impl NativeSegmentedKdTreeIndex {
     }
 
     fn delta_segment_count(&self) -> usize {
+        if let Some(manifest) = self.disk_manifest.as_ref() {
+            return manifest
+                .segments
+                .iter()
+                .filter(|segment| segment.is_delta)
+                .count();
+        }
         self.segments
             .iter()
             .filter(|segment| segment.is_delta)
@@ -1058,18 +1163,145 @@ impl NativeSegmentedKdTreeIndex {
         build_time_ms: Option<f64>,
         insert_time_ms: Option<f64>,
     ) -> GeoIndexStats {
+        let disk_index_size = self.disk_manifest.as_ref().map(|manifest| {
+            manifest
+                .segments
+                .iter()
+                .map(|segment| segment.byte_len)
+                .sum::<usize>()
+        });
+        let resident_bytes = self
+            .disk_manifest
+            .as_ref()
+            .and_then(|manifest| serde_json::to_vec(manifest).ok().map(|data| data.len()));
         GeoIndexStats {
             build_time_ms,
             insert_time_ms,
-            index_size_bytes: Some(self.point_count() * 48 + self.segments.len() * 96),
-            segment_count: Some(self.segments.len()),
+            index_size_bytes: disk_index_size
+                .or(Some(self.point_count() * 48 + self.segments.len() * 96)),
+            resident_bytes,
+            index_storage: self.disk_manifest.as_ref().map(|_| "disk".to_string()),
+            segment_count: Some(
+                self.disk_manifest
+                    .as_ref()
+                    .map_or(self.segments.len(), |manifest| manifest.segments.len()),
+            ),
             delta_segment_count: Some(self.delta_segment_count()),
-            loaded_segments: Some(self.segments.len()),
+            loaded_segments: Some(
+                self.disk_manifest
+                    .as_ref()
+                    .map_or(self.segments.len(), |_| self.segment_cache.len()),
+            ),
+            loaded_pages: self
+                .disk_manifest
+                .as_ref()
+                .map(|_| self.segment_cache.len()),
             max_leaf_size: Some(SEGMENTED_KD_TREE_LEAF_SIZE),
             pending_point_count: Some(self.pending_points.len()),
             needs_optimization: Some(self.delta_segment_count() >= 8),
             ..empty_geo_index_stats("segmented-kd-tree", self.point_count())
         }
+    }
+
+    fn restore_disk_manifest(
+        &mut self,
+        dir: PathBuf,
+        manifest: NativeDiskSegmentedManifest,
+        build_time_ms: Option<f64>,
+    ) {
+        self.segments.clear();
+        self.pending_points.clear();
+        self.segment_cache.clear();
+        self.disk_dir = Some(dir);
+        self.disk_manifest = Some(manifest);
+        self.last_stats = self.stats_with_timing(build_time_ms, None);
+    }
+
+    fn load_disk_segment(
+        &mut self,
+        segment: &NativeDiskSegmentRef,
+        stats: &mut GeoIndexStats,
+    ) -> AppResult<NativeKdSegment> {
+        if let Some((_, cached)) = self
+            .segment_cache
+            .iter()
+            .find(|(id, _)| id == &segment.id)
+            .cloned()
+        {
+            stats.page_cache_hits = Some(stats.page_cache_hits.unwrap_or(0) + 1);
+            return Ok(cached);
+        }
+        stats.page_cache_misses = Some(stats.page_cache_misses.unwrap_or(0) + 1);
+        let dir = self
+            .disk_dir
+            .as_ref()
+            .ok_or_else(|| "Segmented KD-tree disk directory is not prepared.".to_string())?;
+        let data =
+            fs::read(segment_file_path(dir, &segment.id)).map_err(|error| error.to_string())?;
+        stats.disk_read_bytes = Some(stats.disk_read_bytes.unwrap_or(0) + data.len());
+        stats.disk_read_count = Some(stats.disk_read_count.unwrap_or(0) + 1);
+        let loaded =
+            serde_json::from_slice::<NativeKdSegment>(&data).map_err(|error| error.to_string())?;
+        self.segment_cache
+            .push_back((segment.id.clone(), loaded.clone()));
+        while self.segment_cache.len() > 4 {
+            self.segment_cache.pop_front();
+        }
+        Ok(loaded)
+    }
+
+    fn search_disk(&mut self, query: &GeoSearchQuery) -> AppResult<Vec<GeoSearchResult>> {
+        let start = Instant::now();
+        let offset = query.offset.unwrap_or(0).max(0) as usize;
+        let limit = query.k.max(0) as usize;
+        let retained_limit = offset + limit;
+        let manifest = self
+            .disk_manifest
+            .clone()
+            .ok_or_else(|| "Segmented KD-tree disk index is not prepared.".to_string())?;
+        let mut stats = self.stats_with_timing(None, None);
+        stats.disk_read_bytes = Some(0);
+        stats.disk_read_count = Some(0);
+        stats.page_cache_hits = Some(0);
+        stats.page_cache_misses = Some(0);
+        if limit == 0 || manifest.point_count == 0 {
+            stats.last_query_time_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+            self.last_stats = stats;
+            return Ok(Vec::new());
+        }
+
+        let mut top_k = Vec::<GeoSearchResult>::new();
+        for segment_ref in &manifest.segments {
+            stats.nodes_visited += 1;
+            if !summary_matches_query(&segment_ref.summary, query) {
+                stats.pruned_by_geo += 1;
+                continue;
+            }
+            stats.pages_read += 1;
+            let segment = self.load_disk_segment(segment_ref, &mut stats)?;
+            for point in &segment.points {
+                stats.candidates_inspected += 1;
+                if !matches_geo_search_query(point, query) {
+                    continue;
+                }
+                stats.distance_computations += 1;
+                top_k.push(GeoSearchResult {
+                    media_id: point.media_id.clone(),
+                    distance_meters: distance_meters(point, query),
+                });
+                if top_k.len() >= retained_limit {
+                    sort_geo_results(&mut top_k);
+                    top_k.truncate(retained_limit);
+                }
+            }
+        }
+
+        sort_geo_results(&mut top_k);
+        stats.last_query_time_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+        stats.loaded_segments = Some(self.segment_cache.len());
+        stats.loaded_pages = Some(self.segment_cache.len());
+        self.last_stats = stats;
+        Ok(top_k.into_iter().skip(offset).take(limit).collect())
     }
 }
 
@@ -1082,6 +1314,9 @@ impl NativeSegmentedBallTreeIndex {
         let start = Instant::now();
         self.segments.clear();
         self.pending_points.clear();
+        self.disk_manifest = None;
+        self.disk_dir = None;
+        self.segment_cache.clear();
         on_progress(0)?;
         for (segment_index, chunk) in points.chunks(SEGMENTED_BALL_TREE_SEGMENT_LIMIT).enumerate() {
             if let Some(segment) = self.build_segment(
@@ -1106,6 +1341,9 @@ impl NativeSegmentedBallTreeIndex {
     #[allow(dead_code)]
     fn insert_many(&mut self, points: &[GeoIndexPoint]) {
         let start = Instant::now();
+        self.disk_manifest = None;
+        self.disk_dir = None;
+        self.segment_cache.clear();
         self.pending_points
             .extend(points.iter().filter_map(normalized_geo_index_point));
         if self.pending_points.len() >= SEGMENTED_BALL_TREE_DELTA_LIMIT {
@@ -1136,6 +1374,9 @@ impl NativeSegmentedBallTreeIndex {
     }
 
     fn search(&mut self, original_query: &GeoSearchQuery) -> Vec<GeoSearchResult> {
+        if self.disk_manifest.is_some() {
+            return self.search_disk(original_query).unwrap_or_default();
+        }
         let start = Instant::now();
         let query = GeoSearchQuery {
             lon: normalize_lon(original_query.lon),
@@ -1257,6 +1498,7 @@ impl NativeSegmentedBallTreeIndex {
         }
     }
 
+    #[allow(dead_code)]
     fn restore(&mut self, snapshot: NativeSegmentedBallTreeSnapshot) -> AppResult<()> {
         if snapshot.engine_id != "segmented-ball-tree"
             || snapshot.engine_version != 1
@@ -1266,6 +1508,9 @@ impl NativeSegmentedBallTreeIndex {
         }
         self.segments = snapshot.segments;
         self.pending_points = snapshot.pending_points;
+        self.disk_manifest = None;
+        self.disk_dir = None;
+        self.segment_cache.clear();
         if snapshot.point_count != self.point_count()
             || snapshot.segment_count != self.segments.len()
         {
@@ -1333,6 +1578,9 @@ impl NativeSegmentedBallTreeIndex {
     }
 
     fn point_count(&self) -> usize {
+        if let Some(manifest) = self.disk_manifest.as_ref() {
+            return manifest.point_count + self.pending_points.len();
+        }
         self.segments
             .iter()
             .map(|segment| segment.point_count)
@@ -1341,6 +1589,13 @@ impl NativeSegmentedBallTreeIndex {
     }
 
     fn delta_segment_count(&self) -> usize {
+        if let Some(manifest) = self.disk_manifest.as_ref() {
+            return manifest
+                .segments
+                .iter()
+                .filter(|segment| segment.is_delta)
+                .count();
+        }
         self.segments
             .iter()
             .filter(|segment| segment.is_delta)
@@ -1348,6 +1603,14 @@ impl NativeSegmentedBallTreeIndex {
     }
 
     fn max_leaf_size(&self) -> usize {
+        if let Some(manifest) = self.disk_manifest.as_ref() {
+            return manifest
+                .segments
+                .iter()
+                .map(|segment| segment.max_leaf_size)
+                .max()
+                .unwrap_or(0);
+        }
         self.segments
             .iter()
             .map(|segment| segment.max_leaf_size)
@@ -1360,18 +1623,208 @@ impl NativeSegmentedBallTreeIndex {
         build_time_ms: Option<f64>,
         insert_time_ms: Option<f64>,
     ) -> GeoIndexStats {
+        let disk_index_size = self.disk_manifest.as_ref().map(|manifest| {
+            manifest
+                .segments
+                .iter()
+                .map(|segment| segment.byte_len)
+                .sum::<usize>()
+        });
+        let resident_bytes = self
+            .disk_manifest
+            .as_ref()
+            .and_then(|manifest| serde_json::to_vec(manifest).ok().map(|data| data.len()));
         GeoIndexStats {
             build_time_ms,
             insert_time_ms,
-            index_size_bytes: Some(self.point_count() * 48 + self.segments.len() * 120),
-            segment_count: Some(self.segments.len()),
+            index_size_bytes: disk_index_size
+                .or(Some(self.point_count() * 48 + self.segments.len() * 120)),
+            resident_bytes,
+            index_storage: self.disk_manifest.as_ref().map(|_| "disk".to_string()),
+            segment_count: Some(
+                self.disk_manifest
+                    .as_ref()
+                    .map_or(self.segments.len(), |manifest| manifest.segments.len()),
+            ),
             delta_segment_count: Some(self.delta_segment_count()),
-            loaded_segments: Some(self.segments.len()),
+            loaded_segments: Some(
+                self.disk_manifest
+                    .as_ref()
+                    .map_or(self.segments.len(), |_| self.segment_cache.len()),
+            ),
+            loaded_pages: self
+                .disk_manifest
+                .as_ref()
+                .map(|_| self.segment_cache.len()),
             max_leaf_size: Some(self.max_leaf_size()),
             pending_point_count: Some(self.pending_points.len()),
             needs_optimization: Some(self.delta_segment_count() >= 8),
             ..empty_geo_index_stats("segmented-ball-tree", self.point_count())
         }
+    }
+
+    fn restore_disk_manifest(
+        &mut self,
+        dir: PathBuf,
+        manifest: NativeDiskSegmentedManifest,
+        build_time_ms: Option<f64>,
+    ) {
+        self.segments.clear();
+        self.pending_points.clear();
+        self.segment_cache.clear();
+        self.disk_dir = Some(dir);
+        self.disk_manifest = Some(manifest);
+        self.last_stats = self.stats_with_timing(build_time_ms, None);
+    }
+
+    fn load_disk_segment(
+        &mut self,
+        segment: &NativeDiskSegmentRef,
+        stats: &mut GeoIndexStats,
+    ) -> AppResult<NativeBallSegment> {
+        if let Some((_, cached)) = self
+            .segment_cache
+            .iter()
+            .find(|(id, _)| id == &segment.id)
+            .cloned()
+        {
+            stats.page_cache_hits = Some(stats.page_cache_hits.unwrap_or(0) + 1);
+            return Ok(cached);
+        }
+        stats.page_cache_misses = Some(stats.page_cache_misses.unwrap_or(0) + 1);
+        let dir = self
+            .disk_dir
+            .as_ref()
+            .ok_or_else(|| "Segmented ball-tree disk directory is not prepared.".to_string())?;
+        let data =
+            fs::read(segment_file_path(dir, &segment.id)).map_err(|error| error.to_string())?;
+        stats.disk_read_bytes = Some(stats.disk_read_bytes.unwrap_or(0) + data.len());
+        stats.disk_read_count = Some(stats.disk_read_count.unwrap_or(0) + 1);
+        let loaded = serde_json::from_slice::<NativeBallSegment>(&data)
+            .map_err(|error| error.to_string())?;
+        self.segment_cache
+            .push_back((segment.id.clone(), loaded.clone()));
+        while self.segment_cache.len() > 4 {
+            self.segment_cache.pop_front();
+        }
+        Ok(loaded)
+    }
+
+    fn search_disk(&mut self, original_query: &GeoSearchQuery) -> AppResult<Vec<GeoSearchResult>> {
+        let start = Instant::now();
+        let query = GeoSearchQuery {
+            lon: normalize_lon(original_query.lon),
+            ..original_query.clone()
+        };
+        let offset = query.offset.unwrap_or(0).max(0) as usize;
+        let limit = query.k.max(0) as usize;
+        let retained_limit = offset + limit;
+        let manifest = self
+            .disk_manifest
+            .clone()
+            .ok_or_else(|| "Segmented ball-tree disk index is not prepared.".to_string())?;
+        let mut stats = self.stats_with_timing(None, None);
+        stats.disk_read_bytes = Some(0);
+        stats.disk_read_count = Some(0);
+        stats.page_cache_hits = Some(0);
+        stats.page_cache_misses = Some(0);
+        if limit == 0 || manifest.point_count == 0 {
+            stats.last_query_time_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+            self.last_stats = stats;
+            return Ok(Vec::new());
+        }
+
+        let mut top_k = Vec::<GeoSearchResult>::new();
+        let mut queue = Vec::<(NativeDiskSegmentRef, usize, f64)>::new();
+        for segment_ref in &manifest.segments {
+            if !summary_matches_query(&segment_ref.summary, &query) {
+                stats.pruned_by_geo += 1;
+                continue;
+            }
+            stats.pages_read += 1;
+            let segment = self.load_disk_segment(segment_ref, &mut stats)?;
+            if !segment.nodes.is_empty() {
+                enqueue_ball_node_for_ref(
+                    segment_ref.clone(),
+                    &segment,
+                    0,
+                    &query,
+                    &mut stats,
+                    &mut queue,
+                );
+            }
+        }
+
+        while !queue.is_empty() {
+            queue.sort_by(|a, b| {
+                b.2.partial_cmp(&a.2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.1.cmp(&a.1))
+            });
+            let (segment_ref, node_index, lower_bound) = queue.pop().unwrap();
+            let worst = if top_k.len() == retained_limit {
+                top_k
+                    .last()
+                    .map(|result| result.distance_meters)
+                    .unwrap_or(f64::INFINITY)
+            } else {
+                f64::INFINITY
+            };
+            if top_k.len() == retained_limit && lower_bound > worst {
+                stats.pruned_by_geo += (queue.len() + 1) as i64;
+                break;
+            }
+
+            let segment = self.load_disk_segment(&segment_ref, &mut stats)?;
+            let node = &segment.nodes[node_index];
+            stats.nodes_visited += 1;
+            if node.left.is_some() || node.right.is_some() {
+                if let Some(left) = node.left {
+                    enqueue_ball_node_for_ref(
+                        segment_ref.clone(),
+                        &segment,
+                        left,
+                        &query,
+                        &mut stats,
+                        &mut queue,
+                    );
+                }
+                if let Some(right) = node.right {
+                    enqueue_ball_node_for_ref(
+                        segment_ref.clone(),
+                        &segment,
+                        right,
+                        &query,
+                        &mut stats,
+                        &mut queue,
+                    );
+                }
+                continue;
+            }
+
+            for point in &segment.points[node.point_start..node.point_end] {
+                stats.candidates_inspected += 1;
+                if !matches_geo_search_query(point, &query) {
+                    continue;
+                }
+                stats.distance_computations += 1;
+                top_k.push(GeoSearchResult {
+                    media_id: point.media_id.clone(),
+                    distance_meters: distance_meters(point, &query),
+                });
+                if top_k.len() >= retained_limit {
+                    sort_geo_results(&mut top_k);
+                    top_k.truncate(retained_limit);
+                }
+            }
+        }
+
+        sort_geo_results(&mut top_k);
+        stats.last_query_time_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+        stats.loaded_segments = Some(self.segment_cache.len());
+        stats.loaded_pages = Some(self.segment_cache.len());
+        self.last_stats = stats;
+        Ok(top_k.into_iter().skip(offset).take(limit).collect())
     }
 }
 
@@ -1405,6 +1858,38 @@ fn enqueue_ball_node(
             - node.radius_meters)
             .max(0.0);
     queue.push((segment_index, node_index, lower_bound));
+}
+
+fn enqueue_ball_node_for_ref(
+    segment_ref: NativeDiskSegmentRef,
+    segment: &NativeBallSegment,
+    node_index: usize,
+    query: &GeoSearchQuery,
+    stats: &mut GeoIndexStats,
+    queue: &mut Vec<(NativeDiskSegmentRef, usize, f64)>,
+) {
+    let Some(node) = segment.nodes.get(node_index) else {
+        return;
+    };
+    if !overlaps_time_range(node.min_timestamp, node.max_timestamp, query) {
+        stats.pruned_by_time += 1;
+        return;
+    }
+    if node.kind_mask & query_kind_mask(query) == 0 {
+        stats.pruned_by_geo += 1;
+        return;
+    }
+    if let Some(bounds) = query.geo_bounds.as_ref() {
+        if !ball_node_overlaps_geo_bounds(node, bounds) {
+            stats.pruned_by_geo += 1;
+            return;
+        }
+    }
+    let lower_bound =
+        (distance_between_coords(node.center_lat, node.center_lon, query.lat, query.lon)
+            - node.radius_meters)
+            .max(0.0);
+    queue.push((segment_ref, node_index, lower_bound));
 }
 
 fn write_ball_leaf(
@@ -1980,6 +2465,78 @@ fn segmented_ball_tree_index_dir(app: &AppHandle) -> AppResult<PathBuf> {
     Ok(dir)
 }
 
+fn disk_segmented_index_dir(app: &AppHandle, engine_id: &str) -> AppResult<PathBuf> {
+    let dir = app_data_dir(app)?
+        .join("indexes")
+        .join(engine_id)
+        .join("v2");
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    Ok(dir)
+}
+
+fn reset_directory(dir: &Path) -> AppResult<()> {
+    if dir.exists() {
+        fs::remove_dir_all(dir).map_err(|error| error.to_string())?;
+    }
+    fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn segment_file_path(dir: &Path, segment_id: &str) -> PathBuf {
+    dir.join(format!("{segment_id}.json"))
+}
+
+fn summary_for_points(points: &[GeoIndexPoint]) -> NativeSegmentSummary {
+    let mut lat_min = f64::INFINITY;
+    let mut lat_max = f64::NEG_INFINITY;
+    let mut lon_min = f64::INFINITY;
+    let mut lon_max = f64::NEG_INFINITY;
+    let mut min_timestamp: Option<i64> = None;
+    let mut max_timestamp: Option<i64> = None;
+    let mut mask = 0_u8;
+
+    for point in points {
+        lat_min = lat_min.min(point.lat);
+        lat_max = lat_max.max(point.lat);
+        lon_min = lon_min.min(point.lon);
+        lon_max = lon_max.max(point.lon);
+        if let Some(timestamp) = point.timestamp {
+            min_timestamp = Some(min_timestamp.map_or(timestamp, |value| value.min(timestamp)));
+            max_timestamp = Some(max_timestamp.map_or(timestamp, |value| value.max(timestamp)));
+        }
+        mask |= kind_mask(point.kind.as_deref());
+    }
+
+    NativeSegmentSummary {
+        lat_min,
+        lat_max,
+        lon_min,
+        lon_max,
+        min_timestamp,
+        max_timestamp,
+        kind_mask: mask,
+    }
+}
+
+fn summary_matches_query(summary: &NativeSegmentSummary, query: &GeoSearchQuery) -> bool {
+    if !overlaps_time_range(summary.min_timestamp, summary.max_timestamp, query) {
+        return false;
+    }
+    if summary.kind_mask & query_kind_mask(query) == 0 {
+        return false;
+    }
+    if let Some(bounds) = query.geo_bounds.as_ref() {
+        if summary.lat_max < bounds.min_lat
+            || summary.lat_min > bounds.max_lat
+            || summary.lon_max < bounds.min_lon
+            || summary.lon_min > bounds.max_lon
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn validate_dynamic_manifest(manifest: &DynamicIndexManifest, catalog_epoch: i64) -> AppResult<()> {
     if manifest.engine_id != "dynamic-z-order-cells"
         || manifest.engine_version != 1
@@ -2068,6 +2625,7 @@ fn save_persisted_dynamic_index(app: &AppHandle, catalog_epoch: i64) -> AppResul
     Ok(())
 }
 
+#[allow(dead_code)]
 fn validate_segmented_kd_tree_manifest(
     manifest: &SegmentedKdTreeManifest,
     catalog_epoch: i64,
@@ -2085,48 +2643,38 @@ fn load_persisted_segmented_kd_tree_index(
     app: &AppHandle,
     catalog_epoch: i64,
 ) -> AppResult<Option<(usize, usize)>> {
-    let dir = segmented_kd_tree_index_dir(app)?;
+    let dir = disk_segmented_index_dir(app, "segmented-kd-tree")?;
     let manifest_path = dir.join("manifest.json");
-    let data_path = dir.join("index.json");
-    if !manifest_path.exists() || !data_path.exists() {
+    if !manifest_path.exists() {
         return Ok(None);
     }
 
     let manifest = match fs::read_to_string(&manifest_path)
         .ok()
-        .and_then(|content| serde_json::from_str::<SegmentedKdTreeManifest>(&content).ok())
+        .and_then(|content| serde_json::from_str::<NativeDiskSegmentedManifest>(&content).ok())
     {
         Some(manifest) => manifest,
         None => return Ok(None),
     };
-    if validate_segmented_kd_tree_manifest(&manifest, catalog_epoch).is_err() {
+    if validate_disk_segmented_manifest(&manifest, "segmented-kd-tree", catalog_epoch).is_err() {
         return Ok(None);
     }
-
-    let data = match fs::read(&data_path) {
-        Ok(data) => data,
-        Err(_) => return Ok(None),
-    };
-    if checksum_hex(&data) != manifest.data_checksum {
-        return Ok(None);
-    }
-
-    let snapshot = match serde_json::from_slice::<NativeSegmentedKdTreeSnapshot>(&data) {
-        Ok(snapshot) => snapshot,
-        Err(_) => return Ok(None),
-    };
-    if snapshot.point_count != manifest.point_count
-        || snapshot.segment_count != manifest.segment_count
+    if manifest
+        .segments
+        .iter()
+        .any(|segment| !segment_file_path(&dir, &segment.id).exists())
     {
         return Ok(None);
     }
 
-    let point_count = snapshot.point_count;
-    let segment_count = snapshot.segment_count;
+    let point_count = manifest.point_count;
+    let segment_count = manifest.segment_count;
     let mut registry = geo_index_registry()
         .lock()
         .map_err(|error| error.to_string())?;
-    registry.segmented_kd_tree.restore(snapshot)?;
+    registry
+        .segmented_kd_tree
+        .restore_disk_manifest(dir, manifest, Some(0.0));
     Ok(Some((point_count, segment_count)))
 }
 
@@ -2160,6 +2708,7 @@ fn save_persisted_segmented_kd_tree_index(app: &AppHandle, catalog_epoch: i64) -
     Ok(())
 }
 
+#[allow(dead_code)]
 fn validate_segmented_ball_tree_manifest(
     manifest: &SegmentedBallTreeManifest,
     catalog_epoch: i64,
@@ -2173,52 +2722,56 @@ fn validate_segmented_ball_tree_manifest(
     Ok(())
 }
 
+fn validate_disk_segmented_manifest(
+    manifest: &NativeDiskSegmentedManifest,
+    engine_id: &str,
+    catalog_epoch: i64,
+) -> AppResult<()> {
+    if manifest.engine_id != engine_id
+        || manifest.engine_version != 2
+        || manifest.catalog_epoch != catalog_epoch
+    {
+        return Err("Segmented disk index manifest does not match catalog.".to_string());
+    }
+    Ok(())
+}
+
 fn load_persisted_segmented_ball_tree_index(
     app: &AppHandle,
     catalog_epoch: i64,
 ) -> AppResult<Option<(usize, usize)>> {
-    let dir = segmented_ball_tree_index_dir(app)?;
+    let dir = disk_segmented_index_dir(app, "segmented-ball-tree")?;
     let manifest_path = dir.join("manifest.json");
-    let data_path = dir.join("index.json");
-    if !manifest_path.exists() || !data_path.exists() {
+    if !manifest_path.exists() {
         return Ok(None);
     }
 
     let manifest = match fs::read_to_string(&manifest_path)
         .ok()
-        .and_then(|content| serde_json::from_str::<SegmentedBallTreeManifest>(&content).ok())
+        .and_then(|content| serde_json::from_str::<NativeDiskSegmentedManifest>(&content).ok())
     {
         Some(manifest) => manifest,
         None => return Ok(None),
     };
-    if validate_segmented_ball_tree_manifest(&manifest, catalog_epoch).is_err() {
+    if validate_disk_segmented_manifest(&manifest, "segmented-ball-tree", catalog_epoch).is_err() {
         return Ok(None);
     }
-
-    let data = match fs::read(&data_path) {
-        Ok(data) => data,
-        Err(_) => return Ok(None),
-    };
-    if checksum_hex(&data) != manifest.data_checksum {
-        return Ok(None);
-    }
-
-    let snapshot = match serde_json::from_slice::<NativeSegmentedBallTreeSnapshot>(&data) {
-        Ok(snapshot) => snapshot,
-        Err(_) => return Ok(None),
-    };
-    if snapshot.point_count != manifest.point_count
-        || snapshot.segment_count != manifest.segment_count
+    if manifest
+        .segments
+        .iter()
+        .any(|segment| !segment_file_path(&dir, &segment.id).exists())
     {
         return Ok(None);
     }
 
-    let point_count = snapshot.point_count;
-    let segment_count = snapshot.segment_count;
+    let point_count = manifest.point_count;
+    let segment_count = manifest.segment_count;
     let mut registry = geo_index_registry()
         .lock()
         .map_err(|error| error.to_string())?;
-    registry.segmented_ball_tree.restore(snapshot)?;
+    registry
+        .segmented_ball_tree
+        .restore_disk_manifest(dir, manifest, Some(0.0));
     Ok(Some((point_count, segment_count)))
 }
 
@@ -2250,6 +2803,174 @@ fn save_persisted_segmented_ball_tree_index(app: &AppHandle, catalog_epoch: i64)
     )
     .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn build_disk_segmented_kd_tree_index(
+    app: &AppHandle,
+    window: &Window,
+    catalog_epoch: i64,
+    total_indexes: usize,
+    selected_index_label: &str,
+) -> AppResult<usize> {
+    let started = Instant::now();
+    let dir = disk_segmented_index_dir(app, "segmented-kd-tree")?;
+    reset_directory(&dir)?;
+    let conn = connect(app)?;
+    let mut segments = Vec::<NativeDiskSegmentRef>::new();
+    let mut point_count = 0_usize;
+
+    for_each_geo_point_batch(
+        &conn,
+        SEGMENTED_KD_TREE_SEGMENT_LIMIT,
+        |batch, processed_points| {
+            let points = batch
+                .iter()
+                .filter_map(normalized_geo_index_point)
+                .collect::<Vec<_>>();
+            if !points.is_empty() {
+                let id = format!("segment-{:06}", segments.len());
+                let segment = NativeKdSegment {
+                    id: id.clone(),
+                    is_delta: false,
+                    max_leaf_size: SEGMENTED_KD_TREE_LEAF_SIZE,
+                    points,
+                };
+                let data = serde_json::to_vec(&segment).map_err(|error| error.to_string())?;
+                fs::write(segment_file_path(&dir, &id), &data)
+                    .map_err(|error| error.to_string())?;
+                let summary = summary_for_points(&segment.points);
+                point_count += segment.points.len();
+                segments.push(NativeDiskSegmentRef {
+                    id,
+                    is_delta: false,
+                    point_count: segment.points.len(),
+                    max_leaf_size: segment.max_leaf_size,
+                    byte_len: data.len(),
+                    summary,
+                });
+            }
+            emit_geo_index_progress(
+                window,
+                GeoIndexBuildProgress {
+                    phase: "building".to_string(),
+                    point_count: processed_points,
+                    built_indexes: 0,
+                    total_indexes,
+                    current_index_id: Some("segmented-kd-tree".to_string()),
+                    current_index_label: Some(selected_index_label.to_string()),
+                    current_index_processed_points: Some(processed_points),
+                    current_index_total_points: None,
+                },
+            );
+            Ok(())
+        },
+    )?;
+
+    let manifest = NativeDiskSegmentedManifest {
+        engine_id: "segmented-kd-tree".to_string(),
+        engine_version: 2,
+        catalog_epoch,
+        point_count,
+        segment_count: segments.len(),
+        created_at: current_timestamp_millis(),
+        segments,
+    };
+    fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut registry = geo_index_registry()
+        .lock()
+        .map_err(|error| error.to_string())?;
+    registry.segmented_kd_tree.restore_disk_manifest(
+        dir,
+        manifest,
+        Some(started.elapsed().as_secs_f64() * 1000.0),
+    );
+    Ok(point_count)
+}
+
+fn build_disk_segmented_ball_tree_index(
+    app: &AppHandle,
+    window: &Window,
+    catalog_epoch: i64,
+    total_indexes: usize,
+    selected_index_label: &str,
+) -> AppResult<usize> {
+    let started = Instant::now();
+    let dir = disk_segmented_index_dir(app, "segmented-ball-tree")?;
+    reset_directory(&dir)?;
+    let conn = connect(app)?;
+    let builder = NativeSegmentedBallTreeIndex::default();
+    let mut segments = Vec::<NativeDiskSegmentRef>::new();
+    let mut point_count = 0_usize;
+
+    for_each_geo_point_batch(
+        &conn,
+        SEGMENTED_BALL_TREE_SEGMENT_LIMIT,
+        |batch, processed_points| {
+            let points = batch
+                .iter()
+                .filter_map(normalized_geo_index_point)
+                .collect::<Vec<_>>();
+            if let Some(segment) =
+                builder.build_segment(format!("segment-{:06}", segments.len()), points, false)
+            {
+                let data = serde_json::to_vec(&segment).map_err(|error| error.to_string())?;
+                fs::write(segment_file_path(&dir, &segment.id), &data)
+                    .map_err(|error| error.to_string())?;
+                let summary = summary_for_points(&segment.points);
+                point_count += segment.point_count;
+                segments.push(NativeDiskSegmentRef {
+                    id: segment.id,
+                    is_delta: false,
+                    point_count: segment.point_count,
+                    max_leaf_size: segment.max_leaf_size,
+                    byte_len: data.len(),
+                    summary,
+                });
+            }
+            emit_geo_index_progress(
+                window,
+                GeoIndexBuildProgress {
+                    phase: "building".to_string(),
+                    point_count: processed_points,
+                    built_indexes: 0,
+                    total_indexes,
+                    current_index_id: Some("segmented-ball-tree".to_string()),
+                    current_index_label: Some(selected_index_label.to_string()),
+                    current_index_processed_points: Some(processed_points),
+                    current_index_total_points: None,
+                },
+            );
+            Ok(())
+        },
+    )?;
+
+    let manifest = NativeDiskSegmentedManifest {
+        engine_id: "segmented-ball-tree".to_string(),
+        engine_version: 2,
+        catalog_epoch,
+        point_count,
+        segment_count: segments.len(),
+        created_at: current_timestamp_millis(),
+        segments,
+    };
+    fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut registry = geo_index_registry()
+        .lock()
+        .map_err(|error| error.to_string())?;
+    registry.segmented_ball_tree.restore_disk_manifest(
+        dir,
+        manifest,
+        Some(started.elapsed().as_secs_f64() * 1000.0),
+    );
+    Ok(point_count)
 }
 
 fn catalog_path(app: &AppHandle) -> AppResult<PathBuf> {
@@ -3884,6 +4605,65 @@ fn get_geo_points(app: AppHandle, range: TimeRange) -> AppResult<Vec<GeoIndexPoi
     Ok(points)
 }
 
+fn for_each_geo_point_batch(
+    conn: &Connection,
+    batch_size: usize,
+    mut on_batch: impl FnMut(Vec<GeoIndexPoint>, usize) -> AppResult<()>,
+) -> AppResult<usize> {
+    let mut last_hash = String::new();
+    let mut processed = 0_usize;
+
+    loop {
+        let mut stmt = conn
+            .prepare(
+                "
+                SELECT a.content_hash, a.kind, a.latitude, a.longitude, a.timestamp
+                FROM media_assets a
+                WHERE a.content_hash > ?
+                  AND a.latitude IS NOT NULL
+                  AND a.longitude IS NOT NULL
+                  AND EXISTS (
+                    SELECT 1 FROM media_locations l
+                    WHERE l.content_hash = a.content_hash
+                  )
+                ORDER BY a.content_hash ASC
+                LIMIT ?
+                ",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params![last_hash, batch_size as i64], |row| {
+                Ok(GeoIndexPoint {
+                    media_id: row.get("content_hash")?,
+                    kind: row.get("kind")?,
+                    lat: row.get("latitude")?,
+                    lon: row.get("longitude")?,
+                    timestamp: row.get("timestamp")?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        let mut batch = Vec::new();
+        for row in rows {
+            batch.push(row.map_err(|error| error.to_string())?);
+        }
+        if batch.is_empty() {
+            break;
+        }
+        processed += batch.len();
+        last_hash = batch
+            .last()
+            .map(|point| point.media_id.clone())
+            .unwrap_or(last_hash);
+        let is_final = batch.len() < batch_size;
+        on_batch(batch, processed)?;
+        if is_final {
+            break;
+        }
+    }
+
+    Ok(processed)
+}
+
 fn emit_geo_index_progress(window: &Window, progress: GeoIndexBuildProgress) {
     let _ = window.emit("geo-index-progress", progress);
 }
@@ -4045,6 +4825,63 @@ fn build_search_indexes(
                 .flatten(),
         };
         if let Some((point_count, _unit_count)) = restored {
+            emit_geo_index_progress(
+                &window,
+                GeoIndexBuildProgress {
+                    phase: "ready".to_string(),
+                    point_count,
+                    built_indexes: total_indexes,
+                    total_indexes,
+                    current_index_id: Some(selected_index_id.to_string()),
+                    current_index_label: Some(selected_index_label.to_string()),
+                    current_index_processed_points: Some(point_count),
+                    current_index_total_points: Some(point_count),
+                },
+            );
+            return Ok(SearchIndexBuildSummary {
+                point_count,
+                build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
+                engine_count: 6,
+            });
+        }
+    }
+
+    if let Some(epoch) = epoch {
+        if selected_index_id == "segmented-kd-tree" {
+            let point_count = build_disk_segmented_kd_tree_index(
+                &app,
+                &window,
+                epoch,
+                total_indexes,
+                selected_index_label,
+            )?;
+            emit_geo_index_progress(
+                &window,
+                GeoIndexBuildProgress {
+                    phase: "ready".to_string(),
+                    point_count,
+                    built_indexes: total_indexes,
+                    total_indexes,
+                    current_index_id: Some(selected_index_id.to_string()),
+                    current_index_label: Some(selected_index_label.to_string()),
+                    current_index_processed_points: Some(point_count),
+                    current_index_total_points: Some(point_count),
+                },
+            );
+            return Ok(SearchIndexBuildSummary {
+                point_count,
+                build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
+                engine_count: 6,
+            });
+        }
+        if selected_index_id == "segmented-ball-tree" {
+            let point_count = build_disk_segmented_ball_tree_index(
+                &app,
+                &window,
+                epoch,
+                total_indexes,
+                selected_index_label,
+            )?;
             emit_geo_index_progress(
                 &window,
                 GeoIndexBuildProgress {
@@ -5157,6 +5994,38 @@ mod tests {
         ]
     }
 
+    fn test_disk_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("zeitfaden-{name}-{}", current_timestamp_millis()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn disk_manifest_for_segment(
+        engine_id: &str,
+        segment_id: &str,
+        points: &[GeoIndexPoint],
+        byte_len: usize,
+        max_leaf_size: usize,
+    ) -> NativeDiskSegmentedManifest {
+        NativeDiskSegmentedManifest {
+            engine_id: engine_id.to_string(),
+            engine_version: 2,
+            catalog_epoch: 7,
+            point_count: points.len(),
+            segment_count: 1,
+            created_at: current_timestamp_millis(),
+            segments: vec![NativeDiskSegmentRef {
+                id: segment_id.to_string(),
+                is_delta: false,
+                point_count: points.len(),
+                max_leaf_size,
+                byte_len,
+                summary: summary_for_points(points),
+            }],
+        }
+    }
+
     #[test]
     fn native_dynamic_index_binary_round_trips_search_results() {
         let points = test_geo_points();
@@ -5177,7 +6046,17 @@ mod tests {
         let encoded = encode_dynamic_index(&fresh).unwrap();
         let mut restored = decode_dynamic_index(&encoded).unwrap();
 
-        assert_eq!(restored.search(&query), expected);
+        assert_eq!(
+            restored
+                .search(&query)
+                .iter()
+                .map(|result| result.media_id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|result| result.media_id.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -5247,7 +6126,74 @@ mod tests {
         let mut restored = NativeSegmentedKdTreeIndex::default();
         restored.restore(decoded).unwrap();
 
-        assert_eq!(restored.search(&query), expected);
+        assert_eq!(
+            restored
+                .search(&query)
+                .iter()
+                .map(|result| result.media_id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|result| result.media_id.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn native_segmented_kd_tree_disk_manifest_restores_without_loading_segments() {
+        let points = test_geo_points();
+        let query = GeoSearchQuery {
+            lat: 48.15,
+            lon: 11.55,
+            k: 10,
+            offset: None,
+            kind: None,
+            geo_bounds: None,
+            start_time: None,
+            end_time: None,
+        };
+        let mut oracle = NativeBruteForceIndex::default();
+        oracle.build(&points);
+        let expected = oracle.search(&query);
+
+        let dir = test_disk_dir("kd-disk");
+        let segment = NativeKdSegment {
+            id: "segment-000000".to_string(),
+            is_delta: false,
+            points: points
+                .iter()
+                .filter_map(normalized_geo_index_point)
+                .collect::<Vec<_>>(),
+            max_leaf_size: SEGMENTED_KD_TREE_LEAF_SIZE,
+        };
+        let data = serde_json::to_vec(&segment).unwrap();
+        fs::write(segment_file_path(&dir, &segment.id), &data).unwrap();
+        let manifest = disk_manifest_for_segment(
+            "segmented-kd-tree",
+            &segment.id,
+            &segment.points,
+            data.len(),
+            segment.max_leaf_size,
+        );
+        let mut restored = NativeSegmentedKdTreeIndex::default();
+        restored.restore_disk_manifest(dir.clone(), manifest, Some(0.0));
+        assert_eq!(restored.segment_cache.len(), 0);
+
+        assert_eq!(
+            restored
+                .search(&query)
+                .iter()
+                .map(|result| result.media_id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|result| result.media_id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(restored.last_stats.index_storage.as_deref(), Some("disk"));
+        assert!(restored.last_stats.disk_read_count.unwrap_or(0) > 0);
+        assert!(restored.last_stats.loaded_pages.unwrap_or(0) > 0);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -5346,7 +6292,76 @@ mod tests {
         let mut restored = NativeSegmentedBallTreeIndex::default();
         restored.restore(decoded).unwrap();
 
-        assert_eq!(restored.search(&query), expected);
+        assert_eq!(
+            restored
+                .search(&query)
+                .iter()
+                .map(|result| result.media_id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|result| result.media_id.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn native_segmented_ball_tree_disk_manifest_restores_without_loading_segments() {
+        let points = test_geo_points();
+        let query = GeoSearchQuery {
+            lat: 48.15,
+            lon: 11.55,
+            k: 10,
+            offset: None,
+            kind: None,
+            geo_bounds: None,
+            start_time: None,
+            end_time: None,
+        };
+        let mut oracle = NativeBruteForceIndex::default();
+        oracle.build(&points);
+        let expected = oracle.search(&query);
+
+        let dir = test_disk_dir("ball-disk");
+        let builder = NativeSegmentedBallTreeIndex::default();
+        let segment = builder
+            .build_segment(
+                "segment-000000".to_string(),
+                points
+                    .iter()
+                    .filter_map(normalized_geo_index_point)
+                    .collect::<Vec<_>>(),
+                false,
+            )
+            .unwrap();
+        let data = serde_json::to_vec(&segment).unwrap();
+        fs::write(segment_file_path(&dir, &segment.id), &data).unwrap();
+        let manifest = disk_manifest_for_segment(
+            "segmented-ball-tree",
+            &segment.id,
+            &segment.points,
+            data.len(),
+            segment.max_leaf_size,
+        );
+        let mut restored = NativeSegmentedBallTreeIndex::default();
+        restored.restore_disk_manifest(dir.clone(), manifest, Some(0.0));
+        assert_eq!(restored.segment_cache.len(), 0);
+
+        assert_eq!(
+            restored
+                .search(&query)
+                .iter()
+                .map(|result| result.media_id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|result| result.media_id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(restored.last_stats.index_storage.as_deref(), Some("disk"));
+        assert!(restored.last_stats.disk_read_count.unwrap_or(0) > 0);
+        assert!(restored.last_stats.loaded_pages.unwrap_or(0) > 0);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
