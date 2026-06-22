@@ -5,6 +5,7 @@ use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader as XmlReader;
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, Row};
+use s2::{cell::Cell, cellid::CellID, latlng::LatLng};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
@@ -24,9 +25,13 @@ const IMPORT_BATCH_SIZE: usize = 1000;
 const SQLITE_BIND_CHUNK_LIMIT: usize = 12000;
 const ASSET_BIND_COLUMNS: usize = 9;
 const LOCATION_BIND_COLUMNS: usize = 7;
+const S2_POINT_BIND_COLUMNS: usize = 6;
 const GEO_IMPORT_PREFIX_BYTES: usize = 512 * 1024;
 const PROGRESS_HEARTBEAT_MS: u128 = 1000;
 const CATALOG_EPOCH_KEY: &str = "catalogEpoch";
+const S2_CELL_BTREE_ENGINE_ID: &str = "s2-cell-btree";
+const S2_CELL_BTREE_ENGINE_LABEL: &str = "S2 cell B-tree";
+const S2_CELL_INDEX_LEVEL: u64 = 15;
 const DYNAMIC_INDEX_MAGIC: &[u8; 8] = b"ZFDZIDX1";
 const DYNAMIC_INDEX_FORMAT_VERSION: u32 = 1;
 const SEGMENTED_KD_TREE_SEGMENT_LIMIT: usize = 100_000;
@@ -174,6 +179,8 @@ struct GeoIndexStats {
     max_leaf_size: Option<usize>,
     pending_point_count: Option<usize>,
     needs_optimization: Option<bool>,
+    cell_count: Option<usize>,
+    sqlite_query_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,6 +268,8 @@ struct SearchIndexStats {
     max_leaf_size: Option<usize>,
     pending_point_count: Option<usize>,
     needs_optimization: Option<bool>,
+    cell_count: Option<usize>,
+    sqlite_query_count: Option<usize>,
     query_purpose: Option<String>,
     storage_mode: Option<String>,
     query_time_ms: Option<f64>,
@@ -662,6 +671,8 @@ fn empty_geo_index_stats(engine_id: &str, point_count: usize) -> GeoIndexStats {
         max_leaf_size: None,
         pending_point_count: None,
         needs_optimization: None,
+        cell_count: None,
+        sqlite_query_count: None,
     }
 }
 
@@ -696,6 +707,8 @@ fn empty_search_index_stats(engine_id: &str, engine_label: &str) -> SearchIndexS
         max_leaf_size: None,
         pending_point_count: None,
         needs_optimization: None,
+        cell_count: None,
+        sqlite_query_count: None,
         query_purpose: None,
         storage_mode: None,
         query_time_ms: None,
@@ -743,6 +756,8 @@ fn search_stats_from_geo(
         max_leaf_size: stats.max_leaf_size,
         pending_point_count: stats.pending_point_count,
         needs_optimization: stats.needs_optimization,
+        cell_count: stats.cell_count,
+        sqlite_query_count: stats.sqlite_query_count,
         query_purpose: None,
         storage_mode: None,
         query_time_ms: None,
@@ -830,6 +845,77 @@ fn distance_meters(point: &GeoIndexPoint, query: &GeoSearchQuery) -> f64 {
     distance_between_coords(point.lat, point.lon, query.lat, query.lon)
 }
 
+#[derive(Debug, Clone)]
+struct NativeS2QueuedCell {
+    cell_id: CellID,
+    cell_hex: String,
+    level: u64,
+    lower_bound_meters: f64,
+}
+
+#[derive(Debug, Clone)]
+struct NativeS2CellRow {
+    point_count: i64,
+    min_timestamp: Option<i64>,
+    max_timestamp: Option<i64>,
+    kind_mask: i64,
+    min_latitude: f64,
+    max_latitude: f64,
+    min_longitude: f64,
+    max_longitude: f64,
+}
+
+#[derive(Debug, Clone)]
+struct NativeS2PointRow {
+    content_hash: String,
+    timestamp: Option<i64>,
+    kind: String,
+    latitude: f64,
+    longitude: f64,
+}
+
+struct NativeS2SearchOutput {
+    results: Vec<GeoSearchResult>,
+    stats: GeoIndexStats,
+    sql_plan: Option<SqlExplainPlan>,
+    limit_reached: bool,
+}
+
+fn s2_cell_hex(cell_id: CellID) -> String {
+    format!("{:016x}", cell_id.0)
+}
+
+fn s2_cell_lower_bound_meters(cell_id: CellID, query: &LatLng) -> f64 {
+    Cell::from(cell_id)
+        .rect_bound()
+        .distance_to_latlng(query)
+        .rad()
+        * EARTH_RADIUS_METERS
+}
+
+fn native_s2_queued_cell(cell_id: CellID, query: &LatLng) -> NativeS2QueuedCell {
+    NativeS2QueuedCell {
+        cell_hex: s2_cell_hex(cell_id),
+        level: cell_id.level(),
+        lower_bound_meters: s2_cell_lower_bound_meters(cell_id, query),
+        cell_id,
+    }
+}
+
+fn native_s2_root_cells(query: &LatLng) -> Vec<NativeS2QueuedCell> {
+    (0_u64..6_u64)
+        .map(|face| native_s2_queued_cell(CellID::from_face(face), query))
+        .collect()
+}
+
+fn native_s2_child_cells(cell: &NativeS2QueuedCell, query: &LatLng) -> Vec<NativeS2QueuedCell> {
+    cell.cell_id
+        .children()
+        .into_iter()
+        .map(|child| native_s2_queued_cell(child, query))
+        .collect()
+}
+
 fn matches_time_range(timestamp: Option<i64>, query: &GeoSearchQuery) -> bool {
     if let Some(start_time) = query.start_time {
         if timestamp.is_none_or(|value| value < start_time) {
@@ -883,6 +969,31 @@ fn query_kind_mask(query: &GeoSearchQuery) -> u8 {
         Some("media") => 1 | 2,
         Some(kind) => kind_mask(Some(kind)),
     }
+}
+
+fn geo_bounds_overlap_cell(row: &NativeS2CellRow, bounds: &GeoBounds) -> bool {
+    !(row.max_latitude < bounds.min_lat
+        || row.min_latitude > bounds.max_lat
+        || row.max_longitude < bounds.min_lon
+        || row.min_longitude > bounds.max_lon)
+}
+
+fn s2_cell_row_matches_query(row: &NativeS2CellRow, query: &GeoSearchQuery) -> bool {
+    if row.point_count <= 0 {
+        return false;
+    }
+    if row.kind_mask & i64::from(query_kind_mask(query)) == 0 {
+        return false;
+    }
+    if !overlaps_time_range(row.min_timestamp, row.max_timestamp, query) {
+        return false;
+    }
+    if let Some(bounds) = query.geo_bounds.as_ref() {
+        if !geo_bounds_overlap_cell(row, bounds) {
+            return false;
+        }
+    }
+    true
 }
 
 fn ball_node_overlaps_geo_bounds(node: &NativeBallNode, bounds: &GeoBounds) -> bool {
@@ -2974,7 +3085,7 @@ fn build_disk_segmented_ball_tree_index(
 }
 
 fn catalog_path(app: &AppHandle) -> AppResult<PathBuf> {
-    Ok(app_data_dir(app)?.join("catalog-v9.sqlite3"))
+    Ok(app_data_dir(app)?.join("catalog-v10.sqlite3"))
 }
 
 fn connect(app: &AppHandle) -> AppResult<Connection> {
@@ -3014,6 +3125,28 @@ fn ensure_schema(conn: &Connection) -> AppResult<()> {
           value TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS geo_s2_points (
+          content_hash TEXT PRIMARY KEY,
+          cell_id TEXT NOT NULL,
+          timestamp INTEGER,
+          kind TEXT NOT NULL,
+          latitude REAL NOT NULL,
+          longitude REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS geo_s2_cells (
+          cell_id TEXT PRIMARY KEY,
+          point_count INTEGER NOT NULL,
+          timed_point_count INTEGER NOT NULL,
+          min_timestamp INTEGER,
+          max_timestamp INTEGER,
+          kind_mask INTEGER NOT NULL,
+          min_latitude REAL NOT NULL,
+          max_latitude REAL NOT NULL,
+          min_longitude REAL NOT NULL,
+          max_longitude REAL NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_media_locations_content_hash
           ON media_locations(content_hash);
 
@@ -3023,6 +3156,10 @@ fn ensure_schema(conn: &Connection) -> AppResult<()> {
           ON media_assets(kind, timestamp, content_hash);
         CREATE INDEX IF NOT EXISTS idx_assets_lat_lon_timestamp_hash
           ON media_assets(latitude, longitude, timestamp, content_hash);
+        CREATE INDEX IF NOT EXISTS idx_geo_s2_points_cell_time_kind_cover
+          ON geo_s2_points(
+            cell_id, timestamp, kind, content_hash, latitude, longitude
+          );
         ",
     )
     .map_err(|error| error.to_string())
@@ -4123,6 +4260,106 @@ fn value_optional_f64(value: Option<f64>) -> Value {
     value.map(Value::Real).unwrap_or(Value::Null)
 }
 
+fn s2_cell_id_hex_for_lat_lon(lat: f64, lon: f64) -> String {
+    let ll = LatLng::from_degrees(lat, lon);
+    let cell_id = CellID::from(&ll).parent(S2_CELL_INDEX_LEVEL);
+    format!("{:016x}", cell_id.0)
+}
+
+fn s2_point_row(item: &MediaItem) -> Option<Vec<Value>> {
+    let lat = item.latitude?;
+    let lon = item.longitude?;
+    if !lat.is_finite() || !lon.is_finite() {
+        return None;
+    }
+    Some(vec![
+        value_text(&item.content_hash),
+        value_text(&s2_cell_id_hex_for_lat_lon(lat, lon)),
+        value_optional_i64(item.timestamp),
+        value_text(&item.kind),
+        Value::Real(lat),
+        Value::Real(lon),
+    ])
+}
+
+fn refresh_geo_s2_cell_summaries(conn: &Connection, cell_ids: &[String]) -> AppResult<()> {
+    let unique = cell_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if unique.is_empty() {
+        return Ok(());
+    }
+
+    for chunk in unique.chunks(900) {
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        conn.execute(
+            &format!("DELETE FROM geo_s2_cells WHERE cell_id IN ({placeholders})"),
+            params_from_iter(chunk.iter()),
+        )
+        .map_err(|error| error.to_string())?;
+        conn.execute(
+            &format!(
+                "
+                INSERT INTO geo_s2_cells (
+                  cell_id, point_count, timed_point_count, min_timestamp, max_timestamp,
+                  kind_mask, min_latitude, max_latitude, min_longitude, max_longitude
+                )
+                SELECT
+                  cell_id,
+                  COUNT(*),
+                  SUM(CASE WHEN timestamp IS NOT NULL THEN 1 ELSE 0 END),
+                  MIN(timestamp),
+                  MAX(timestamp),
+                  MAX(CASE WHEN kind = 'image' THEN 1 ELSE 0 END) +
+                    MAX(CASE WHEN kind = 'video' THEN 2 ELSE 0 END) +
+                    MAX(CASE WHEN kind = 'geo_point' THEN 4 ELSE 0 END),
+                  MIN(latitude),
+                  MAX(latitude),
+                  MIN(longitude),
+                  MAX(longitude)
+                FROM geo_s2_points
+                WHERE cell_id IN ({placeholders})
+                GROUP BY cell_id
+                "
+            ),
+            params_from_iter(chunk.iter()),
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn rebuild_geo_s2_cells(conn: &Connection) -> AppResult<()> {
+    conn.execute_batch(
+        "
+        DELETE FROM geo_s2_cells;
+        INSERT INTO geo_s2_cells (
+          cell_id, point_count, timed_point_count, min_timestamp, max_timestamp,
+          kind_mask, min_latitude, max_latitude, min_longitude, max_longitude
+        )
+        SELECT
+          cell_id,
+          COUNT(*),
+          SUM(CASE WHEN timestamp IS NOT NULL THEN 1 ELSE 0 END),
+          MIN(timestamp),
+          MAX(timestamp),
+          MAX(CASE WHEN kind = 'image' THEN 1 ELSE 0 END) +
+            MAX(CASE WHEN kind = 'video' THEN 2 ELSE 0 END) +
+            MAX(CASE WHEN kind = 'geo_point' THEN 4 ELSE 0 END),
+          MIN(latitude),
+          MAX(latitude),
+          MIN(longitude),
+          MAX(longitude)
+        FROM geo_s2_points
+        GROUP BY cell_id;
+        ",
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn sql_placeholders(row_count: usize, column_count: usize) -> String {
     let row = format!("({})", vec!["?"; column_count].join(", "));
     vec![row; row_count].join(", ")
@@ -4223,6 +4460,28 @@ fn upsert_media_rows(conn: &mut Connection, items: &[MediaItem]) -> AppResult<us
         &location_rows,
         LOCATION_BIND_COLUMNS,
     )?;
+    let s2_rows = items.iter().filter_map(s2_point_row).collect::<Vec<_>>();
+    let s2_cell_ids = s2_rows
+        .iter()
+        .filter_map(|row| match row.get(1) {
+            Some(Value::Text(value)) => Some(value.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    exec_multi_row_upsert(
+        conn,
+        "
+        INSERT INTO geo_s2_points (
+          content_hash, cell_id, timestamp, kind, latitude, longitude
+        )
+        ",
+        "
+        ON CONFLICT(content_hash) DO NOTHING
+        ",
+        &s2_rows,
+        S2_POINT_BIND_COLUMNS,
+    )?;
+    refresh_geo_s2_cell_summaries(conn, &s2_cell_ids)?;
     bump_catalog_epoch(conn)?;
     Ok(items.len())
 }
@@ -4374,6 +4633,221 @@ fn list_media_with_plan(
     ))
 }
 
+fn s2_point_fetch_sql(spec: &SearchSpec, cell_id: &str) -> (String, Vec<Value>) {
+    let mut where_sql = vec!["p.cell_id = ?".to_string()];
+    let mut bind = vec![Value::Text(cell_id.to_string())];
+
+    if spec.kind.as_deref() == Some("media") {
+        where_sql.push("p.kind IN ('image', 'video')".to_string());
+    } else if let Some(kind) = spec.kind.as_ref().filter(|kind| *kind != "all") {
+        where_sql.push("p.kind = ?".to_string());
+        bind.push(Value::Text(kind.clone()));
+    }
+    if let Some(start_time) = spec.start_time {
+        where_sql.push("p.timestamp >= ?".to_string());
+        bind.push(Value::Integer(start_time));
+    }
+    if let Some(end_time) = spec.end_time {
+        where_sql.push("p.timestamp <= ?".to_string());
+        bind.push(Value::Integer(end_time));
+    }
+    if let Some(bounds) = spec.geo_bounds.as_ref() {
+        where_sql.push("p.latitude BETWEEN ? AND ?".to_string());
+        bind.push(Value::Real(bounds.min_lat));
+        bind.push(Value::Real(bounds.max_lat));
+        where_sql.push("p.longitude BETWEEN ? AND ?".to_string());
+        bind.push(Value::Real(bounds.min_lon));
+        bind.push(Value::Real(bounds.max_lon));
+    }
+    if let Some(source_id) = spec.source_id.as_ref() {
+        where_sql.push(
+            "EXISTS (SELECT 1 FROM media_locations l WHERE l.content_hash = p.content_hash AND l.source_id = ?)"
+                .to_string(),
+        );
+        bind.push(Value::Text(source_id.clone()));
+    }
+
+    (
+        format!(
+            "
+            SELECT p.content_hash, p.timestamp, p.kind, p.latitude, p.longitude
+            FROM geo_s2_points p
+            WHERE {}
+            ORDER BY p.cell_id ASC, p.timestamp ASC, p.kind ASC, p.content_hash ASC
+            ",
+            where_sql.join(" AND ")
+        ),
+        bind,
+    )
+}
+
+fn sqlite_s2_distance_search(
+    app: AppHandle,
+    spec: &SearchSpec,
+    query: &GeoSearchQuery,
+    explain_sql: bool,
+) -> AppResult<NativeS2SearchOutput> {
+    let started = Instant::now();
+    let conn = connect(&app)?;
+    let offset = query.offset.unwrap_or(0).max(0) as usize;
+    let limit = query.k.max(0) as usize;
+    let retained_limit = offset + limit + 1;
+    let query_lat_lng = LatLng::from_degrees(query.lat, query.lon);
+    let point_count = conn
+        .query_row("SELECT COUNT(*) FROM geo_s2_points", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|error| error.to_string())? as usize;
+    let cell_count = conn
+        .query_row("SELECT COUNT(*) FROM geo_s2_cells", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|error| error.to_string())? as usize;
+
+    let sql_plan = if explain_sql {
+        let (sql, bind) = s2_point_fetch_sql(spec, "0000000000000000");
+        Some(explain_query_plan(&conn, &sql, &bind)?)
+    } else {
+        None
+    };
+
+    let mut stats = GeoIndexStats {
+        point_count,
+        cell_count: Some(cell_count),
+        index_storage: Some("sqlite-btree".to_string()),
+        ..empty_geo_index_stats(S2_CELL_BTREE_ENGINE_ID, point_count)
+    };
+
+    if limit == 0 || point_count == 0 {
+        stats.last_query_time_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
+        return Ok(NativeS2SearchOutput {
+            results: Vec::new(),
+            stats,
+            sql_plan,
+            limit_reached: false,
+        });
+    }
+
+    let mut queue = native_s2_root_cells(&query_lat_lng);
+    let mut top_k = Vec::<GeoSearchResult>::new();
+
+    while !queue.is_empty() {
+        queue.sort_by(|a, b| {
+            b.lower_bound_meters
+                .partial_cmp(&a.lower_bound_meters)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let queued = queue.pop().expect("queue is not empty");
+        let worst = if top_k.len() >= retained_limit {
+            top_k
+                .last()
+                .map(|result| result.distance_meters)
+                .unwrap_or(f64::INFINITY)
+        } else {
+            f64::INFINITY
+        };
+        if top_k.len() >= retained_limit && queued.lower_bound_meters > worst {
+            stats.pruned_by_geo += (queue.len() + 1) as i64;
+            break;
+        }
+
+        stats.nodes_visited += 1;
+        if queued.level < S2_CELL_INDEX_LEVEL {
+            queue.extend(native_s2_child_cells(&queued, &query_lat_lng));
+            continue;
+        }
+
+        stats.sqlite_query_count = Some(stats.sqlite_query_count.unwrap_or(0) + 1);
+        let mut cell_stmt = conn
+            .prepare(
+                "
+                SELECT
+                  point_count, min_timestamp, max_timestamp, kind_mask,
+                  min_latitude, max_latitude, min_longitude, max_longitude
+                FROM geo_s2_cells
+                WHERE cell_id = ?
+                ",
+            )
+            .map_err(|error| error.to_string())?;
+        let mut cell_rows = cell_stmt
+            .query(params![&queued.cell_hex])
+            .map_err(|error| error.to_string())?;
+        let Some(cell_row) = cell_rows.next().map_err(|error| error.to_string())? else {
+            continue;
+        };
+        let cell = NativeS2CellRow {
+            point_count: cell_row.get(0).map_err(|error| error.to_string())?,
+            min_timestamp: cell_row.get(1).map_err(|error| error.to_string())?,
+            max_timestamp: cell_row.get(2).map_err(|error| error.to_string())?,
+            kind_mask: cell_row.get(3).map_err(|error| error.to_string())?,
+            min_latitude: cell_row.get(4).map_err(|error| error.to_string())?,
+            max_latitude: cell_row.get(5).map_err(|error| error.to_string())?,
+            min_longitude: cell_row.get(6).map_err(|error| error.to_string())?,
+            max_longitude: cell_row.get(7).map_err(|error| error.to_string())?,
+        };
+        if !s2_cell_row_matches_query(&cell, query) {
+            stats.pruned_by_geo += 1;
+            continue;
+        }
+        drop(cell_rows);
+        drop(cell_stmt);
+
+        let (sql, bind) = s2_point_fetch_sql(spec, &queued.cell_hex);
+        stats.sqlite_query_count = Some(stats.sqlite_query_count.unwrap_or(0) + 1);
+        let mut point_stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+        let rows = point_stmt
+            .query_map(params_from_iter(bind.iter()), |row| {
+                Ok(NativeS2PointRow {
+                    content_hash: row.get(0)?,
+                    timestamp: row.get(1)?,
+                    kind: row.get(2)?,
+                    latitude: row.get(3)?,
+                    longitude: row.get(4)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let point = row.map_err(|error| error.to_string())?;
+            stats.candidates_inspected += 1;
+            let geo_point = GeoIndexPoint {
+                media_id: point.content_hash,
+                kind: Some(point.kind),
+                lat: point.latitude,
+                lon: point.longitude,
+                timestamp: point.timestamp,
+            };
+            if !matches_geo_search_query(&geo_point, query) {
+                continue;
+            }
+            stats.distance_computations += 1;
+            top_k.push(GeoSearchResult {
+                media_id: geo_point.media_id.clone(),
+                distance_meters: distance_meters(&geo_point, query),
+            });
+            if top_k.len() >= retained_limit {
+                sort_geo_results(&mut top_k);
+                top_k.truncate(retained_limit);
+            }
+        }
+    }
+
+    sort_geo_results(&mut top_k);
+    let limit_reached = top_k.len() > offset + limit;
+    let results = top_k
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    stats.last_query_time_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
+
+    Ok(NativeS2SearchOutput {
+        results,
+        stats,
+        sql_plan,
+        limit_reached,
+    })
+}
+
 fn sql_search_engine(spec: &SearchSpec) -> (&'static str, &'static str) {
     if spec.geo_bounds.is_some() {
         ("sqlite-bbox-time", "SQLite bbox/time B-tree")
@@ -4462,21 +4936,39 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
             start_time: spec.start_time,
             end_time: spec.end_time,
         };
-        let results = search_geo_index(engine_id.clone(), query)?;
+        let explain_sql = spec
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.explain_sql)
+            .unwrap_or(false);
+        let (results, geo_stats, sql_plan, distance_limit_reached) =
+            if engine_id == S2_CELL_BTREE_ENGINE_ID {
+                let output = sqlite_s2_distance_search(app.clone(), &spec, &query, explain_sql)?;
+                (
+                    output.results,
+                    output.stats,
+                    output.sql_plan,
+                    output.limit_reached,
+                )
+            } else {
+                let results = search_geo_index(engine_id.clone(), query)?;
+                let geo_stats = get_geo_index_stats(app.clone(), engine_id.clone())?;
+                let limit_reached = (offset + limit) < geo_stats.point_count as i64;
+                (results, geo_stats, None, limit_reached)
+            };
         let ids = results
             .iter()
             .map(|result| result.media_id.clone())
             .collect::<Vec<_>>();
         let items = get_media_by_ids(app, ids)?;
-        let geo_stats = get_geo_index_stats(engine_id.clone())?;
         let (engine_label, exact, persistent) = match engine_id.as_str() {
+            S2_CELL_BTREE_ENGINE_ID => (S2_CELL_BTREE_ENGINE_LABEL, true, true),
             "brute-force" => ("Brute force oracle", true, false),
             "segmented-kd-tree" => ("Segmented KD-tree", true, true),
             "segmented-ball-tree" => ("Segmented ball tree", true, true),
             _ => ("Dynamic Z-order cells", true, true),
         };
         let rows = enriched_distance_rows(items, results);
-        let limit_reached = (offset + limit) < geo_stats.point_count as i64;
         let result_metrics = with_query_metrics(
             search_stats_from_geo(geo_stats, engine_label, exact, persistent),
             &spec,
@@ -4485,8 +4977,8 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
             rows.len(),
             limit,
             offset,
-            limit_reached,
-            None,
+            distance_limit_reached,
+            sql_plan,
         );
 
         return Ok(SearchPage {
@@ -4494,7 +4986,7 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
             result_metrics,
             engine_id,
             engine_label: engine_label.to_string(),
-            limit_reached: Some(limit_reached),
+            limit_reached: Some(distance_limit_reached),
         });
     }
 
@@ -4668,6 +5160,158 @@ fn emit_geo_index_progress(window: &Window, progress: GeoIndexBuildProgress) {
     let _ = window.emit("geo-index-progress", progress);
 }
 
+fn count_catalog_geo_assets(conn: &Connection) -> AppResult<usize> {
+    conn.query_row(
+        "
+        SELECT COUNT(*)
+        FROM media_assets a
+        WHERE a.latitude IS NOT NULL
+          AND a.longitude IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM media_locations l
+            WHERE l.content_hash = a.content_hash
+          )
+        ",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count as usize)
+    .map_err(|error| error.to_string())
+}
+
+fn count_geo_s2_points(conn: &Connection) -> AppResult<usize> {
+    conn.query_row("SELECT COUNT(*) FROM geo_s2_points", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map(|count| count as usize)
+    .map_err(|error| error.to_string())
+}
+
+fn count_geo_s2_cells(conn: &Connection) -> AppResult<usize> {
+    conn.query_row("SELECT COUNT(*) FROM geo_s2_cells", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map(|count| count as usize)
+    .map_err(|error| error.to_string())
+}
+
+fn s2_point_row_from_geo_point(point: &GeoIndexPoint) -> Vec<Value> {
+    vec![
+        Value::Text(point.media_id.clone()),
+        Value::Text(s2_cell_id_hex_for_lat_lon(point.lat, point.lon)),
+        value_optional_i64(point.timestamp),
+        Value::Text(
+            point
+                .kind
+                .clone()
+                .unwrap_or_else(|| "geo_point".to_string()),
+        ),
+        Value::Real(point.lat),
+        Value::Real(point.lon),
+    ]
+}
+
+fn rebuild_sqlite_s2_index_from_catalog(
+    conn: &mut Connection,
+    window: &Window,
+    total_indexes: usize,
+    selected_index_label: &str,
+) -> AppResult<usize> {
+    let catalog_count = count_catalog_geo_assets(conn)?;
+    conn.execute_batch(
+        "
+        DELETE FROM geo_s2_points;
+        DELETE FROM geo_s2_cells;
+        ",
+    )
+    .map_err(|error| error.to_string())?;
+
+    let mut last_hash = String::new();
+    let mut processed = 0_usize;
+    loop {
+        let batch = {
+            let mut stmt = conn
+                .prepare(
+                    "
+                    SELECT a.content_hash, a.kind, a.latitude, a.longitude, a.timestamp
+                    FROM media_assets a
+                    WHERE a.content_hash > ?
+                      AND a.latitude IS NOT NULL
+                      AND a.longitude IS NOT NULL
+                      AND EXISTS (
+                        SELECT 1 FROM media_locations l
+                        WHERE l.content_hash = a.content_hash
+                      )
+                    ORDER BY a.content_hash ASC
+                    LIMIT ?
+                    ",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map(params![last_hash, IMPORT_BATCH_SIZE as i64], |row| {
+                    Ok(GeoIndexPoint {
+                        media_id: row.get("content_hash")?,
+                        kind: row.get("kind")?,
+                        lat: row.get("latitude")?,
+                        lon: row.get("longitude")?,
+                        timestamp: row.get("timestamp")?,
+                    })
+                })
+                .map_err(|error| error.to_string())?;
+            let mut batch = Vec::new();
+            for row in rows {
+                batch.push(row.map_err(|error| error.to_string())?);
+            }
+            batch
+        };
+
+        if batch.is_empty() {
+            break;
+        }
+        last_hash = batch
+            .last()
+            .map(|point| point.media_id.clone())
+            .unwrap_or(last_hash);
+        processed += batch.len();
+        let rows = batch
+            .iter()
+            .map(s2_point_row_from_geo_point)
+            .collect::<Vec<_>>();
+        exec_multi_row_upsert(
+            conn,
+            "
+            INSERT INTO geo_s2_points (
+              content_hash, cell_id, timestamp, kind, latitude, longitude
+            )
+            ",
+            "
+            ON CONFLICT(content_hash) DO NOTHING
+            ",
+            &rows,
+            S2_POINT_BIND_COLUMNS,
+        )?;
+        emit_geo_index_progress(
+            window,
+            GeoIndexBuildProgress {
+                phase: "building".to_string(),
+                point_count: catalog_count,
+                built_indexes: 0,
+                total_indexes,
+                current_index_id: Some(S2_CELL_BTREE_ENGINE_ID.to_string()),
+                current_index_label: Some(selected_index_label.to_string()),
+                current_index_processed_points: Some(processed),
+                current_index_total_points: Some(catalog_count),
+            },
+        );
+        if batch.len() < IMPORT_BATCH_SIZE {
+            break;
+        }
+    }
+
+    rebuild_geo_s2_cells(conn)?;
+    Ok(processed)
+}
+
 #[tauri::command]
 fn build_geo_indexes(app: AppHandle, window: Window) -> AppResult<GeoIndexBuildSummary> {
     let started = Instant::now();
@@ -4774,12 +5418,14 @@ fn build_search_indexes(
     let started = Instant::now();
     let total_indexes = 1_usize;
     let selected_index_id = match index_id.as_str() {
+        S2_CELL_BTREE_ENGINE_ID => S2_CELL_BTREE_ENGINE_ID,
         "brute-force" => "brute-force",
         "segmented-kd-tree" => "segmented-kd-tree",
         "segmented-ball-tree" => "segmented-ball-tree",
         _ => "dynamic-z-order-cells",
     };
     let selected_index_label = match selected_index_id {
+        S2_CELL_BTREE_ENGINE_ID => S2_CELL_BTREE_ENGINE_LABEL,
         "brute-force" => "Brute force oracle",
         "segmented-kd-tree" => "Segmented KD-tree",
         "segmented-ball-tree" => "Segmented ball tree",
@@ -4798,6 +5444,57 @@ fn build_search_indexes(
             current_index_total_points: None,
         },
     );
+
+    if selected_index_id == S2_CELL_BTREE_ENGINE_ID {
+        let mut conn = connect(&app)?;
+        let catalog_count = count_catalog_geo_assets(&conn)?;
+        let s2_point_count = count_geo_s2_points(&conn)?;
+        let s2_cell_count = count_geo_s2_cells(&conn)?;
+        let should_rebuild = force_rebuild.unwrap_or(false)
+            || catalog_count != s2_point_count
+            || (catalog_count > 0 && s2_cell_count == 0);
+        let point_count = if should_rebuild {
+            emit_geo_index_progress(
+                &window,
+                GeoIndexBuildProgress {
+                    phase: "building".to_string(),
+                    point_count: catalog_count,
+                    built_indexes: 0,
+                    total_indexes,
+                    current_index_id: Some(selected_index_id.to_string()),
+                    current_index_label: Some(selected_index_label.to_string()),
+                    current_index_processed_points: Some(0),
+                    current_index_total_points: Some(catalog_count),
+                },
+            );
+            rebuild_sqlite_s2_index_from_catalog(
+                &mut conn,
+                &window,
+                total_indexes,
+                selected_index_label,
+            )?
+        } else {
+            s2_point_count
+        };
+        emit_geo_index_progress(
+            &window,
+            GeoIndexBuildProgress {
+                phase: "ready".to_string(),
+                point_count,
+                built_indexes: total_indexes,
+                total_indexes,
+                current_index_id: Some(selected_index_id.to_string()),
+                current_index_label: Some(selected_index_label.to_string()),
+                current_index_processed_points: Some(point_count),
+                current_index_total_points: Some(point_count),
+            },
+        );
+        return Ok(SearchIndexBuildSummary {
+            point_count,
+            build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
+            engine_count: 7,
+        });
+    }
 
     let epoch = if selected_index_id == "dynamic-z-order-cells"
         || selected_index_id == "segmented-kd-tree"
@@ -4841,7 +5538,7 @@ fn build_search_indexes(
             return Ok(SearchIndexBuildSummary {
                 point_count,
                 build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
-                engine_count: 6,
+                engine_count: 7,
             });
         }
     }
@@ -4871,7 +5568,7 @@ fn build_search_indexes(
             return Ok(SearchIndexBuildSummary {
                 point_count,
                 build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
-                engine_count: 6,
+                engine_count: 7,
             });
         }
         if selected_index_id == "segmented-ball-tree" {
@@ -4898,7 +5595,7 @@ fn build_search_indexes(
             return Ok(SearchIndexBuildSummary {
                 point_count,
                 build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
-                engine_count: 6,
+                engine_count: 7,
             });
         }
     }
@@ -5018,7 +5715,7 @@ fn build_search_indexes(
     Ok(SearchIndexBuildSummary {
         point_count: summary.point_count,
         build_time_ms: summary.build_time_ms,
-        engine_count: 6,
+        engine_count: 7,
     })
 }
 
@@ -5037,7 +5734,18 @@ fn search_geo_index(index_id: String, query: GeoSearchQuery) -> AppResult<Vec<Ge
 }
 
 #[tauri::command]
-fn get_geo_index_stats(index_id: String) -> AppResult<GeoIndexStats> {
+fn get_geo_index_stats(app: AppHandle, index_id: String) -> AppResult<GeoIndexStats> {
+    if index_id == S2_CELL_BTREE_ENGINE_ID {
+        let conn = connect(&app)?;
+        let point_count = count_geo_s2_points(&conn)?;
+        let cell_count = count_geo_s2_cells(&conn)?;
+        return Ok(GeoIndexStats {
+            point_count,
+            cell_count: Some(cell_count),
+            index_storage: Some("sqlite-btree".to_string()),
+            ..empty_geo_index_stats(S2_CELL_BTREE_ENGINE_ID, point_count)
+        });
+    }
     let registry = geo_index_registry()
         .lock()
         .map_err(|error| error.to_string())?;
@@ -5050,13 +5758,27 @@ fn get_geo_index_stats(index_id: String) -> AppResult<GeoIndexStats> {
 }
 
 #[tauri::command]
-fn get_search_index_stats() -> AppResult<Vec<SearchIndexStats>> {
+fn get_search_index_stats(app: AppHandle) -> AppResult<Vec<SearchIndexStats>> {
+    let conn = connect(&app)?;
+    let s2_point_count = count_geo_s2_points(&conn).unwrap_or(0);
+    let s2_cell_count = count_geo_s2_cells(&conn).unwrap_or(0);
     let registry = geo_index_registry()
         .lock()
         .map_err(|error| error.to_string())?;
     Ok(vec![
         empty_search_index_stats("sqlite-timestamp", "SQLite timestamp B-tree"),
         empty_search_index_stats("sqlite-bbox-time", "SQLite bbox/time B-tree"),
+        search_stats_from_geo(
+            GeoIndexStats {
+                point_count: s2_point_count,
+                cell_count: Some(s2_cell_count),
+                index_storage: Some("sqlite-btree".to_string()),
+                ..empty_geo_index_stats(S2_CELL_BTREE_ENGINE_ID, s2_point_count)
+            },
+            S2_CELL_BTREE_ENGINE_LABEL,
+            true,
+            true,
+        ),
         search_stats_from_geo(
             registry.brute_force.last_stats.clone(),
             "Brute force oracle",
@@ -5171,16 +5893,56 @@ fn remove_sources(app: AppHandle, source_ids: Vec<String>) -> AppResult<()> {
         params_from_iter(source_ids.iter()),
     )
     .map_err(|error| error.to_string())?;
-    conn.execute_batch(
-        "
-        DELETE FROM media_assets
-        WHERE NOT EXISTS (
-          SELECT 1 FROM media_locations l
-          WHERE l.content_hash = media_assets.content_hash
-        );
-        ",
-    )
-    .map_err(|error| error.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT content_hash
+            FROM media_assets
+            WHERE NOT EXISTS (
+              SELECT 1 FROM media_locations l
+              WHERE l.content_hash = media_assets.content_hash
+            )
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    let mut orphan_hashes = Vec::new();
+    for row in rows {
+        orphan_hashes.push(row.map_err(|error| error.to_string())?);
+    }
+    drop(stmt);
+
+    let mut affected_cell_ids = Vec::new();
+    for chunk in orphan_hashes.chunks(900) {
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT DISTINCT cell_id FROM geo_s2_points WHERE content_hash IN ({placeholders})"
+            ))
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params_from_iter(chunk.iter()), |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            affected_cell_ids.push(row.map_err(|error| error.to_string())?);
+        }
+        drop(stmt);
+        conn.execute(
+            &format!("DELETE FROM media_assets WHERE content_hash IN ({placeholders})"),
+            params_from_iter(chunk.iter()),
+        )
+        .map_err(|error| error.to_string())?;
+        conn.execute(
+            &format!("DELETE FROM geo_s2_points WHERE content_hash IN ({placeholders})"),
+            params_from_iter(chunk.iter()),
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    refresh_geo_s2_cell_summaries(&conn, &affected_cell_ids)?;
     bump_catalog_epoch(&conn)?;
     Ok(())
 }
@@ -5210,6 +5972,8 @@ fn clear_catalog(app: AppHandle) -> AppResult<()> {
         "
         DELETE FROM media_locations;
         DELETE FROM media_assets;
+        DELETE FROM geo_s2_points;
+        DELETE FROM geo_s2_cells;
         ",
     )
     .map_err(|error| error.to_string())?;
@@ -5896,6 +6660,14 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computes_fixed_s2_cell_id_fixture() {
+        assert_eq!(
+            s2_cell_id_hex_for_lat_lon(48.1370673, 11.5775995),
+            "479e758b40000000"
+        );
+    }
 
     fn test_item(content_hash: &str, source_id: &str, path: &str) -> MediaItem {
         let location_id = sha256_string(&format!("{source_id}\n{path}"));

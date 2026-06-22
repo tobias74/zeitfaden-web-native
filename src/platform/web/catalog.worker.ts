@@ -32,7 +32,15 @@ import {
   type SegmentedKdTreeManifest,
   validateSegmentedKdTreeManifest,
 } from '../../geo/segmentedKdTreePersistence'
+import {
+  S2_CELL_INDEX_LEVEL,
+  s2CellIdHexForLatLon,
+  s2ChildCells,
+  s2RootCells,
+  type S2QueuedCell,
+} from '../../geo/s2Cells'
 import { GeoIndexRegistry } from '../../geo/registry'
+import { haversineMeters } from '../../lib/distance'
 import {
   geoPointContentHash,
   parseGeoFilePoints,
@@ -177,11 +185,15 @@ type SqliteUpsertTiming = {
 type SqliteMediaWriteTiming = {
   items: number
   locations: number
+  s2Points: number
   totalMs: number
   assetRowsMs: number
   locationRowsMs: number
+  s2RowsMs: number
+  s2RefreshMs: number
   asset: SqliteUpsertTiming
   location: SqliteUpsertTiming
+  s2Point: SqliteUpsertTiming
   accountedMs: number
   unaccountedMs: number
 }
@@ -283,6 +295,7 @@ const IMPORT_BATCH_SIZE = 1000
 const SQLITE_BIND_CHUNK_LIMIT = 12000
 const ASSET_BIND_COLUMNS = 9
 const LOCATION_BIND_COLUMNS = 7
+const S2_POINT_BIND_COLUMNS = 6
 const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
 const GEO_IMPORT_PARSE_SLICE_MS = 250
 const PROGRESS_HEARTBEAT_MS = 1000
@@ -293,6 +306,8 @@ const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb-persisted-index-v1'
 const INDEXED_DB_VERSION = 1
 const IMPORT_TRACE_ENABLED = false
 const CATALOG_EPOCH_KEY = 'catalogEpoch'
+const S2_CELL_BTREE_ENGINE_ID = 's2-cell-btree'
+const S2_CELL_BTREE_ENGINE_LABEL = 'S2 cell B-tree'
 const DYNAMIC_INDEX_CACHE_KEY = 'dynamic-z-order-cells:v1'
 const SEGMENTED_KD_TREE_CACHE_KEY = 'segmented-kd-tree:v1'
 const SEGMENTED_BALL_TREE_CACHE_KEY = 'segmented-ball-tree:v1'
@@ -368,7 +383,7 @@ async function openSqliteDb(sqlite3: SqliteModule): Promise<SqliteDb> {
     )
   }
 
-  return new opfsDb('/catalog-v9.sqlite3') as unknown as SqliteDb
+  return new opfsDb('/catalog-v10.sqlite3') as unknown as SqliteDb
 }
 
 async function ensureDb(
@@ -409,6 +424,28 @@ async function ensureDb(
       value TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS geo_s2_points (
+      content_hash TEXT PRIMARY KEY,
+      cell_id TEXT NOT NULL,
+      timestamp INTEGER,
+      kind TEXT NOT NULL,
+      latitude REAL NOT NULL,
+      longitude REAL NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS geo_s2_cells (
+      cell_id TEXT PRIMARY KEY,
+      point_count INTEGER NOT NULL,
+      timed_point_count INTEGER NOT NULL,
+      min_timestamp INTEGER,
+      max_timestamp INTEGER,
+      kind_mask INTEGER NOT NULL,
+      min_latitude REAL NOT NULL,
+      max_latitude REAL NOT NULL,
+      min_longitude REAL NOT NULL,
+      max_longitude REAL NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_media_locations_content_hash
       ON media_locations(content_hash);
 
@@ -420,6 +457,11 @@ async function ensureDb(
 
     CREATE INDEX IF NOT EXISTS idx_assets_lat_lon_timestamp_hash
       ON media_assets(latitude, longitude, timestamp, content_hash);
+
+    CREATE INDEX IF NOT EXISTS idx_geo_s2_points_cell_time_kind_cover
+      ON geo_s2_points(
+        cell_id, timestamp, kind, content_hash, latitude, longitude
+      );
   `)
 
   initResult = {
@@ -898,6 +940,15 @@ async function applyIncrementalSearchIndexUpdate(
   if (!preparedSearchIndex) return
   if (preparedSearchIndex.storageMode !== store.storageMode) {
     preparedSearchIndex = undefined
+    return
+  }
+  if (preparedSearchIndex.indexId === S2_CELL_BTREE_ENGINE_ID) {
+    preparedSearchIndex = {
+      storageMode: store.storageMode,
+      indexId: S2_CELL_BTREE_ENGINE_ID,
+      catalogEpoch,
+      cacheDirty: false,
+    }
     return
   }
 
@@ -1785,6 +1836,38 @@ function assetBind(item: MediaItem): unknown[] {
   ]
 }
 
+function kindMask(kind: MediaItem['kind']): number {
+  if (kind === 'image') return 1
+  if (kind === 'video') return 2
+  return 4
+}
+
+function kindMaskMatches(mask: number, kind: SearchSpec['kind']): boolean {
+  if (!kind || kind === 'all') return true
+  if (kind === 'media') return (mask & 3) !== 0
+  return (mask & kindMask(kind)) !== 0
+}
+
+function s2PointBind(item: MediaItem): unknown[] | undefined {
+  if (
+    typeof item.latitude !== 'number' ||
+    typeof item.longitude !== 'number' ||
+    !Number.isFinite(item.latitude) ||
+    !Number.isFinite(item.longitude)
+  ) {
+    return undefined
+  }
+
+  return [
+    item.contentHash,
+    s2CellIdHexForLatLon(item.latitude, item.longitude),
+    item.timestamp ?? null,
+    item.kind,
+    item.latitude,
+    item.longitude,
+  ]
+}
+
 function itemLocations(item: MediaItem): MediaLocation[] {
   if (item.locations.length > 0) return item.locations
   return [
@@ -1795,6 +1878,86 @@ function itemLocations(item: MediaItem): MediaLocation[] {
       relativePath: item.relativePath,
     },
   ]
+}
+
+function forEachChunk<T>(
+  items: readonly T[],
+  size: number,
+  visit: (chunk: readonly T[]) => void,
+): void {
+  for (let offset = 0; offset < items.length; offset += size) {
+    visit(items.slice(offset, offset + size))
+  }
+}
+
+function distinctStrings(values: Iterable<string>): string[] {
+  return [...new Set(values)].sort((a, b) => a.localeCompare(b))
+}
+
+function refreshGeoS2CellSummaries(
+  activeDb: SqliteDb,
+  cellIds: readonly string[],
+): void {
+  const uniqueCellIds = distinctStrings(cellIds)
+  if (uniqueCellIds.length === 0) return
+
+  forEachChunk(uniqueCellIds, 900, (chunk) => {
+    const placeholderSql = chunk.map(() => '?').join(', ')
+    activeDb.exec({
+      sql: `DELETE FROM geo_s2_cells WHERE cell_id IN (${placeholderSql})`,
+      bind: [...chunk],
+    })
+    activeDb.exec({
+      sql: `
+        INSERT INTO geo_s2_cells (
+          cell_id, point_count, timed_point_count, min_timestamp, max_timestamp,
+          kind_mask, min_latitude, max_latitude, min_longitude, max_longitude
+        )
+        SELECT
+          cell_id,
+          COUNT(*),
+          SUM(CASE WHEN timestamp IS NOT NULL THEN 1 ELSE 0 END),
+          MIN(timestamp),
+          MAX(timestamp),
+          MAX(CASE WHEN kind = 'image' THEN 1 ELSE 0 END) +
+            MAX(CASE WHEN kind = 'video' THEN 2 ELSE 0 END) +
+            MAX(CASE WHEN kind = 'geo_point' THEN 4 ELSE 0 END),
+          MIN(latitude),
+          MAX(latitude),
+          MIN(longitude),
+          MAX(longitude)
+        FROM geo_s2_points
+        WHERE cell_id IN (${placeholderSql})
+        GROUP BY cell_id
+      `,
+      bind: [...chunk],
+    })
+  })
+}
+
+function rebuildGeoS2Cells(activeDb: SqliteDb): void {
+  activeDb.exec(`
+    DELETE FROM geo_s2_cells;
+    INSERT INTO geo_s2_cells (
+      cell_id, point_count, timed_point_count, min_timestamp, max_timestamp,
+      kind_mask, min_latitude, max_latitude, min_longitude, max_longitude
+    )
+    SELECT
+      cell_id,
+      COUNT(*),
+      SUM(CASE WHEN timestamp IS NOT NULL THEN 1 ELSE 0 END),
+      MIN(timestamp),
+      MAX(timestamp),
+      MAX(CASE WHEN kind = 'image' THEN 1 ELSE 0 END) +
+        MAX(CASE WHEN kind = 'video' THEN 2 ELSE 0 END) +
+        MAX(CASE WHEN kind = 'geo_point' THEN 4 ELSE 0 END),
+      MIN(latitude),
+      MAX(latitude),
+      MIN(longitude),
+      MAX(longitude)
+    FROM geo_s2_points
+    GROUP BY cell_id;
+  `)
 }
 
 function placeholders(rowCount: number, columnCount: number): string {
@@ -1893,13 +2056,20 @@ function upsertMediaIntoSqlite(
     return {
       items: 0,
       locations: 0,
+      s2Points: 0,
       totalMs: 0,
       assetRowsMs: 0,
       locationRowsMs: 0,
+      s2RowsMs: 0,
+      s2RefreshMs: 0,
       asset: emptySqliteUpsertTiming('media_assets', ASSET_BIND_COLUMNS),
       location: emptySqliteUpsertTiming(
         'media_locations',
         LOCATION_BIND_COLUMNS,
+      ),
+      s2Point: emptySqliteUpsertTiming(
+        'geo_s2_points',
+        S2_POINT_BIND_COLUMNS,
       ),
       accountedMs: 0,
       unaccountedMs: 0,
@@ -1956,21 +2126,54 @@ function upsertMediaIntoSqlite(
     `,
   )
 
+  const s2RowsStartedAt = performance.now()
+  const s2Rows = items.flatMap((item) => {
+    const row = s2PointBind(item)
+    return row ? [row] : []
+  })
+  const s2CellIds = s2Rows.map((row) => String(row[1]))
+  const s2RowsMs = performance.now() - s2RowsStartedAt
+  const s2PointTiming = execMultiRowInsert(
+    activeDb,
+    'geo_s2_points',
+    `
+    INSERT INTO geo_s2_points (
+      content_hash, cell_id, timestamp, kind, latitude, longitude
+    )
+    `,
+    s2Rows,
+    S2_POINT_BIND_COLUMNS,
+    `
+    ON CONFLICT(content_hash) DO NOTHING
+    `,
+  )
+
+  const s2RefreshStartedAt = performance.now()
+  refreshGeoS2CellSummaries(activeDb, s2CellIds)
+  const s2RefreshMs = performance.now() - s2RefreshStartedAt
+
   const totalMs = performance.now() - startedAt
   const accountedMs =
     assetRowsMs +
     assetTiming.totalMs +
     locationRowsMs +
-    locationTiming.totalMs
+    locationTiming.totalMs +
+    s2RowsMs +
+    s2PointTiming.totalMs +
+    s2RefreshMs
 
   return {
     items: items.length,
     locations: locationRows.length,
+    s2Points: s2Rows.length,
     totalMs,
     assetRowsMs,
     locationRowsMs,
+    s2RowsMs,
+    s2RefreshMs,
     asset: assetTiming,
     location: locationTiming,
+    s2Point: s2PointTiming,
     accountedMs,
     unaccountedMs: totalMs - accountedMs,
   }
@@ -2042,13 +2245,42 @@ function removeSourcesFromSqlite(activeDb: SqliteDb, sourceIds: string[]): void 
     sql: `DELETE FROM media_locations WHERE source_id IN (${placeholders})`,
     bind: sourceIds,
   })
-  activeDb.exec(`
-    DELETE FROM media_assets
+  const orphanRows = activeDb.selectObjects(`
+    SELECT content_hash
+    FROM media_assets
     WHERE NOT EXISTS (
       SELECT 1 FROM media_locations l
       WHERE l.content_hash = media_assets.content_hash
     )
   `)
+  const orphanHashes = orphanRows.map((row) => String(row.content_hash))
+  if (orphanHashes.length > 0) {
+    const affectedCellIds: string[] = []
+    forEachChunk(orphanHashes, 900, (chunk) => {
+      const orphanPlaceholderSql = chunk.map(() => '?').join(', ')
+      affectedCellIds.push(
+        ...activeDb
+          .selectObjects(
+            `
+              SELECT DISTINCT cell_id
+              FROM geo_s2_points
+              WHERE content_hash IN (${orphanPlaceholderSql})
+            `,
+            [...chunk],
+          )
+          .map((row) => String(row.cell_id)),
+      )
+      activeDb.exec({
+        sql: `DELETE FROM media_assets WHERE content_hash IN (${orphanPlaceholderSql})`,
+        bind: [...chunk],
+      })
+      activeDb.exec({
+        sql: `DELETE FROM geo_s2_points WHERE content_hash IN (${orphanPlaceholderSql})`,
+        bind: [...chunk],
+      })
+    })
+    refreshGeoS2CellSummaries(activeDb, affectedCellIds)
+  }
   bumpSqliteCatalogEpochInDb(activeDb)
   invalidatePreparedSearchIndex()
 }
@@ -3302,6 +3534,485 @@ function mediaItemsToSearchResults(items: MediaItem[]): SearchPage['items'] {
   }))
 }
 
+type GeoS2CellRow = {
+  cell_id?: unknown
+  point_count?: unknown
+  timed_point_count?: unknown
+  min_timestamp?: unknown
+  max_timestamp?: unknown
+  kind_mask?: unknown
+  min_latitude?: unknown
+  max_latitude?: unknown
+  min_longitude?: unknown
+  max_longitude?: unknown
+}
+
+type GeoS2PointRow = {
+  content_hash?: unknown
+  timestamp?: unknown
+  kind?: unknown
+  latitude?: unknown
+  longitude?: unknown
+}
+
+type S2DistanceCandidate = {
+  mediaId: string
+  distanceMeters: number
+}
+
+class S2CellQueue {
+  private readonly cells: S2QueuedCell[] = []
+
+  get length(): number {
+    return this.cells.length
+  }
+
+  push(cell: S2QueuedCell): void {
+    this.cells.push(cell)
+    this.bubbleUp(this.cells.length - 1)
+  }
+
+  pushMany(cells: S2QueuedCell[]): void {
+    for (const cell of cells) this.push(cell)
+  }
+
+  peek(): S2QueuedCell | undefined {
+    return this.cells[0]
+  }
+
+  pop(): S2QueuedCell | undefined {
+    if (this.cells.length === 0) return undefined
+    const first = this.cells[0]
+    const last = this.cells.pop()
+    if (last && this.cells.length > 0) {
+      this.cells[0] = last
+      this.bubbleDown(0)
+    }
+    return first
+  }
+
+  private bubbleUp(index: number): void {
+    let current = index
+    while (current > 0) {
+      const parent = Math.floor((current - 1) / 2)
+      if (compareQueuedCells(this.cells[parent], this.cells[current]) <= 0) {
+        break
+      }
+      this.swap(parent, current)
+      current = parent
+    }
+  }
+
+  private bubbleDown(index: number): void {
+    let current = index
+    while (true) {
+      const left = current * 2 + 1
+      const right = left + 1
+      let smallest = current
+      if (
+        left < this.cells.length &&
+        compareQueuedCells(this.cells[left], this.cells[smallest]) < 0
+      ) {
+        smallest = left
+      }
+      if (
+        right < this.cells.length &&
+        compareQueuedCells(this.cells[right], this.cells[smallest]) < 0
+      ) {
+        smallest = right
+      }
+      if (smallest === current) break
+      this.swap(current, smallest)
+      current = smallest
+    }
+  }
+
+  private swap(left: number, right: number): void {
+    const oldLeft = this.cells[left]
+    this.cells[left] = this.cells[right]
+    this.cells[right] = oldLeft
+  }
+}
+
+function compareQueuedCells(a: S2QueuedCell, b: S2QueuedCell): number {
+  return (
+    a.lowerBoundMeters - b.lowerBoundMeters ||
+    a.level - b.level ||
+    a.hex.localeCompare(b.hex)
+  )
+}
+
+function compareDistanceCandidates(
+  a: S2DistanceCandidate,
+  b: S2DistanceCandidate,
+): number {
+  return (
+    a.distanceMeters - b.distanceMeters ||
+    a.mediaId.localeCompare(b.mediaId)
+  )
+}
+
+function trimDistanceCandidates(
+  candidates: S2DistanceCandidate[],
+  retainedLimit: number,
+): void {
+  candidates.sort(compareDistanceCandidates)
+  if (candidates.length > retainedLimit) {
+    candidates.length = retainedLimit
+  }
+}
+
+function geoS2CellMatchesSpec(
+  row: GeoS2CellRow,
+  spec: SearchSpec,
+): boolean {
+  if (!kindMaskMatches(toNumber(row.kind_mask) ?? 0, spec.kind)) {
+    return false
+  }
+
+  if (typeof spec.startTime === 'number' || typeof spec.endTime === 'number') {
+    if ((toNumber(row.timed_point_count) ?? 0) <= 0) return false
+    const minTimestamp = toNumber(row.min_timestamp)
+    const maxTimestamp = toNumber(row.max_timestamp)
+    if (typeof minTimestamp !== 'number' || typeof maxTimestamp !== 'number') {
+      return false
+    }
+    if (typeof spec.startTime === 'number' && maxTimestamp < spec.startTime) {
+      return false
+    }
+    if (typeof spec.endTime === 'number' && minTimestamp > spec.endTime) {
+      return false
+    }
+  }
+
+  if (spec.geoBounds) {
+    const minLat = toNumber(row.min_latitude)
+    const maxLat = toNumber(row.max_latitude)
+    const minLon = toNumber(row.min_longitude)
+    const maxLon = toNumber(row.max_longitude)
+    if (
+      typeof minLat !== 'number' ||
+      typeof maxLat !== 'number' ||
+      typeof minLon !== 'number' ||
+      typeof maxLon !== 'number'
+    ) {
+      return false
+    }
+    if (maxLat < spec.geoBounds.minLat || minLat > spec.geoBounds.maxLat) {
+      return false
+    }
+    if (maxLon < spec.geoBounds.minLon || minLon > spec.geoBounds.maxLon) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function geoS2PointMatchesSpec(row: GeoS2PointRow, spec: SearchSpec): boolean {
+  const kind = row.kind
+  if (spec.kind === 'media' && kind !== 'image' && kind !== 'video') {
+    return false
+  }
+  if (
+    spec.kind &&
+    spec.kind !== 'all' &&
+    spec.kind !== 'media' &&
+    kind !== spec.kind
+  ) {
+    return false
+  }
+
+  const timestamp = toNumber(row.timestamp)
+  if (
+    (typeof spec.startTime === 'number' || typeof spec.endTime === 'number') &&
+    typeof timestamp !== 'number'
+  ) {
+    return false
+  }
+  if (typeof spec.startTime === 'number' && timestamp! < spec.startTime) {
+    return false
+  }
+  if (typeof spec.endTime === 'number' && timestamp! > spec.endTime) {
+    return false
+  }
+
+  const latitude = toNumber(row.latitude)
+  const longitude = toNumber(row.longitude)
+  if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+    return false
+  }
+  if (spec.geoBounds) {
+    if (
+      latitude < spec.geoBounds.minLat ||
+      latitude > spec.geoBounds.maxLat ||
+      longitude < spec.geoBounds.minLon ||
+      longitude > spec.geoBounds.maxLon
+    ) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function geoS2PointSql(spec: SearchSpec): { sql: string; bind: unknown[] } {
+  const where = ['p.cell_id = ?']
+  const bind: unknown[] = []
+  if (typeof spec.startTime === 'number') {
+    where.push('p.timestamp >= ?')
+    bind.push(spec.startTime)
+  }
+  if (typeof spec.endTime === 'number') {
+    where.push('p.timestamp <= ?')
+    bind.push(spec.endTime)
+  }
+  if (spec.kind === 'media') {
+    where.push("p.kind IN ('image', 'video')")
+  } else if (spec.kind && spec.kind !== 'all') {
+    where.push('p.kind = ?')
+    bind.push(spec.kind)
+  }
+  if (spec.geoBounds) {
+    where.push('p.latitude BETWEEN ? AND ?')
+    bind.push(spec.geoBounds.minLat, spec.geoBounds.maxLat)
+    where.push('p.longitude BETWEEN ? AND ?')
+    bind.push(spec.geoBounds.minLon, spec.geoBounds.maxLon)
+  }
+  if (spec.sourceId) {
+    where.push(
+      `EXISTS (
+        SELECT 1 FROM media_locations l
+        WHERE l.content_hash = p.content_hash AND l.source_id = ?
+      )`,
+    )
+    bind.push(spec.sourceId)
+  }
+
+  return {
+    sql: `
+      SELECT p.content_hash, p.timestamp, p.kind, p.latitude, p.longitude
+      FROM geo_s2_points p
+      WHERE ${where.join(' AND ')}
+      ORDER BY p.cell_id ASC, p.timestamp ASC, p.kind ASC, p.content_hash ASC
+    `,
+    bind,
+  }
+}
+
+function geoS2ExplainPlan(
+  activeDb: SqliteDb,
+  spec: SearchSpec,
+): SqlExplainPlan | undefined {
+  if (!spec.diagnostics?.explainSql) return undefined
+  const pointStatement = geoS2PointSql(spec)
+  return sqliteExplainPlan(activeDb, pointStatement.sql, [
+    '0000000000000000',
+    ...pointStatement.bind,
+  ])
+}
+
+async function sqliteS2DistanceSearch(
+  spec: SearchSpec,
+): Promise<{
+  results: GeoSearchResult[]
+  stats: SearchIndexStats
+  sqlPlan?: SqlExplainPlan
+  limitReached: boolean
+}> {
+  await ensureDb()
+  if (spec.order.kind !== 'distance') {
+    throw new Error('S2 cell B-tree cannot serve timestamp queries.')
+  }
+
+  const activeDb = requireDb()
+  const startedAt = performance.now()
+  const limit = Math.max(1, Math.min(spec.limit ?? 500, 10_000))
+  const offset = Math.max(0, spec.offset ?? 0)
+  const retainedLimit = offset + limit + 1
+  const pointCount =
+    toNumber(activeDb.selectValue('SELECT COUNT(*) FROM geo_s2_points')) ?? 0
+  const cellCount =
+    toNumber(activeDb.selectValue('SELECT COUNT(*) FROM geo_s2_cells')) ?? 0
+  const sqlPlan = geoS2ExplainPlan(activeDb, spec)
+  const queue = new S2CellQueue()
+  queue.pushMany(s2RootCells(spec.order.point.lat, spec.order.point.lon))
+  const candidates: S2DistanceCandidate[] = []
+  const pointStatement = geoS2PointSql(spec)
+  let distanceComputations = 0
+  let nodesVisited = 0
+  let pagesRead = 0
+  let candidatesInspected = 0
+  let prunedByGeo = 0
+  let prunedByTime = 0
+  let sqliteQueryCount = 2 + (sqlPlan ? 1 : 0)
+
+  while (queue.length > 0) {
+    const nextCell = queue.peek()
+    const worstDistance =
+      candidates.length >= retainedLimit
+        ? candidates[retainedLimit - 1]?.distanceMeters
+        : undefined
+    if (
+      nextCell &&
+      typeof worstDistance === 'number' &&
+      nextCell.lowerBoundMeters > worstDistance
+    ) {
+      prunedByGeo += queue.length
+      break
+    }
+
+    const cell = queue.pop()
+    if (!cell) break
+    nodesVisited += 1
+
+    if (cell.level < S2_CELL_INDEX_LEVEL) {
+      queue.pushMany(
+        s2ChildCells(cell, spec.order.point.lat, spec.order.point.lon),
+      )
+      continue
+    }
+
+    sqliteQueryCount += 1
+    const cellRows = activeDb.selectObjects(
+      'SELECT * FROM geo_s2_cells WHERE cell_id = ?',
+      [cell.hex],
+    ) as GeoS2CellRow[]
+    if (cellRows.length === 0) continue
+
+    const cellRow = cellRows[0]
+    if (!geoS2CellMatchesSpec(cellRow, spec)) {
+      if (
+        typeof spec.startTime === 'number' ||
+        typeof spec.endTime === 'number'
+      ) {
+        prunedByTime += 1
+      } else {
+        prunedByGeo += 1
+      }
+      continue
+    }
+
+    sqliteQueryCount += 1
+    pagesRead += 1
+    const pointRows = activeDb.selectObjects(pointStatement.sql, [
+      cell.hex,
+      ...pointStatement.bind,
+    ]) as GeoS2PointRow[]
+
+    for (const row of pointRows) {
+      candidatesInspected += 1
+      if (!geoS2PointMatchesSpec(row, spec)) continue
+      const latitude = toNumber(row.latitude)
+      const longitude = toNumber(row.longitude)
+      if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+        continue
+      }
+      distanceComputations += 1
+      candidates.push({
+        mediaId: String(row.content_hash),
+        distanceMeters: haversineMeters(
+          latitude,
+          longitude,
+          spec.order.point.lat,
+          spec.order.point.lon,
+        ),
+      })
+      if (candidates.length >= retainedLimit) {
+        trimDistanceCandidates(candidates, retainedLimit)
+      }
+    }
+  }
+
+  trimDistanceCandidates(candidates, retainedLimit)
+  const results = candidates.slice(offset, offset + limit)
+  const limitReached = candidates.length > offset + limit
+  const queryTimeMs = performance.now() - startedAt
+
+  return {
+    results,
+    limitReached,
+    sqlPlan,
+    stats: {
+      ...defaultSearchStats(S2_CELL_BTREE_ENGINE_ID, S2_CELL_BTREE_ENGINE_LABEL),
+      pointCount,
+      cellCount,
+      indexStorage: 'disk',
+      lastQueryTimeMs: queryTimeMs,
+      distanceComputations,
+      nodesVisited,
+      pagesRead,
+      candidatesInspected,
+      prunedByGeo,
+      prunedByTime,
+      sqliteQueryCount,
+    },
+  }
+}
+
+function createS2CellBtreeSearchEngine(
+  getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
+  storageMode: SearchStorageMode,
+): SearchIndexEngine {
+  return {
+    id: S2_CELL_BTREE_ENGINE_ID,
+    label: S2_CELL_BTREE_ENGINE_LABEL,
+    capabilities: {
+      exact: true,
+      persistent: true,
+      requiresBuild: false,
+      supportsTimestampOrder: false,
+      supportsDistanceOrder: true,
+      supportsGeoBounds: true,
+      supportsTimeRange: true,
+      supportsKind: true,
+      supportsSource: false,
+    },
+    canHandle(spec) {
+      return spec.order.kind === 'distance' && !spec.sourceId
+    },
+    async search(spec) {
+      const startedAt = performance.now()
+      const limit = Math.max(1, Math.min(spec.limit ?? 500, 10_000))
+      const offset = Math.max(0, spec.offset ?? 0)
+      const { results, stats, sqlPlan, limitReached } =
+        await sqliteS2DistanceSearch(spec)
+      const items = await enrichDistanceResults(getMediaByIdsFn, results)
+      return {
+        items,
+        resultMetrics: withQueryMetrics(
+          stats,
+          spec,
+          storageMode,
+          performance.now() - startedAt,
+          items.length,
+          limit,
+          offset,
+          limitReached,
+          sqlPlan,
+        ),
+        engineId: S2_CELL_BTREE_ENGINE_ID,
+        engineLabel: S2_CELL_BTREE_ENGINE_LABEL,
+        limitReached,
+      }
+    },
+    async stats() {
+      await ensureDb()
+      const activeDb = requireDb()
+      return {
+        ...defaultSearchStats(S2_CELL_BTREE_ENGINE_ID, S2_CELL_BTREE_ENGINE_LABEL),
+        pointCount:
+          toNumber(activeDb.selectValue('SELECT COUNT(*) FROM geo_s2_points')) ??
+          0,
+        cellCount:
+          toNumber(activeDb.selectValue('SELECT COUNT(*) FROM geo_s2_cells')) ??
+          0,
+        indexStorage: 'disk',
+      }
+    },
+  }
+}
+
 async function enrichDistanceResults(
   getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
   results: GeoSearchResult[],
@@ -3472,7 +4183,7 @@ function createSearchRegistry(
   storageMode: SearchStorageMode,
   store: CatalogStore,
 ): SearchIndexEngineRegistry {
-  return new SearchIndexEngineRegistry([
+  const engines: SearchIndexEngine[] = [
     createSqlSearchEngine(
       'sqlite-timestamp',
       'SQLite timestamp B-tree',
@@ -3487,10 +4198,19 @@ function createSearchRegistry(
       storageMode,
       searchRowsFn,
     ),
+  ]
+
+  if (storageMode === 'sqlite') {
+    engines.push(createS2CellBtreeSearchEngine(getMediaByIdsFn, storageMode))
+  }
+
+  engines.push(
     ...geoIndexRegistry.indexes.map((index) =>
       createDistanceSearchEngine(index, getMediaByIdsFn, storageMode, store),
     ),
-  ])
+  )
+
+  return new SearchIndexEngineRegistry(engines)
 }
 
 async function searchMediaWithCatalogFunctions(
@@ -3688,6 +4408,133 @@ async function buildGeoIndexes(
   return summary
 }
 
+function searchEngineCountForStore(store: CatalogStore): number {
+  return geoIndexRegistry.indexes.length + 2 + (store.storageMode === 'sqlite' ? 1 : 0)
+}
+
+async function countSqliteGeoAssets(): Promise<number> {
+  await ensureDb()
+  return (
+    toNumber(
+      requireDb().selectValue(`
+        SELECT COUNT(*)
+        FROM media_assets a
+        WHERE a.latitude IS NOT NULL
+          AND a.longitude IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM media_locations l
+            WHERE l.content_hash = a.content_hash
+          )
+      `),
+    ) ?? 0
+  )
+}
+
+async function rebuildSqliteS2IndexFromCatalog(
+  store: CatalogStore,
+  postProgress: (progress: GeoIndexBuildProgress) => void,
+): Promise<number> {
+  if (store.storageMode !== 'sqlite') {
+    throw new Error('S2 cell B-tree is only available for SQLite catalogs.')
+  }
+
+  await ensureDb()
+  const activeDb = requireDb()
+  activeDb.exec(`
+    DELETE FROM geo_s2_cells;
+    DELETE FROM geo_s2_points;
+  `)
+
+  let processedPoints = 0
+  await store.forEachGeoPointBatch(10_000, async (batch, processed) => {
+    const rows = batch.map((point) => [
+      point.mediaId,
+      s2CellIdHexForLatLon(point.lat, point.lon),
+      point.timestamp ?? null,
+      point.kind ?? 'geo_point',
+      point.lat,
+      point.lon,
+    ])
+    execMultiRowInsert(
+      activeDb,
+      'geo_s2_points',
+      `
+      INSERT INTO geo_s2_points (
+        content_hash, cell_id, timestamp, kind, latitude, longitude
+      )
+      `,
+      rows,
+      S2_POINT_BIND_COLUMNS,
+      `
+      ON CONFLICT(content_hash) DO NOTHING
+      `,
+    )
+    processedPoints = processed
+    postProgress({
+      phase: 'building',
+      pointCount: processedPoints,
+      builtIndexes: 0,
+      totalIndexes: 1,
+      currentIndexId: S2_CELL_BTREE_ENGINE_ID,
+      currentIndexLabel: S2_CELL_BTREE_ENGINE_LABEL,
+      currentIndexProcessedPoints: processedPoints,
+    })
+    await yieldToEventLoop()
+  })
+  rebuildGeoS2Cells(activeDb)
+  return processedPoints
+}
+
+async function buildSqliteS2SearchIndex(
+  store: CatalogStore,
+  forceRebuild: boolean,
+  postProgress: (progress: GeoIndexBuildProgress) => void,
+): Promise<GeoIndexBuildSummary & { engineCount: number }> {
+  const startedAt = performance.now()
+  const totalIndexes = 1
+  postProgress({
+    phase: 'loading',
+    pointCount: 0,
+    builtIndexes: 0,
+    totalIndexes,
+    currentIndexId: S2_CELL_BTREE_ENGINE_ID,
+    currentIndexLabel: S2_CELL_BTREE_ENGINE_LABEL,
+  })
+
+  const catalogGeoCount = await countSqliteGeoAssets()
+  const s2PointCount =
+    toNumber(requireDb().selectValue('SELECT COUNT(*) FROM geo_s2_points')) ?? 0
+  let pointCount = s2PointCount
+
+  if (forceRebuild || catalogGeoCount !== s2PointCount) {
+    pointCount = await rebuildSqliteS2IndexFromCatalog(store, postProgress)
+  }
+
+  preparedSearchIndex = {
+    storageMode: store.storageMode,
+    indexId: S2_CELL_BTREE_ENGINE_ID,
+    catalogEpoch: await store.catalogEpoch(),
+    cacheDirty: false,
+  }
+
+  postProgress({
+    phase: 'ready',
+    pointCount,
+    builtIndexes: totalIndexes,
+    totalIndexes,
+    currentIndexId: S2_CELL_BTREE_ENGINE_ID,
+    currentIndexLabel: S2_CELL_BTREE_ENGINE_LABEL,
+    currentIndexProcessedPoints: pointCount,
+    currentIndexTotalPoints: pointCount,
+  })
+
+  return {
+    pointCount,
+    buildTimeMs: performance.now() - startedAt,
+    engineCount: searchEngineCountForStore(store),
+  }
+}
+
 async function buildSearchIndexes(
   store: CatalogStore,
   indexId: string,
@@ -3696,6 +4543,9 @@ async function buildSearchIndexes(
 ): Promise<GeoIndexBuildSummary & { engineCount: number }> {
   const startedAt = performance.now()
   const totalIndexes = 1
+  if (indexId === S2_CELL_BTREE_ENGINE_ID) {
+    return buildSqliteS2SearchIndex(store, forceRebuild, postProgress)
+  }
   const diskIndex = isDiskSegmentedEngineId(indexId)
     ? diskSegmentedIndex(store, indexId)
     : undefined
@@ -3748,7 +4598,7 @@ async function buildSearchIndexes(
     return {
       pointCount: stats.pointCount,
       buildTimeMs: performance.now() - startedAt,
-      engineCount: geoIndexRegistry.indexes.length + 2,
+      engineCount: searchEngineCountForStore(store),
     }
   }
 
@@ -3776,7 +4626,7 @@ async function buildSearchIndexes(
       return {
         pointCount: stats.pointCount,
         buildTimeMs: performance.now() - startedAt,
-        engineCount: geoIndexRegistry.indexes.length + 2,
+        engineCount: searchEngineCountForStore(store),
       }
     }
   } else if (!forceRebuild && index.id === 'dynamic-z-order-cells') {
@@ -3802,7 +4652,7 @@ async function buildSearchIndexes(
       return {
         pointCount: restored.pointCount,
         buildTimeMs: performance.now() - startedAt,
-        engineCount: geoIndexRegistry.indexes.length + 2,
+        engineCount: searchEngineCountForStore(store),
       }
     }
   }
@@ -3858,7 +4708,7 @@ async function buildSearchIndexes(
     return {
       pointCount,
       buildTimeMs: performance.now() - startedAt,
-      engineCount: geoIndexRegistry.indexes.length + 2,
+      engineCount: searchEngineCountForStore(store),
     }
   }
 
@@ -3927,7 +4777,7 @@ async function buildSearchIndexes(
 
   return {
     ...summary,
-    engineCount: geoIndexRegistry.indexes.length + 2,
+    engineCount: searchEngineCountForStore(store),
   }
 }
 
@@ -3954,6 +4804,26 @@ async function getSearchIndexStats(store: CatalogStore): Promise<SearchIndexStat
     defaultSearchStats('sqlite-timestamp', 'SQLite timestamp B-tree'),
     defaultSearchStats('sqlite-bbox-time', 'SQLite bbox/time B-tree'),
   ]
+  const s2Stats =
+    store.storageMode === 'sqlite'
+      ? [
+          {
+            ...defaultSearchStats(
+              S2_CELL_BTREE_ENGINE_ID,
+              S2_CELL_BTREE_ENGINE_LABEL,
+            ),
+            pointCount:
+              toNumber(
+                requireDb().selectValue('SELECT COUNT(*) FROM geo_s2_points'),
+              ) ?? 0,
+            cellCount:
+              toNumber(
+                requireDb().selectValue('SELECT COUNT(*) FROM geo_s2_cells'),
+              ) ?? 0,
+            indexStorage: 'disk' as const,
+          },
+        ]
+      : []
   const geoStats = await Promise.all(
     geoIndexRegistry.indexes.map(async (index) => {
       const activeIndex = activeDiskSegmentedIndex(store, index.id)
@@ -3967,7 +4837,7 @@ async function getSearchIndexStats(store: CatalogStore): Promise<SearchIndexStat
       }
     }),
   )
-  return [...sqlStats, ...geoStats]
+  return [...sqlStats, ...s2Stats, ...geoStats]
 }
 
 async function validateGeoIndex(store: CatalogStore, payload: {
@@ -4006,20 +4876,8 @@ async function removeSources(sourceIds: string[]): Promise<void> {
   await ensureDb()
   if (sourceIds.length === 0) return
 
-  const placeholders = sourceIds.map(() => '?').join(', ')
   const activeDb = requireDb()
-  activeDb.exec({
-    sql: `DELETE FROM media_locations WHERE source_id IN (${placeholders})`,
-    bind: sourceIds,
-  })
-  activeDb.exec(`
-    DELETE FROM media_assets
-    WHERE NOT EXISTS (
-      SELECT 1 FROM media_locations l
-      WHERE l.content_hash = media_assets.content_hash
-    )
-  `)
-  bumpSqliteCatalogEpochInDb(activeDb)
+  removeSourcesFromSqlite(activeDb, sourceIds)
 }
 
 async function countMedia(): Promise<number> {
@@ -4042,6 +4900,8 @@ async function clearCatalog(): Promise<void> {
   requireDb().exec(`
     DELETE FROM media_locations;
     DELETE FROM media_assets;
+    DELETE FROM geo_s2_points;
+    DELETE FROM geo_s2_cells;
   `)
   bumpSqliteCatalogEpochInDb(requireDb())
   invalidatePreparedSearchIndex()

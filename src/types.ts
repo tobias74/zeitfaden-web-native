@@ -159,6 +159,8 @@ export type GeoIndexStats = {
   maxLeafSize?: number
   pendingPointCount?: number
   needsOptimization?: boolean
+  cellCount?: number
+  sqliteQueryCount?: number
 }
 
 export type SearchStorageMode = 'sqlite' | 'indexeddb' | 'native'

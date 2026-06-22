@@ -10,6 +10,7 @@ const defaults: SearchUrlDefaults = {
 
 const allowedIndexes = [
   'brute-force',
+  's2-cell-btree',
   'dynamic-z-order-cells',
   'segmented-kd-tree',
   'segmented-ball-tree',
@@ -134,5 +135,16 @@ describe('search URL state', () => {
 
     expect(state.kindFilter).toBe('media')
     expect(buildSearchUrlParams(state, defaults).get('kind')).toBe('media')
+  })
+
+  it('parses the legacy S2 engine URL parameter', () => {
+    const state = parseSearchUrlState(
+      '?sort=distance&engine=s2-cell-btree',
+      defaults,
+      allowedIndexes,
+      allowedPageSizes,
+    )
+
+    expect(state.selectedIndexId).toBe('s2-cell-btree')
   })
 })
