@@ -2,7 +2,7 @@ import { cleanup, render, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useGeoIndexes } from './useGeoIndexes'
 import type { CatalogBackend, CatalogInfo } from '../platform/types'
-import type { GeoIndexStats } from '../types'
+import type { SearchIndexStats } from '../types'
 
 const catalogInfo: CatalogInfo = {
   storageMode: 'opfs',
@@ -10,8 +10,11 @@ const catalogInfo: CatalogInfo = {
   filename: ':memory:',
 }
 
-const stats: GeoIndexStats = {
+const stats: SearchIndexStats = {
   engineId: 'brute-force',
+  engineLabel: 'Brute force oracle',
+  exact: true,
+  persistent: true,
   pointCount: 0,
   distanceComputations: 0,
   nodesVisited: 0,
@@ -26,6 +29,20 @@ function createCatalog(): CatalogBackend {
     init: vi.fn(),
     upsertSource: vi.fn(),
     upsertMedia: vi.fn(),
+    searchMedia: vi.fn(),
+    buildSearchIndexes: vi.fn(async () => ({
+      pointCount: 123,
+      buildTimeMs: 1,
+      engineCount: 4,
+    })),
+    getSearchIndexStats: vi.fn(async () => [
+      stats,
+      {
+        ...stats,
+        engineId: 'dynamic-z-order-cells',
+        engineLabel: 'Dynamic Z-order cells',
+      },
+    ]),
     listMedia: vi.fn(),
     getMediaByIds: vi.fn(),
     getGeoPoints: vi.fn(),
@@ -37,7 +54,7 @@ function createCatalog(): CatalogBackend {
       buildTimeMs: 1,
     })),
     searchGeoIndex: vi.fn(),
-    getGeoIndexStats: vi.fn(async () => stats),
+    getGeoIndexStats: vi.fn(),
     validateGeoIndex: vi.fn(),
     clear: vi.fn(),
     dispose: vi.fn(),
@@ -84,7 +101,7 @@ describe('useGeoIndexes', () => {
     )
 
     await waitFor(() => {
-      expect(catalog.buildGeoIndexes).toHaveBeenCalledTimes(1)
+      expect(catalog.buildSearchIndexes).toHaveBeenCalledTimes(1)
     })
 
     rerender(
@@ -97,11 +114,9 @@ describe('useGeoIndexes', () => {
     )
 
     await waitFor(() => {
-      expect(catalog.getGeoIndexStats).toHaveBeenCalledWith(
-        'dynamic-z-order-cells',
-      )
+      expect(catalog.getSearchIndexStats).toHaveBeenCalled()
     })
-    expect(catalog.buildGeoIndexes).toHaveBeenCalledTimes(1)
+    expect(catalog.buildSearchIndexes).toHaveBeenCalledTimes(1)
 
     rerender(
       <Harness
@@ -113,7 +128,7 @@ describe('useGeoIndexes', () => {
     )
 
     await waitFor(() => {
-      expect(catalog.buildGeoIndexes).toHaveBeenCalledTimes(2)
+      expect(catalog.buildSearchIndexes).toHaveBeenCalledTimes(2)
     })
   })
 })

@@ -28,15 +28,11 @@ import {
   useState,
 } from 'react'
 import './App.css'
-import {
-  useCatalogMapItems,
-  useCatalogPage,
-} from './app/useCatalogPage'
 import { useCatalogLifecycle } from './app/useCatalogLifecycle'
-import { useDistanceResults } from './app/useDistanceResults'
 import { useGeoIndexes } from './app/useGeoIndexes'
 import { useImports } from './app/useImports'
 import { useMediaViewer } from './app/useMediaViewer'
+import { useSearchResults } from './app/useSearchResults'
 import {
   type QueryPoint,
   type SearchSortMode,
@@ -59,7 +55,6 @@ import {
   translate,
 } from './i18n'
 import { formatDateTime } from './lib/time'
-import { GeoIndexRegistry } from './geo/registry'
 import { createPlatformBackend } from './platform'
 import type {
   GeoIndexBuildProgress,
@@ -74,9 +69,10 @@ import {
 import type {
   EnrichedSearchResult,
   GeoBounds,
-  GeoIndexStats,
   KindFilter,
   MediaItem,
+  SearchIndexStats,
+  SearchSpec,
 } from './types'
 
 type ActivePage = 'app' | 'imprint' | 'privacy'
@@ -98,6 +94,9 @@ const RESULT_PAGE_SIZE_KEY = 'geo-media-index-lab:result-page-size'
 const RESULT_PAGE_SIZE_OPTIONS = [50, 100, 250, 500] as const
 const DEFAULT_RESULT_PAGE_SIZE = 100
 const MAP_POINT_LIMIT = 500
+const DEFAULT_DISTANCE_ENGINE_ID = 'dynamic-z-order-cells'
+const DISTANCE_ENGINE_IDS = ['brute-force', 'dynamic-z-order-cells'] as const
+const SEARCH_ENGINE_COUNT = 4
 const DEFAULT_QUERY_POINT = {
   lat: 47.3769,
   lon: 8.5417,
@@ -317,14 +316,6 @@ function formatGeo(item: MediaItem): string | undefined {
   return `${item.latitude.toFixed(5)}, ${item.longitude.toFixed(5)}`
 }
 
-function mediaItemsToResults(items: MediaItem[]): EnrichedSearchResult[] {
-  return items.map((item) => ({
-    item,
-    mediaId: item.id,
-    distanceMeters: NaN,
-  }))
-}
-
 function resultSkeletonCount(
   displayMode: ResultDisplayMode,
   pageSize: number,
@@ -387,7 +378,6 @@ function App() {
     [webCatalogStorageMode],
   )
   const catalog = platform.catalog
-  const registry = useMemo(() => new GeoIndexRegistry(), [])
   const [language, setLanguage] = useState<Language>(() => storedLanguage())
   const [activePage, setActivePage] = useState<ActivePage>('app')
   const locale = languageLocale(language)
@@ -396,13 +386,9 @@ function App() {
       translate(language, key, values),
     [language],
   )
-  const allowedIndexIds = useMemo(
-    () => registry.indexes.map((index) => index.id),
-    [registry],
-  )
   const search = useSearchState({
-    allowedIndexIds,
-    defaultSelectedIndexId: registry.indexes[0]?.id ?? 'brute-force',
+    allowedIndexIds: DISTANCE_ENGINE_IDS,
+    defaultSelectedIndexId: DEFAULT_DISTANCE_ENGINE_ID,
     defaultQueryPoint: DEFAULT_QUERY_POINT,
     defaultResultPageSize: DEFAULT_RESULT_PAGE_SIZE,
     allowedPageSizes: RESULT_PAGE_SIZE_OPTIONS,
@@ -424,12 +410,9 @@ function App() {
     catalogSort,
     resultOffset,
     timeRange,
-    catalogQuery,
-    mapCatalogQuery,
     appHref,
   } = search.values
   const {
-    setSelectedIndexId,
     setQueryPoint,
     setStartDate,
     setEndDate,
@@ -518,7 +501,6 @@ function App() {
     onError: reportError,
     onInitFailed: recordCatalogInitFailure,
   })
-  const selectedIndex = registry.get(selectedIndexId)
   const {
     geoPointCount,
     geoIndexVersion,
@@ -530,54 +512,79 @@ function App() {
     catalogInfo,
     catalogRevision,
     selectedIndexId,
-    indexCount: registry.indexes.length,
-    onError: reportError,
-  })
-  const catalogPage = useCatalogPage({
-    catalog,
-    ready: catalogReady,
-    enabled: !distanceSortActive,
-    query: catalogQuery,
-    revision: catalogRevision,
-    onError: reportError,
-  })
-  const catalogMap = useCatalogMapItems({
-    catalog,
-    ready: catalogReady,
-    enabled: !distanceSortActive,
-    query: mapCatalogQuery,
-    revision: catalogRevision,
-    limit: MAP_POINT_LIMIT,
+    indexCount: SEARCH_ENGINE_COUNT,
     onError: reportError,
   })
   const [indexStatsOverride, setIndexStatsOverride] =
-    useState<GeoIndexStats>()
-  const distanceResults = useDistanceResults({
+    useState<SearchIndexStats>()
+  const searchOrder = useMemo<SearchSpec['order']>(() => {
+    if (distanceSortActive) {
+      return {
+        kind: 'distance',
+        point: queryPoint,
+        engineId:
+          selectedIndexId === DEFAULT_DISTANCE_ENGINE_ID
+            ? undefined
+            : selectedIndexId,
+      }
+    }
+
+    return {
+      kind: 'timestamp',
+      sort: catalogSort,
+    }
+  }, [
+    catalogSort,
+    distanceSortActive,
+    queryPoint,
+    selectedIndexId,
+  ])
+  const resultSearchSpec = useMemo<SearchSpec>(
+    () => ({
+      ...timeRange,
+      kind: kindFilter,
+      geoBounds,
+      order: searchOrder,
+      limit: resultPageSize,
+      offset: resultOffset,
+      purpose: 'results',
+    }),
+    [
+      geoBounds,
+      kindFilter,
+      resultOffset,
+      resultPageSize,
+      searchOrder,
+      timeRange,
+    ],
+  )
+  const mapSearchSpec = useMemo<SearchSpec>(
+    () => ({
+      ...timeRange,
+      kind: kindFilter,
+      hasGeo: true,
+      order: searchOrder,
+      limit: MAP_POINT_LIMIT,
+      offset: 0,
+      purpose: 'map',
+    }),
+    [kindFilter, searchOrder, timeRange],
+  )
+  const searchWindows = useSearchResults({
     catalog,
     ready: catalogReady,
-    enabled: distanceSortActive,
-    indexId: selectedIndex.id,
-    timeRange,
-    queryPoint,
-    kindFilter,
-    geoBounds,
-    resultOffset,
-    resultPageSize,
-    geoPointCount,
-    geoIndexVersion,
-    mapPointLimit: MAP_POINT_LIMIT,
+    pageSpec: resultSearchSpec,
+    mapSpec: mapSearchSpec,
+    revision: catalogRevision,
+    indexVersion: geoIndexVersion,
     onError: reportError,
     onStats: setIndexStatsOverride,
   })
-  const mediaItems = catalogPage.items
-  const mapItems = distanceSortActive ? distanceResults.mapItems : catalogMap.items
-  const mapPointLimitReached = distanceSortActive
-    ? distanceResults.mapLimitReached
-    : catalogMap.limitReached
-  const searchResults = distanceResults.results
-  const validation = distanceResults.validation
+  const mapItems = searchWindows.mapItems
+  const mapPointLimitReached = searchWindows.mapLimitReached
+  const validation = searchWindows.validation
   const effectiveIndexStats =
-    distanceSortActive && indexStatsOverride ? indexStatsOverride : indexStats
+    indexStatsOverride ?? searchWindows.resultMetrics ?? indexStats
   const handleImported = useCallback(() => {
     setResultPage(0)
     markCatalogChanged()
@@ -605,16 +612,8 @@ function App() {
     activeImportKind === 'geo' &&
     (platform.kind === 'tauri' || webCatalogStorageMode === 'sqlite')
   const visibleResults = distanceSortActive
-  const catalogPageResultItems = useMemo(
-    () => mediaItemsToResults(mediaItems),
-    [mediaItems],
-  )
-  const resultItems = distanceSortActive
-    ? searchResults
-    : catalogPageResultItems
-  const resultItemsLoading = distanceSortActive
-    ? distanceResults.loading
-    : catalogPage.loading
+  const resultItems = searchWindows.results
+  const resultItemsLoading = searchWindows.loading
   const skeletonCount = resultSkeletonCount(resultDisplayMode, resultPageSize)
   const visibleStart = resultItems.length === 0 ? 0 : resultOffset + 1
   const visibleEnd = resultOffset + resultItems.length
@@ -628,45 +627,19 @@ function App() {
       ? '0'
       : `${visibleStart.toLocaleString(locale)}-${visibleEnd.toLocaleString(locale)}`
   const canPageBackward = resultPage > 0
-  const canPageForward = distanceSortActive
-    ? resultItems.length === resultPageSize && visibleEnd < geoPointCount
-    : resultItems.length === resultPageSize
+  const canPageForward = searchWindows.pageLimitReached
   const loadViewerWindow = useCallback(
     async (windowOffset: number) => {
-      if (distanceSortActive) {
-        return (await distanceResults.loadWindow(windowOffset)).items
-      }
-      const pageItems = await catalog.listMedia({
-        ...timeRange,
-        kind: kindFilter,
-        geoBounds,
-        sort: catalogSort,
-        limit: resultPageSize,
-        offset: windowOffset,
-      })
-      return mediaItemsToResults(pageItems)
+      return (await searchWindows.loadWindow(windowOffset)).items
     },
-    [
-      catalog,
-      catalogSort,
-      distanceResults,
-      distanceSortActive,
-      geoBounds,
-      kindFilter,
-      resultPageSize,
-      timeRange,
-    ],
+    [searchWindows],
   )
   const handleViewerWindowLoaded = useCallback(
     (windowOffset: number, windowItems: EnrichedSearchResult[]) => {
       setResultPage(windowOffset / resultPageSize)
-      if (distanceSortActive) {
-        distanceResults.setResults(windowItems)
-        return
-      }
-      catalogPage.setItems(windowItems.map((result) => result.item))
+      searchWindows.setResults(windowItems)
     },
-    [catalogPage, distanceResults, distanceSortActive, resultPageSize, setResultPage],
+    [resultPageSize, searchWindows, setResultPage],
   )
   const {
     viewerSession,
@@ -679,7 +652,7 @@ function App() {
     resultOffset,
     resultPageSize,
     currentItems: resultItems,
-    totalItems: distanceSortActive ? geoPointCount : undefined,
+    totalItems: undefined,
     loadWindow: loadViewerWindow,
     onWindowLoaded: handleViewerWindowLoaded,
     onError: reportError,
@@ -704,10 +677,9 @@ function App() {
       window.localStorage.setItem(WEB_CATALOG_STORAGE_MODE_KEY, value)
       resetCatalogState()
       resetIndexState()
-      catalogPage.setItems([])
-      catalogMap.clear()
-      distanceResults.setResults([])
-      distanceResults.setValidation(undefined)
+      searchWindows.setResults([])
+      searchWindows.clearMap()
+      searchWindows.setValidation(undefined)
       setIndexStatsOverride(undefined)
       closeViewer()
       setError(undefined)
@@ -715,12 +687,10 @@ function App() {
     },
     [
       busy,
-      catalogMap,
-      catalogPage,
       closeViewer,
-      distanceResults,
       resetCatalogState,
       resetIndexState,
+      searchWindows,
       webCatalogStorageMode,
     ],
   )
@@ -772,10 +742,9 @@ function App() {
       await catalog.clear()
       setResultPage(0)
       clearGeoBounds()
-      catalogPage.setItems([])
-      catalogMap.clear()
-      distanceResults.setResults([])
-      distanceResults.setValidation(undefined)
+      searchWindows.setResults([])
+      searchWindows.clearMap()
+      searchWindows.setValidation(undefined)
       setIndexStatsOverride(undefined)
       closeViewer()
       markCatalogChanged()
@@ -787,13 +756,11 @@ function App() {
     }
   }, [
     catalog,
-    catalogMap,
-    catalogPage,
     clearGeoBounds,
     closeViewer,
-    distanceResults,
     markCatalogChanged,
     recordActivity,
+    searchWindows,
     setResultPage,
   ])
 
@@ -811,11 +778,11 @@ function App() {
   const setSortMode = useCallback((nextSort: SearchSortMode) => {
     setSort(nextSort)
     if (nextSort !== 'distance') {
-      distanceResults.setResults([])
-      distanceResults.setValidation(undefined)
+      searchWindows.setResults([])
+      searchWindows.setValidation(undefined)
       setIndexStatsOverride(undefined)
     }
-  }, [distanceResults, setSort])
+  }, [searchWindows, setSort])
 
   const setMapQueryPoint = useCallback((point: QueryPoint) => {
     setQueryPoint(point)
@@ -831,11 +798,11 @@ function App() {
 
   const clearSearch = useCallback(() => {
     clearSearchState()
-    distanceResults.setResults([])
-    distanceResults.setValidation(undefined)
+    searchWindows.setResults([])
+    searchWindows.setValidation(undefined)
     setIndexStatsOverride(undefined)
     closeViewer()
-  }, [clearSearchState, closeViewer, distanceResults])
+  }, [clearSearchState, closeViewer, searchWindows])
 
   const setDisplayMode = useCallback((mode: ResultDisplayMode) => {
     setResultDisplayMode(mode)
@@ -977,7 +944,6 @@ function App() {
     [mapHeight],
   )
 
-  const mapResultItems = useMemo(() => mediaItemsToResults(mapItems), [mapItems])
   const privacyHtml = language === 'de' ? privacyDeHtml : privacyEnHtml
 
   if (activePage !== 'app') {
@@ -1296,7 +1262,7 @@ function App() {
             <MapView
               queryPoint={distanceSortActive ? queryPoint : undefined}
               geoItems={mapItems}
-              results={mapResultItems}
+              results={resultItems}
               geoBounds={geoBounds}
               boundsDrawing={boundsDrawing}
               label={t('searchMap')}
@@ -1414,25 +1380,6 @@ function App() {
                   </option>
                 </select>
               </label>
-              {distanceSortActive && (
-                <div className="distance-sort-controls">
-                  <label>
-                    {t('engine')}
-                    <select
-                      value={selectedIndexId}
-                      onChange={(event) =>
-                        setSelectedIndexId(event.target.value)
-                      }
-                    >
-                      {registry.indexes.map((index) => (
-                        <option key={index.id} value={index.id}>
-                          {index.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-              )}
             </section>
 
             <section className="panel metrics-panel">
@@ -1676,7 +1623,8 @@ function App() {
                       </p>
                     </>
                   )}
-                  {Number.isFinite(result.distanceMeters) && (
+                  {typeof result.distanceMeters === 'number' &&
+                    Number.isFinite(result.distanceMeters) && (
                     <strong>{formatDistance(result.distanceMeters)}</strong>
                   )}
                 </div>
@@ -1684,7 +1632,8 @@ function App() {
               {resultDisplayMode === 'images' && showResultMetadata && (
                 <div className="media-overlay">
                   <span>{result.item.displayName}</span>
-                  {Number.isFinite(result.distanceMeters) && (
+                  {typeof result.distanceMeters === 'number' &&
+                    Number.isFinite(result.distanceMeters) && (
                     <strong>{formatDistance(result.distanceMeters)}</strong>
                   )}
                 </div>
@@ -1701,7 +1650,8 @@ function App() {
                   </span>
                   <span>{formatDimensions(result.item) ?? 'n/a'}</span>
                   <span>{formatGeo(result.item) ?? t('metadataNoGps')}</span>
-                  {Number.isFinite(result.distanceMeters) ? (
+                  {typeof result.distanceMeters === 'number' &&
+                  Number.isFinite(result.distanceMeters) ? (
                     <strong>{formatDistance(result.distanceMeters)}</strong>
                   ) : (
                     <span>{t('metadataCatalog')}</span>

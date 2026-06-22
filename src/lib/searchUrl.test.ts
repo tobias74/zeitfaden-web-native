@@ -83,7 +83,7 @@ describe('search URL state', () => {
     )
   })
 
-  it('serializes distance point and engine only for distance searches', () => {
+  it('serializes the distance point but not the legacy engine parameter', () => {
     const state: SearchUrlState = {
       startDate: '',
       endDate: '',
@@ -96,7 +96,7 @@ describe('search URL state', () => {
     }
 
     expect(buildSearchUrlParams(state, defaults).toString()).toBe(
-      'sort=distance&engine=dynamic-z-order-cells&lat=48.1&lon=11.5',
+      'sort=distance&lat=48.1&lon=11.5',
     )
 
     expect(

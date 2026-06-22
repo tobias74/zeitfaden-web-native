@@ -4,17 +4,17 @@ use image::ImageFormat;
 use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader as XmlReader;
 use rusqlite::types::Value;
-use rusqlite::{params_from_iter, Connection, Row};
+use rusqlite::{params, params_from_iter, Connection, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, Window};
 use walkdir::WalkDir;
 
@@ -26,6 +26,9 @@ const ASSET_BIND_COLUMNS: usize = 9;
 const LOCATION_BIND_COLUMNS: usize = 7;
 const GEO_IMPORT_PREFIX_BYTES: usize = 512 * 1024;
 const PROGRESS_HEARTBEAT_MS: u128 = 1000;
+const CATALOG_EPOCH_KEY: &str = "catalogEpoch";
+const DYNAMIC_INDEX_MAGIC: &[u8; 8] = b"ZFDZIDX1";
+const DYNAMIC_INDEX_FORMAT_VERSION: u32 = 1;
 static IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
 static IMPORT_COMMIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -152,6 +155,97 @@ struct GeoIndexStats {
     candidates_inspected: i64,
     pruned_by_geo: i64,
     pruned_by_time: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchPoint {
+    lat: f64,
+    lon: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchOrder {
+    kind: String,
+    sort: Option<String>,
+    point: Option<SearchPoint>,
+    engine_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchSpec {
+    kind: Option<String>,
+    source_id: Option<String>,
+    has_geo: Option<bool>,
+    geo_bounds: Option<GeoBounds>,
+    order: SearchOrder,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    purpose: String,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchIndexStats {
+    engine_id: String,
+    engine_label: Option<String>,
+    exact: Option<bool>,
+    persistent: Option<bool>,
+    point_count: usize,
+    index_size_bytes: Option<usize>,
+    build_time_ms: Option<f64>,
+    insert_time_ms: Option<f64>,
+    delete_time_ms: Option<f64>,
+    last_query_time_ms: Option<f64>,
+    distance_computations: i64,
+    nodes_visited: i64,
+    pages_read: i64,
+    candidates_inspected: i64,
+    pruned_by_geo: i64,
+    pruned_by_time: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResultRow {
+    media_id: String,
+    distance_meters: Option<f64>,
+    item: MediaItem,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchPage {
+    items: Vec<SearchResultRow>,
+    result_metrics: SearchIndexStats,
+    engine_id: String,
+    engine_label: String,
+    limit_reached: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchIndexBuildSummary {
+    point_count: usize,
+    build_time_ms: f64,
+    engine_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DynamicIndexManifest {
+    engine_id: String,
+    engine_version: u32,
+    resolution: u32,
+    catalog_epoch: i64,
+    point_count: usize,
+    cell_count: usize,
+    created_at: i64,
+    data_checksum: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,6 +416,53 @@ fn empty_geo_index_stats(engine_id: &str, point_count: usize) -> GeoIndexStats {
         candidates_inspected: 0,
         pruned_by_geo: 0,
         pruned_by_time: 0,
+    }
+}
+
+fn empty_search_index_stats(engine_id: &str, engine_label: &str) -> SearchIndexStats {
+    SearchIndexStats {
+        engine_id: engine_id.to_string(),
+        engine_label: Some(engine_label.to_string()),
+        exact: Some(true),
+        persistent: Some(true),
+        point_count: 0,
+        index_size_bytes: None,
+        build_time_ms: None,
+        insert_time_ms: None,
+        delete_time_ms: None,
+        last_query_time_ms: None,
+        distance_computations: 0,
+        nodes_visited: 0,
+        pages_read: 0,
+        candidates_inspected: 0,
+        pruned_by_geo: 0,
+        pruned_by_time: 0,
+    }
+}
+
+fn search_stats_from_geo(
+    stats: GeoIndexStats,
+    engine_label: &str,
+    exact: bool,
+    persistent: bool,
+) -> SearchIndexStats {
+    SearchIndexStats {
+        engine_id: stats.engine_id,
+        engine_label: Some(engine_label.to_string()),
+        exact: Some(exact),
+        persistent: Some(persistent),
+        point_count: stats.point_count,
+        index_size_bytes: stats.index_size_bytes,
+        build_time_ms: stats.build_time_ms,
+        insert_time_ms: stats.insert_time_ms,
+        delete_time_ms: stats.delete_time_ms,
+        last_query_time_ms: stats.last_query_time_ms,
+        distance_computations: stats.distance_computations,
+        nodes_visited: stats.nodes_visited,
+        pages_read: stats.pages_read,
+        candidates_inspected: stats.candidates_inspected,
+        pruned_by_geo: stats.pruned_by_geo,
+        pruned_by_time: stats.pruned_by_time,
     }
 }
 
@@ -630,6 +771,207 @@ fn update_cell_time_range(cell: &mut NativeCell, timestamp: Option<i64>) {
     }
 }
 
+fn kind_to_byte(kind: Option<&str>) -> u8 {
+    match kind {
+        Some("image") => 1,
+        Some("video") => 2,
+        Some("geo_point") => 3,
+        _ => 0,
+    }
+}
+
+fn byte_to_kind(value: u8) -> Option<String> {
+    match value {
+        1 => Some("image".to_string()),
+        2 => Some("video".to_string()),
+        3 => Some("geo_point".to_string()),
+        _ => None,
+    }
+}
+
+fn write_u8(output: &mut Vec<u8>, value: u8) {
+    output.push(value);
+}
+
+fn write_u32(output: &mut Vec<u8>, value: u32) {
+    output.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_f64(output: &mut Vec<u8>, value: f64) {
+    output.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_optional_i64_as_f64(output: &mut Vec<u8>, value: Option<i64>) {
+    write_f64(output, value.map(|value| value as f64).unwrap_or(f64::NAN));
+}
+
+fn write_string(output: &mut Vec<u8>, value: &str) -> AppResult<()> {
+    let bytes = value.as_bytes();
+    let length = u32::try_from(bytes.len()).map_err(|error| error.to_string())?;
+    write_u32(output, length);
+    output.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn read_exact<'a>(input: &'a [u8], offset: &mut usize, length: usize) -> AppResult<&'a [u8]> {
+    if input.len().saturating_sub(*offset) < length {
+        return Err("Dynamic Z-order index data is truncated.".to_string());
+    }
+    let slice = &input[*offset..*offset + length];
+    *offset += length;
+    Ok(slice)
+}
+
+fn read_u8(input: &[u8], offset: &mut usize) -> AppResult<u8> {
+    Ok(read_exact(input, offset, 1)?[0])
+}
+
+fn read_u32(input: &[u8], offset: &mut usize) -> AppResult<u32> {
+    let bytes: [u8; 4] = read_exact(input, offset, 4)?
+        .try_into()
+        .map_err(|_| "Invalid u32 bytes.".to_string())?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_f64(input: &[u8], offset: &mut usize) -> AppResult<f64> {
+    let bytes: [u8; 8] = read_exact(input, offset, 8)?
+        .try_into()
+        .map_err(|_| "Invalid f64 bytes.".to_string())?;
+    Ok(f64::from_le_bytes(bytes))
+}
+
+fn read_optional_i64_from_f64(input: &[u8], offset: &mut usize) -> AppResult<Option<i64>> {
+    let value = read_f64(input, offset)?;
+    Ok((!value.is_nan()).then_some(value as i64))
+}
+
+fn read_string(input: &[u8], offset: &mut usize) -> AppResult<String> {
+    let length = read_u32(input, offset)? as usize;
+    let bytes = read_exact(input, offset, length)?;
+    String::from_utf8(bytes.to_vec()).map_err(|error| error.to_string())
+}
+
+fn encode_dynamic_index(index: &NativeDynamicZOrderIndex) -> AppResult<Vec<u8>> {
+    let mut output = Vec::new();
+    output.extend_from_slice(DYNAMIC_INDEX_MAGIC);
+    write_u32(&mut output, DYNAMIC_INDEX_FORMAT_VERSION);
+    write_u32(&mut output, DYNAMIC_Z_ORDER_RESOLUTION);
+    write_u32(&mut output, index.cells.len() as u32);
+    write_u32(&mut output, index.point_count as u32);
+
+    let mut cells = index.cells.iter().collect::<Vec<_>>();
+    cells.sort_by(|(a_key, a_cell), (b_key, b_cell)| {
+        a_cell.z.cmp(&b_cell.z).then_with(|| a_key.cmp(b_key))
+    });
+
+    for (key, cell) in cells {
+        write_string(&mut output, key)?;
+        write_u32(&mut output, cell.z);
+        write_f64(&mut output, cell.lat_min);
+        write_f64(&mut output, cell.lat_max);
+        write_optional_i64_as_f64(&mut output, cell.min_timestamp);
+        write_optional_i64_as_f64(&mut output, cell.max_timestamp);
+        write_u32(&mut output, cell.points.len() as u32);
+
+        let mut points = cell.points.clone();
+        points.sort_by(|a, b| a.media_id.cmp(&b.media_id));
+        for point in points {
+            write_string(&mut output, &point.media_id)?;
+            write_u8(&mut output, kind_to_byte(point.kind.as_deref()));
+            write_f64(&mut output, point.lat);
+            write_f64(&mut output, point.lon);
+            write_optional_i64_as_f64(&mut output, point.timestamp);
+        }
+    }
+
+    Ok(output)
+}
+
+fn decode_dynamic_index(input: &[u8]) -> AppResult<NativeDynamicZOrderIndex> {
+    let mut offset = 0_usize;
+    if read_exact(input, &mut offset, DYNAMIC_INDEX_MAGIC.len())? != DYNAMIC_INDEX_MAGIC {
+        return Err("Dynamic Z-order index data has an invalid header.".to_string());
+    }
+    let version = read_u32(input, &mut offset)?;
+    if version != DYNAMIC_INDEX_FORMAT_VERSION {
+        return Err("Dynamic Z-order index data version is unsupported.".to_string());
+    }
+    let resolution = read_u32(input, &mut offset)?;
+    if resolution != DYNAMIC_Z_ORDER_RESOLUTION {
+        return Err("Dynamic Z-order index resolution is incompatible.".to_string());
+    }
+    let cell_count = read_u32(input, &mut offset)? as usize;
+    let point_count = read_u32(input, &mut offset)? as usize;
+    let mut cells = HashMap::new();
+    let mut decoded_points = 0_usize;
+
+    for _ in 0..cell_count {
+        let key = read_string(input, &mut offset)?;
+        let z = read_u32(input, &mut offset)?;
+        let lat_min = read_f64(input, &mut offset)?;
+        let lat_max = read_f64(input, &mut offset)?;
+        let min_timestamp = read_optional_i64_from_f64(input, &mut offset)?;
+        let max_timestamp = read_optional_i64_from_f64(input, &mut offset)?;
+        let cell_point_count = read_u32(input, &mut offset)? as usize;
+        let mut points = Vec::with_capacity(cell_point_count);
+
+        for _ in 0..cell_point_count {
+            let media_id = read_string(input, &mut offset)?;
+            let kind = byte_to_kind(read_u8(input, &mut offset)?);
+            let lat = read_f64(input, &mut offset)?;
+            let lon = read_f64(input, &mut offset)?;
+            let timestamp = read_optional_i64_from_f64(input, &mut offset)?;
+            points.push(GeoIndexPoint {
+                media_id,
+                kind,
+                lat,
+                lon,
+                timestamp,
+            });
+        }
+
+        decoded_points += points.len();
+        cells.insert(
+            key,
+            NativeCell {
+                z,
+                lat_min,
+                lat_max,
+                min_timestamp,
+                max_timestamp,
+                points,
+            },
+        );
+    }
+
+    if offset != input.len() || decoded_points != point_count || cells.len() != cell_count {
+        return Err("Dynamic Z-order index data count mismatch.".to_string());
+    }
+
+    Ok(NativeDynamicZOrderIndex {
+        cells,
+        point_count,
+        last_stats: GeoIndexStats {
+            index_size_bytes: Some(point_count * 48 + cell_count * 96),
+            build_time_ms: Some(0.0),
+            ..empty_geo_index_stats("dynamic-z-order-cells", point_count)
+        },
+    })
+}
+
+fn checksum_hex(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
+}
+
+fn current_timestamp_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 fn cell_lower_bound_meters(cell: &NativeCell, query: &GeoSearchQuery) -> f64 {
     if query.lat < cell.lat_min {
         EARTH_RADIUS_METERS * to_radians(cell.lat_min - query.lat)
@@ -658,8 +1000,105 @@ fn app_cache_dir(app: &AppHandle) -> AppResult<PathBuf> {
     Ok(dir)
 }
 
+fn dynamic_index_dir(app: &AppHandle) -> AppResult<PathBuf> {
+    let dir = app_data_dir(app)?
+        .join("indexes")
+        .join("dynamic-z-order-cells")
+        .join("v1");
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    Ok(dir)
+}
+
+fn validate_dynamic_manifest(manifest: &DynamicIndexManifest, catalog_epoch: i64) -> AppResult<()> {
+    if manifest.engine_id != "dynamic-z-order-cells"
+        || manifest.engine_version != 1
+        || manifest.resolution != DYNAMIC_Z_ORDER_RESOLUTION
+        || manifest.catalog_epoch != catalog_epoch
+    {
+        return Err("Dynamic Z-order index manifest does not match catalog.".to_string());
+    }
+    Ok(())
+}
+
+fn load_persisted_dynamic_index(
+    app: &AppHandle,
+    catalog_epoch: i64,
+) -> AppResult<Option<(usize, usize)>> {
+    let dir = dynamic_index_dir(app)?;
+    let manifest_path = dir.join("manifest.json");
+    let data_path = dir.join("index.bin");
+    if !manifest_path.exists() || !data_path.exists() {
+        return Ok(None);
+    }
+
+    let manifest = match fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<DynamicIndexManifest>(&content).ok())
+    {
+        Some(manifest) => manifest,
+        None => return Ok(None),
+    };
+    if validate_dynamic_manifest(&manifest, catalog_epoch).is_err() {
+        return Ok(None);
+    }
+
+    let data = match fs::read(&data_path) {
+        Ok(data) => data,
+        Err(_) => return Ok(None),
+    };
+    if checksum_hex(&data) != manifest.data_checksum {
+        return Ok(None);
+    }
+
+    let index = match decode_dynamic_index(&data) {
+        Ok(index) => index,
+        Err(_) => return Ok(None),
+    };
+    if index.point_count != manifest.point_count || index.cells.len() != manifest.cell_count {
+        return Ok(None);
+    }
+
+    let point_count = index.point_count;
+    let cell_count = index.cells.len();
+    let mut registry = geo_index_registry()
+        .lock()
+        .map_err(|error| error.to_string())?;
+    registry.dynamic_z_order = index;
+    Ok(Some((point_count, cell_count)))
+}
+
+fn save_persisted_dynamic_index(app: &AppHandle, catalog_epoch: i64) -> AppResult<()> {
+    let dir = dynamic_index_dir(app)?;
+    let registry = geo_index_registry()
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let data = encode_dynamic_index(&registry.dynamic_z_order)?;
+    let manifest = DynamicIndexManifest {
+        engine_id: "dynamic-z-order-cells".to_string(),
+        engine_version: 1,
+        resolution: DYNAMIC_Z_ORDER_RESOLUTION,
+        catalog_epoch,
+        point_count: registry.dynamic_z_order.point_count,
+        cell_count: registry.dynamic_z_order.cells.len(),
+        created_at: current_timestamp_millis(),
+        data_checksum: checksum_hex(&data),
+    };
+    drop(registry);
+
+    let mut data_file = File::create(dir.join("index.bin")).map_err(|error| error.to_string())?;
+    data_file
+        .write_all(&data)
+        .map_err(|error| error.to_string())?;
+    fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn catalog_path(app: &AppHandle) -> AppResult<PathBuf> {
-    Ok(app_data_dir(app)?.join("catalog-v7.sqlite3"))
+    Ok(app_data_dir(app)?.join("catalog-v9.sqlite3"))
 }
 
 fn connect(app: &AppHandle) -> AppResult<Connection> {
@@ -694,11 +1133,49 @@ fn ensure_schema(conn: &Connection) -> AppResult<()> {
           point_index INTEGER
         );
 
+        CREATE TABLE IF NOT EXISTS catalog_metadata (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_media_locations_content_hash
           ON media_locations(content_hash);
+
+        CREATE INDEX IF NOT EXISTS idx_assets_timestamp_hash
+          ON media_assets(timestamp, content_hash);
+        CREATE INDEX IF NOT EXISTS idx_assets_kind_timestamp_hash
+          ON media_assets(kind, timestamp, content_hash);
+        CREATE INDEX IF NOT EXISTS idx_assets_lat_lon_timestamp_hash
+          ON media_assets(latitude, longitude, timestamp, content_hash);
         ",
     )
     .map_err(|error| error.to_string())
+}
+
+fn catalog_epoch(conn: &Connection) -> AppResult<i64> {
+    let mut stmt = conn
+        .prepare("SELECT value FROM catalog_metadata WHERE key = ?")
+        .map_err(|error| error.to_string())?;
+    let result = stmt.query_row([CATALOG_EPOCH_KEY], |row| row.get::<_, String>(0));
+    match result {
+        Ok(value) => Ok(value.parse::<i64>().unwrap_or(0)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn bump_catalog_epoch(conn: &Connection) -> AppResult<i64> {
+    let next_epoch = catalog_epoch(conn)? + 1;
+    conn.execute(
+        "
+        INSERT INTO catalog_metadata (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        ",
+        params![CATALOG_EPOCH_KEY, next_epoch.to_string()],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(next_epoch)
 }
 
 fn sha256_string(value: &str) -> String {
@@ -1835,6 +2312,10 @@ fn location_rows(item: &MediaItem) -> Vec<Vec<Value>> {
 }
 
 fn upsert_media_rows(conn: &mut Connection, items: &[MediaItem]) -> AppResult<usize> {
+    if items.is_empty() {
+        return Ok(0);
+    }
+
     let asset_rows = items.iter().map(asset_row).collect::<Vec<_>>();
     exec_multi_row_upsert(
         conn,
@@ -1866,6 +2347,7 @@ fn upsert_media_rows(conn: &mut Connection, items: &[MediaItem]) -> AppResult<us
         &location_rows,
         LOCATION_BIND_COLUMNS,
     )?;
+    bump_catalog_epoch(conn)?;
     Ok(items.len())
 }
 
@@ -1969,6 +2451,134 @@ fn list_media(app: AppHandle, query: CatalogQuery) -> AppResult<Vec<MediaItem>> 
     }
 
     attach_locations(&conn, items, query.source_id.as_deref())
+}
+
+fn sql_search_engine(spec: &SearchSpec) -> (&'static str, &'static str) {
+    if spec.geo_bounds.is_some() {
+        ("sqlite-bbox-time", "SQLite bbox/time B-tree")
+    } else {
+        ("sqlite-timestamp", "SQLite timestamp B-tree")
+    }
+}
+
+fn search_spec_to_catalog_query(spec: &SearchSpec, limit: i64) -> CatalogQuery {
+    CatalogQuery {
+        kind: spec.kind.clone(),
+        source_id: spec.source_id.clone(),
+        has_geo: spec.has_geo,
+        geo_bounds: spec.geo_bounds.clone(),
+        sort: spec
+            .order
+            .sort
+            .clone()
+            .unwrap_or_else(|| "timestamp_desc".to_string()),
+        limit: Some(limit),
+        offset: spec.offset,
+        start_time: spec.start_time,
+        end_time: spec.end_time,
+    }
+}
+
+fn media_items_to_search_rows(items: Vec<MediaItem>) -> Vec<SearchResultRow> {
+    items
+        .into_iter()
+        .map(|item| SearchResultRow {
+            media_id: item.id.clone(),
+            distance_meters: None,
+            item,
+        })
+        .collect()
+}
+
+fn enriched_distance_rows(
+    items: Vec<MediaItem>,
+    results: Vec<GeoSearchResult>,
+) -> Vec<SearchResultRow> {
+    let by_id = items
+        .into_iter()
+        .map(|item| (item.id.clone(), item))
+        .collect::<HashMap<_, _>>();
+
+    results
+        .into_iter()
+        .filter_map(|result| {
+            by_id
+                .get(&result.media_id)
+                .cloned()
+                .map(|item| SearchResultRow {
+                    media_id: result.media_id,
+                    distance_meters: Some(result.distance_meters),
+                    item,
+                })
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
+    let limit = spec.limit.unwrap_or(500).clamp(1, 10_000);
+
+    if spec.order.kind == "distance" {
+        let point = spec
+            .order
+            .point
+            .as_ref()
+            .ok_or_else(|| "Distance search requires a query point.".to_string())?;
+        let engine_id = spec
+            .order
+            .engine_id
+            .clone()
+            .unwrap_or_else(|| "dynamic-z-order-cells".to_string());
+        let query = GeoSearchQuery {
+            lat: point.lat,
+            lon: point.lon,
+            k: limit,
+            offset: spec.offset,
+            kind: spec.kind.clone(),
+            geo_bounds: spec.geo_bounds.clone(),
+            start_time: spec.start_time,
+            end_time: spec.end_time,
+        };
+        let results = search_geo_index(engine_id.clone(), query)?;
+        let ids = results
+            .iter()
+            .map(|result| result.media_id.clone())
+            .collect::<Vec<_>>();
+        let items = get_media_by_ids(app, ids)?;
+        let geo_stats = get_geo_index_stats(engine_id.clone())?;
+        let (engine_label, exact, persistent) = if engine_id == "brute-force" {
+            ("Brute force oracle", true, false)
+        } else {
+            ("Dynamic Z-order cells", true, true)
+        };
+        let result_metrics = search_stats_from_geo(geo_stats, engine_label, exact, persistent);
+        let offset = spec.offset.unwrap_or(0).max(0);
+        let limit_reached = (offset + limit) < result_metrics.point_count as i64;
+
+        return Ok(SearchPage {
+            items: enriched_distance_rows(items, results),
+            result_metrics,
+            engine_id,
+            engine_label: engine_label.to_string(),
+            limit_reached: Some(limit_reached),
+        });
+    }
+
+    let (engine_id, engine_label) = sql_search_engine(&spec);
+    let rows = list_media(
+        app,
+        search_spec_to_catalog_query(&spec, limit.saturating_add(1)),
+    )?;
+    let limit_reached = rows.len() > limit as usize;
+    let items = rows.into_iter().take(limit as usize).collect::<Vec<_>>();
+
+    Ok(SearchPage {
+        items: media_items_to_search_rows(items),
+        result_metrics: empty_search_index_stats(engine_id, engine_label),
+        engine_id: engine_id.to_string(),
+        engine_label: engine_label.to_string(),
+        limit_reached: Some(limit_reached),
+    })
 }
 
 #[tauri::command]
@@ -2147,6 +2757,118 @@ fn build_geo_indexes(app: AppHandle, window: Window) -> AppResult<GeoIndexBuildS
 }
 
 #[tauri::command]
+fn build_search_indexes(app: AppHandle, window: Window) -> AppResult<SearchIndexBuildSummary> {
+    let started = Instant::now();
+    let total_indexes = 1_usize;
+    emit_geo_index_progress(
+        &window,
+        GeoIndexBuildProgress {
+            phase: "loading".to_string(),
+            point_count: 0,
+            built_indexes: 0,
+            total_indexes,
+            current_index_id: Some("dynamic-z-order-cells".to_string()),
+            current_index_label: Some("Dynamic Z-order cells".to_string()),
+            current_index_processed_points: None,
+            current_index_total_points: None,
+        },
+    );
+
+    let conn = connect(&app)?;
+    let epoch = catalog_epoch(&conn)?;
+    if let Some((point_count, _cell_count)) = load_persisted_dynamic_index(&app, epoch)? {
+        emit_geo_index_progress(
+            &window,
+            GeoIndexBuildProgress {
+                phase: "ready".to_string(),
+                point_count,
+                built_indexes: total_indexes,
+                total_indexes,
+                current_index_id: Some("dynamic-z-order-cells".to_string()),
+                current_index_label: Some("Dynamic Z-order cells".to_string()),
+                current_index_processed_points: Some(point_count),
+                current_index_total_points: Some(point_count),
+            },
+        );
+        return Ok(SearchIndexBuildSummary {
+            point_count,
+            build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
+            engine_count: 4,
+        });
+    }
+
+    let points = get_geo_points(
+        app.clone(),
+        TimeRange {
+            start_time: None,
+            end_time: None,
+        },
+    )?;
+    emit_geo_index_progress(
+        &window,
+        GeoIndexBuildProgress {
+            phase: "building".to_string(),
+            point_count: points.len(),
+            built_indexes: 0,
+            total_indexes,
+            current_index_id: Some("dynamic-z-order-cells".to_string()),
+            current_index_label: Some("Dynamic Z-order cells".to_string()),
+            current_index_processed_points: Some(0),
+            current_index_total_points: Some(points.len()),
+        },
+    );
+
+    {
+        let mut registry = geo_index_registry()
+            .lock()
+            .map_err(|error| error.to_string())?;
+        registry
+            .dynamic_z_order
+            .build(&points, |processed_points| {
+                emit_geo_index_progress(
+                    &window,
+                    GeoIndexBuildProgress {
+                        phase: "building".to_string(),
+                        point_count: points.len(),
+                        built_indexes: 0,
+                        total_indexes,
+                        current_index_id: Some("dynamic-z-order-cells".to_string()),
+                        current_index_label: Some("Dynamic Z-order cells".to_string()),
+                        current_index_processed_points: Some(processed_points),
+                        current_index_total_points: Some(points.len()),
+                    },
+                );
+                Ok(())
+            })?;
+    }
+
+    let _ = save_persisted_dynamic_index(&app, epoch);
+    let summary = GeoIndexBuildSummary {
+        point_count: points.len(),
+        build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
+    };
+    emit_geo_index_progress(
+        &window,
+        GeoIndexBuildProgress {
+            phase: "ready".to_string(),
+            point_count: points.len(),
+            built_indexes: total_indexes,
+            total_indexes,
+            current_index_id: Some("dynamic-z-order-cells".to_string()),
+            current_index_label: Some("Dynamic Z-order cells".to_string()),
+            current_index_processed_points: Some(points.len()),
+            current_index_total_points: Some(points.len()),
+        },
+    );
+
+    Ok(SearchIndexBuildSummary {
+        point_count: summary.point_count,
+        build_time_ms: summary.build_time_ms,
+        engine_count: 4,
+    })
+}
+
+#[tauri::command]
 fn search_geo_index(index_id: String, query: GeoSearchQuery) -> AppResult<Vec<GeoSearchResult>> {
     let mut registry = geo_index_registry()
         .lock()
@@ -2169,6 +2891,29 @@ fn get_geo_index_stats(index_id: String) -> AppResult<GeoIndexStats> {
     } else {
         registry.brute_force.last_stats.clone()
     })
+}
+
+#[tauri::command]
+fn get_search_index_stats() -> AppResult<Vec<SearchIndexStats>> {
+    let registry = geo_index_registry()
+        .lock()
+        .map_err(|error| error.to_string())?;
+    Ok(vec![
+        empty_search_index_stats("sqlite-timestamp", "SQLite timestamp B-tree"),
+        empty_search_index_stats("sqlite-bbox-time", "SQLite bbox/time B-tree"),
+        search_stats_from_geo(
+            registry.brute_force.last_stats.clone(),
+            "Brute force oracle",
+            true,
+            false,
+        ),
+        search_stats_from_geo(
+            registry.dynamic_z_order.last_stats.clone(),
+            "Dynamic Z-order cells",
+            true,
+            true,
+        ),
+    ])
 }
 
 #[tauri::command]
@@ -2264,6 +3009,7 @@ fn remove_sources(app: AppHandle, source_ids: Vec<String>) -> AppResult<()> {
         ",
     )
     .map_err(|error| error.to_string())?;
+    bump_catalog_epoch(&conn)?;
     Ok(())
 }
 
@@ -2294,7 +3040,9 @@ fn clear_catalog(app: AppHandle) -> AppResult<()> {
         DELETE FROM media_assets;
         ",
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    bump_catalog_epoch(&conn)?;
+    Ok(())
 }
 
 fn emit_progress(window: &Window, progress: ImportProgress) {
@@ -2949,11 +3697,14 @@ pub fn run() {
             upsert_source,
             upsert_media,
             list_media,
+            search_media,
             get_media_by_ids,
             get_geo_points,
             build_geo_indexes,
+            build_search_indexes,
             search_geo_index,
             get_geo_index_stats,
+            get_search_index_stats,
             validate_geo_index,
             list_sources,
             remove_sources,
@@ -3028,6 +3779,66 @@ mod tests {
             geo_point_content_hash(48.1234567894, 11.9876543214, 1_782_036_930_123),
             "geo_point:v1:48.123456789:11.987654321:1782036930123"
         );
+    }
+
+    fn test_geo_points() -> Vec<GeoIndexPoint> {
+        vec![
+            GeoIndexPoint {
+                media_id: "a".to_string(),
+                kind: Some("geo_point".to_string()),
+                lat: 48.1,
+                lon: 11.5,
+                timestamp: Some(1_000),
+            },
+            GeoIndexPoint {
+                media_id: "b".to_string(),
+                kind: Some("image".to_string()),
+                lat: 48.2,
+                lon: 11.6,
+                timestamp: Some(2_000),
+            },
+            GeoIndexPoint {
+                media_id: "c".to_string(),
+                kind: Some("video".to_string()),
+                lat: 49.0,
+                lon: 12.0,
+                timestamp: Some(3_000),
+            },
+        ]
+    }
+
+    #[test]
+    fn native_dynamic_index_binary_round_trips_search_results() {
+        let points = test_geo_points();
+        let query = GeoSearchQuery {
+            lat: 48.15,
+            lon: 11.55,
+            k: 10,
+            offset: None,
+            kind: None,
+            geo_bounds: None,
+            start_time: None,
+            end_time: None,
+        };
+        let mut fresh = NativeDynamicZOrderIndex::default();
+        fresh.build(&points, |_| Ok(())).unwrap();
+        let expected = fresh.search(&query);
+
+        let encoded = encode_dynamic_index(&fresh).unwrap();
+        let mut restored = decode_dynamic_index(&encoded).unwrap();
+
+        assert_eq!(restored.search(&query), expected);
+    }
+
+    #[test]
+    fn native_dynamic_index_rejects_corrupt_binary_data() {
+        let points = test_geo_points();
+        let mut index = NativeDynamicZOrderIndex::default();
+        index.build(&points, |_| Ok(())).unwrap();
+        let mut encoded = encode_dynamic_index(&index).unwrap();
+        encoded[0] = 0;
+
+        assert!(decode_dynamic_index(&encoded).is_err());
     }
 
     #[test]

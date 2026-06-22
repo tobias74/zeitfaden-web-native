@@ -7,6 +7,9 @@ import type {
   MediaItem,
   MediaLocation,
   MediaSource,
+  SearchIndexStats,
+  SearchPage,
+  SearchSpec,
   TimeRange,
   ValidationReport,
 } from '../types'
@@ -63,6 +66,10 @@ export type GeoIndexBuildSummary = {
   buildTimeMs: number
 }
 
+export type SearchIndexBuildSummary = GeoIndexBuildSummary & {
+  engineCount: number
+}
+
 export type PlatformCapabilities = {
   absolutePaths: boolean
   persistentFileHandles: boolean
@@ -74,6 +81,11 @@ export interface CatalogBackend {
   init(): Promise<CatalogInfo>
   upsertSource(source: MediaSource): Promise<void>
   upsertMedia(items: MediaItem[]): Promise<number>
+  searchMedia(spec: SearchSpec): Promise<SearchPage>
+  buildSearchIndexes(
+    onProgress?: (progress: GeoIndexBuildProgress) => void,
+  ): Promise<SearchIndexBuildSummary>
+  getSearchIndexStats(): Promise<SearchIndexStats[]>
   listMedia(query: CatalogQuery): Promise<MediaItem[]>
   getMediaByIds(ids: string[]): Promise<MediaItem[]>
   getGeoPoints(range?: TimeRange): Promise<GeoIndexPoint[]>

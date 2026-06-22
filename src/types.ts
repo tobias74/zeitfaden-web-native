@@ -80,6 +80,33 @@ export type GeoSearchResult = {
   distanceMeters: number
 }
 
+export type SearchPurpose = 'results' | 'map' | 'viewer'
+
+export type SearchOrder =
+  | {
+      kind: 'timestamp'
+      sort: CatalogSort
+    }
+  | {
+      kind: 'distance'
+      point: {
+        lat: number
+        lon: number
+      }
+      engineId?: string
+    }
+
+export type SearchSpec = TimeRange & {
+  kind?: KindFilter
+  sourceId?: string
+  hasGeo?: boolean
+  geoBounds?: GeoBounds
+  order: SearchOrder
+  limit?: number
+  offset?: number
+  purpose: SearchPurpose
+}
+
 export type GeoIndexBuildStep = {
   indexId: string
   indexLabel: string
@@ -116,6 +143,22 @@ export type GeoIndexStats = {
   prunedByTime: number
 }
 
+export type SearchIndexStats = GeoIndexStats & {
+  engineLabel?: string
+  exact?: boolean
+  persistent?: boolean
+}
+
+export type SearchResultMetrics = SearchIndexStats
+
+export type SearchPage = {
+  items: EnrichedSearchResult[]
+  resultMetrics: SearchResultMetrics
+  engineId: string
+  engineLabel: string
+  limitReached?: boolean
+}
+
 export type ValidationReport = {
   checked: boolean
   equal: boolean
@@ -136,6 +179,41 @@ export interface GeoTemporalIndex {
   validateAgainstBruteForce(query: GeoSearchQuery): Promise<ValidationReport>
 }
 
-export type EnrichedSearchResult = GeoSearchResult & {
+export type EnrichedSearchResult = {
+  mediaId: string
+  distanceMeters?: number
   item: MediaItem
+}
+
+export type SearchIndexCapabilities = {
+  exact: boolean
+  persistent: boolean
+  requiresBuild: boolean
+  supportsTimestampOrder: boolean
+  supportsDistanceOrder: boolean
+  supportsGeoBounds: boolean
+  supportsTimeRange: boolean
+  supportsKind: boolean
+  supportsSource: boolean
+}
+
+export type SearchIndexBuildSummary = {
+  pointCount: number
+  buildTimeMs: number
+  engineCount: number
+}
+
+export interface SearchIndexEngine {
+  id: string
+  label: string
+  capabilities: SearchIndexCapabilities
+
+  canHandle(spec: SearchSpec): boolean
+  build?(points: GeoIndexPoint[], options?: GeoIndexBuildOptions): Promise<void>
+  search(spec: SearchSpec): Promise<SearchPage>
+  stats(): Promise<SearchIndexStats>
+  validateAgainst?(
+    engine: SearchIndexEngine,
+    spec: SearchSpec,
+  ): Promise<ValidationReport>
 }

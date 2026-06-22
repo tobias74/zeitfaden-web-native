@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CatalogBackend, CatalogInfo, PlatformBackend } from './platform/types'
-import type { CatalogQuery, MediaItem } from './types'
+import type { MediaItem, SearchPage, SearchSpec } from './types'
 
 vi.mock('./components/MapView', () => ({
   MapView: () => <div data-testid="map-view" />,
@@ -17,7 +17,7 @@ vi.mock('./components/MediaViewer', () => ({
   MediaViewer: () => <div data-testid="media-viewer" />,
 }))
 
-let listMediaCalls: CatalogQuery[]
+let searchMediaCalls: SearchSpec[]
 
 function item(id: number): MediaItem {
   return {
@@ -45,8 +45,33 @@ function createItems(offset: number, limit: number): MediaItem[] {
   return Array.from({ length: limit }, (_, index) => item(offset + index))
 }
 
+function createSearchPage(items: MediaItem[], limitReached = false): SearchPage {
+  return {
+    items: items.map((mediaItem) => ({
+      mediaId: mediaItem.id,
+      item: mediaItem,
+    })),
+    resultMetrics: {
+      engineId: 'sqlite-timestamp',
+      engineLabel: 'SQLite timestamp B-tree',
+      exact: true,
+      persistent: true,
+      pointCount: 0,
+      distanceComputations: 0,
+      nodesVisited: 0,
+      pagesRead: 0,
+      candidatesInspected: 0,
+      prunedByGeo: 0,
+      prunedByTime: 0,
+    },
+    engineId: 'sqlite-timestamp',
+    engineLabel: 'SQLite timestamp B-tree',
+    limitReached,
+  }
+}
+
 function createPlatform(): PlatformBackend {
-  listMediaCalls = []
+  searchMediaCalls = []
   const catalog: CatalogBackend = {
     init: vi.fn(async (): Promise<CatalogInfo> => ({
       storageMode: 'opfs',
@@ -55,8 +80,34 @@ function createPlatform(): PlatformBackend {
     })),
     upsertSource: vi.fn(),
     upsertMedia: vi.fn(),
+    searchMedia: async (spec) => {
+      searchMediaCalls.push(spec)
+      return createSearchPage(
+        createItems(spec.offset ?? 0, spec.limit ?? 100),
+        spec.purpose === 'results',
+      )
+    },
+    buildSearchIndexes: vi.fn(async () => ({
+      pointCount: 0,
+      buildTimeMs: 0,
+      engineCount: 4,
+    })),
+    getSearchIndexStats: vi.fn(async () => [
+      {
+        engineId: 'sqlite-timestamp',
+        engineLabel: 'SQLite timestamp B-tree',
+        exact: true,
+        persistent: true,
+        pointCount: 0,
+        distanceComputations: 0,
+        nodesVisited: 0,
+        pagesRead: 0,
+        candidatesInspected: 0,
+        prunedByGeo: 0,
+        prunedByTime: 0,
+      },
+    ]),
     listMedia: async (query) => {
-      listMediaCalls.push(query)
       return createItems(query.offset ?? 0, query.limit ?? 100)
     },
     getMediaByIds: vi.fn(),
@@ -139,8 +190,11 @@ describe('App pagination', () => {
     await waitFor(() => {
       expect(window.location.search).toBe('?page=2')
       expect(
-        listMediaCalls.some(
-          (query) => query.limit === 100 && query.offset === 100,
+        searchMediaCalls.some(
+          (query) =>
+            query.purpose === 'results' &&
+            query.limit === 100 &&
+            query.offset === 100,
         ),
       ).toBe(true)
       expect(screen.getAllByText('item-100.jpg')).not.toHaveLength(0)

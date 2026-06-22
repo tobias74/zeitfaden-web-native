@@ -4,10 +4,13 @@ import type {
   CatalogInfo,
   GeoIndexBuildProgress,
 } from '../platform/types'
-import type { GeoIndexStats } from '../types'
+import type { SearchIndexStats } from '../types'
 
-const defaultStats: GeoIndexStats = {
+const defaultStats: SearchIndexStats = {
   engineId: 'none',
+  engineLabel: 'None',
+  exact: true,
+  persistent: true,
   pointCount: 0,
   distanceComputations: 0,
   nodesVisited: 0,
@@ -37,14 +40,14 @@ export function useGeoIndexes({
   geoPointCount: number
   geoIndexVersion: number
   geoIndexProgress: GeoIndexBuildProgress | undefined
-  indexStats: GeoIndexStats
+  indexStats: SearchIndexStats
   resetIndexState(): void
 } {
   const [geoPointCount, setGeoPointCount] = useState(0)
   const [geoIndexVersion, setGeoIndexVersion] = useState(0)
   const [geoIndexProgress, setGeoIndexProgress] =
     useState<GeoIndexBuildProgress>()
-  const [indexStats, setIndexStats] = useState<GeoIndexStats>(defaultStats)
+  const [indexStats, setIndexStats] = useState<SearchIndexStats>(defaultStats)
 
   const resetIndexState = useCallback(() => {
     setGeoPointCount(0)
@@ -69,7 +72,7 @@ export function useGeoIndexes({
       })
 
       catalog
-        .buildGeoIndexes((progress) => {
+        .buildSearchIndexes((progress) => {
           if (!cancelled) setGeoIndexProgress(progress)
         })
         .then(
@@ -99,9 +102,15 @@ export function useGeoIndexes({
     if (!catalogInfo) return
 
     let cancelled = false
-    catalog.getGeoIndexStats(selectedIndexId).then(
+    catalog.getSearchIndexStats().then(
       (nextStats) => {
-        if (!cancelled) setIndexStats(nextStats)
+        if (!cancelled) {
+          setIndexStats(
+            nextStats.find((stats) => stats.engineId === selectedIndexId) ??
+              nextStats[0] ??
+              defaultStats,
+          )
+        }
       },
       (caught) => {
         if (!cancelled) {

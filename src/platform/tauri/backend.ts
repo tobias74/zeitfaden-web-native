@@ -9,6 +9,9 @@ import type {
   MediaItem,
   MediaLocation,
   MediaSource,
+  SearchIndexStats,
+  SearchPage,
+  SearchSpec,
   TimeRange,
   ValidationReport,
 } from '../../types'
@@ -22,6 +25,7 @@ import type {
   ImportProgress,
   ImportSummary,
   PlatformBackend,
+  SearchIndexBuildSummary,
   ThumbnailBackend,
 } from '../types'
 
@@ -40,6 +44,10 @@ class TauriCatalogBackend implements CatalogBackend {
 
   listMedia(query: CatalogQuery): Promise<MediaItem[]> {
     return invoke('list_media', { query })
+  }
+
+  searchMedia(spec: SearchSpec): Promise<SearchPage> {
+    return invoke('search_media', { spec })
   }
 
   getMediaByIds(ids: string[]): Promise<MediaItem[]> {
@@ -65,6 +73,16 @@ class TauriCatalogBackend implements CatalogBackend {
   async buildGeoIndexes(
     onProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<GeoIndexBuildSummary> {
+    const summary = await this.buildSearchIndexes(onProgress)
+    return {
+      pointCount: summary.pointCount,
+      buildTimeMs: summary.buildTimeMs,
+    }
+  }
+
+  async buildSearchIndexes(
+    onProgress?: (progress: GeoIndexBuildProgress) => void,
+  ): Promise<SearchIndexBuildSummary> {
     const unlisten = await listen<GeoIndexBuildProgress>(
       'geo-index-progress',
       (event) => {
@@ -73,7 +91,7 @@ class TauriCatalogBackend implements CatalogBackend {
     )
 
     try {
-      return await invoke('build_geo_indexes')
+      return await invoke('build_search_indexes')
     } finally {
       unlisten()
     }
@@ -88,6 +106,10 @@ class TauriCatalogBackend implements CatalogBackend {
 
   getGeoIndexStats(indexId: string): Promise<GeoIndexStats> {
     return invoke('get_geo_index_stats', { indexId })
+  }
+
+  getSearchIndexStats(): Promise<SearchIndexStats[]> {
+    return invoke('get_search_index_stats')
   }
 
   validateGeoIndex(

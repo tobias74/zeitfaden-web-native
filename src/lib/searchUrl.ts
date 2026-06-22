@@ -186,12 +186,6 @@ export function buildSearchUrlParams(
   }
   if (
     state.sort === 'distance' &&
-    state.selectedIndexId !== defaults.selectedIndexId
-  ) {
-    params.set('engine', state.selectedIndexId)
-  }
-  if (
-    state.sort === 'distance' &&
     (!sameNumber(state.queryPoint.lat, defaults.queryPoint.lat) ||
       !sameNumber(state.queryPoint.lon, defaults.queryPoint.lon))
   ) {

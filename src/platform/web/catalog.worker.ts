@@ -1,5 +1,14 @@
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm'
 import * as exifr from 'exifr'
+import { DynamicZOrderGeoIndex } from '../../geo/dynamicZOrderGeoIndex'
+import {
+  createDynamicZOrderManifest,
+  decodeDynamicZOrderSnapshot,
+  encodeDynamicZOrderSnapshot,
+  sha256Hex,
+  validateDynamicZOrderManifest,
+  type DynamicZOrderIndexManifest,
+} from '../../geo/dynamicZOrderPersistence'
 import { GeoIndexRegistry } from '../../geo/registry'
 import {
   geoPointContentHash,
@@ -8,6 +17,7 @@ import {
 } from '../../lib/geoPoint'
 import { GoogleTakeoutLocationStreamParser } from '../../lib/googleTakeoutStream'
 import { detectMediaKind, pathDisplayName } from '../../lib/media'
+import { SearchIndexRegistry as SearchIndexEngineRegistry } from '../../search/registry'
 import type {
   CatalogQuery,
   GeoIndexPoint,
@@ -17,6 +27,10 @@ import type {
   MediaItem,
   MediaLocation,
   MediaSource,
+  SearchIndexEngine,
+  SearchIndexStats,
+  SearchPage,
+  SearchSpec,
   TimeRange,
   ValidationReport,
 } from '../../types'
@@ -74,6 +88,17 @@ type IdbAsset = {
 
 type IdbLocation = MediaLocation & {
   contentHash: string
+}
+
+type IdbMetadata = {
+  key: string
+  value: string
+}
+
+type IdbIndexCache = {
+  id: string
+  manifest: DynamicZOrderIndexManifest
+  data: ArrayBuffer
 }
 
 type SqliteUpsertChunkTiming = {
@@ -157,8 +182,19 @@ type CatalogStore = {
     options?: ImportTransactionOptions,
   ): Promise<T>
   listMedia(query: CatalogQuery): Promise<MediaItem[]>
+  searchMedia(spec: SearchSpec): Promise<SearchPage>
   getMediaByIds(ids: string[]): Promise<MediaItem[]>
   getGeoPoints(range: TimeRange): Promise<GeoIndexPoint[]>
+  catalogEpoch(): Promise<number>
+  bumpCatalogEpoch(): Promise<number>
+  loadPersistedDynamicIndex(
+    catalogEpoch: number,
+  ): Promise<{ pointCount: number; cellCount: number } | undefined>
+  savePersistedDynamicIndex(catalogEpoch: number): Promise<void>
+  buildSearchIndexes(
+    postProgress: (progress: GeoIndexBuildProgress) => void,
+  ): Promise<GeoIndexBuildSummary & { engineCount: number }>
+  getSearchIndexStats(): Promise<SearchIndexStats[]>
   listSources(): Promise<MediaSource[]>
   removeSources(sourceIds: string[]): Promise<void>
   countMedia(): Promise<number>
@@ -182,9 +218,11 @@ const PROGRESS_HEARTBEAT_MS = 1000
 const GEO_POINT_ITEM_BUILD_CHUNK_SIZE = 250
 const GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE = 250
 const GEO_IMPORT_INDEXEDDB_WRITE_BATCH_SIZE = 2000
-const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb-two-table-v1'
+const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb-persisted-index-v1'
 const INDEXED_DB_VERSION = 1
 const IMPORT_TRACE_ENABLED = false
+const CATALOG_EPOCH_KEY = 'catalogEpoch'
+const DYNAMIC_INDEX_CACHE_KEY = 'dynamic-z-order-cells:v1'
 
 const ctx = self as unknown as {
   postMessage: (message: unknown) => void
@@ -257,7 +295,7 @@ async function openSqliteDb(sqlite3: SqliteModule): Promise<SqliteDb> {
     )
   }
 
-  return new opfsDb('/catalog-v7.sqlite3') as unknown as SqliteDb
+  return new opfsDb('/catalog-v9.sqlite3') as unknown as SqliteDb
 }
 
 async function ensureDb(
@@ -293,8 +331,22 @@ async function ensureDb(
       point_index INTEGER
     );
 
+    CREATE TABLE IF NOT EXISTS catalog_metadata (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_media_locations_content_hash
       ON media_locations(content_hash);
+
+    CREATE INDEX IF NOT EXISTS idx_assets_timestamp_hash
+      ON media_assets(timestamp, content_hash);
+
+    CREATE INDEX IF NOT EXISTS idx_assets_kind_timestamp_hash
+      ON media_assets(kind, timestamp, content_hash);
+
+    CREATE INDEX IF NOT EXISTS idx_assets_lat_lon_timestamp_hash
+      ON media_assets(latitude, longitude, timestamp, content_hash);
   `)
 
   initResult = {
@@ -388,6 +440,18 @@ async function ensureIndexedDb(): Promise<InitResult> {
         })
         locations.createIndex('contentHash', 'contentHash')
       }
+
+      if (!database.objectStoreNames.contains('metadata')) {
+        database.createObjectStore('metadata', {
+          keyPath: 'key',
+        })
+      }
+
+      if (!database.objectStoreNames.contains('indexCache')) {
+        database.createObjectStore('indexCache', {
+          keyPath: 'id',
+        })
+      }
     }
 
     request.onsuccess = () => resolve(request.result)
@@ -416,6 +480,208 @@ async function requireIndexedDb(): Promise<IDBDatabase> {
   await ensureIndexedDb()
   if (!indexedDb) throw new Error('IndexedDB catalog is not initialized')
   return indexedDb
+}
+
+function sqliteCatalogEpochFromDb(activeDb: SqliteDb): number {
+  const value = activeDb.selectValue(
+    'SELECT value FROM catalog_metadata WHERE key = ?',
+    [CATALOG_EPOCH_KEY],
+  )
+  return Number(value ?? 0) || 0
+}
+
+async function sqliteCatalogEpoch(): Promise<number> {
+  await ensureDb()
+  return sqliteCatalogEpochFromDb(requireDb())
+}
+
+function bumpSqliteCatalogEpochInDb(activeDb: SqliteDb): number {
+  const nextEpoch = sqliteCatalogEpochFromDb(activeDb) + 1
+  activeDb.exec({
+    sql: `
+      INSERT INTO catalog_metadata (key, value)
+      VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `,
+    bind: [CATALOG_EPOCH_KEY, String(nextEpoch)],
+  })
+  return nextEpoch
+}
+
+async function sqliteBumpCatalogEpoch(): Promise<number> {
+  await ensureDb()
+  return bumpSqliteCatalogEpochInDb(requireDb())
+}
+
+async function idbCatalogEpoch(): Promise<number> {
+  const database = await requireIndexedDb()
+  const transaction = database.transaction('metadata', 'readonly')
+  const done = idbTransactionDone(transaction)
+  const row = await idbRequest<IdbMetadata | undefined>(
+    transaction.objectStore('metadata').get(CATALOG_EPOCH_KEY),
+  )
+  await done
+  return Number(row?.value ?? 0) || 0
+}
+
+async function idbBumpCatalogEpoch(): Promise<number> {
+  const database = await requireIndexedDb()
+  const current = await idbCatalogEpoch()
+  const nextEpoch = current + 1
+  const transaction = database.transaction('metadata', 'readwrite')
+  const done = idbTransactionDone(transaction)
+  transaction.objectStore('metadata').put({
+    key: CATALOG_EPOCH_KEY,
+    value: String(nextEpoch),
+  } satisfies IdbMetadata)
+  await done
+  return nextEpoch
+}
+
+async function dynamicIndexOpfsDirectory(): Promise<FileSystemDirectoryHandle> {
+  const root = await navigator.storage.getDirectory()
+  const indexes = await root.getDirectoryHandle('indexes', { create: true })
+  const engine = await indexes.getDirectoryHandle('dynamic-z-order-cells', {
+    create: true,
+  })
+  return engine.getDirectoryHandle('v1', { create: true })
+}
+
+async function readOpfsFile(
+  directory: FileSystemDirectoryHandle,
+  name: string,
+): Promise<File | undefined> {
+  try {
+    return await (await directory.getFileHandle(name)).getFile()
+  } catch {
+    return undefined
+  }
+}
+
+async function writeOpfsFile(
+  directory: FileSystemDirectoryHandle,
+  name: string,
+  data: BlobPart,
+): Promise<void> {
+  const handle = await directory.getFileHandle(name, { create: true })
+  if (!handle.createWritable) {
+    throw new Error('OPFS writable files are unavailable.')
+  }
+  const writable = await handle.createWritable()
+  await writable.write(data)
+  await writable.close()
+}
+
+function dynamicZOrderIndex(): DynamicZOrderGeoIndex {
+  const index = geoIndexRegistry.get('dynamic-z-order-cells')
+  if (!(index instanceof DynamicZOrderGeoIndex)) {
+    throw new Error('Dynamic Z-order index is not available.')
+  }
+  return index
+}
+
+async function restoreDynamicIndexFromData(
+  manifest: DynamicZOrderIndexManifest,
+  data: ArrayBuffer,
+  catalogEpoch: number,
+): Promise<{ pointCount: number; cellCount: number }> {
+  validateDynamicZOrderManifest(manifest, catalogEpoch)
+  const checksum = await sha256Hex(data)
+  if (checksum !== manifest.dataChecksum) {
+    throw new Error('Dynamic Z-order index checksum does not match manifest.')
+  }
+  const snapshot = decodeDynamicZOrderSnapshot(data)
+  if (
+    snapshot.pointCount !== manifest.pointCount ||
+    snapshot.cellCount !== manifest.cellCount
+  ) {
+    throw new Error('Dynamic Z-order index manifest count mismatch.')
+  }
+  dynamicZOrderIndex().restore(snapshot)
+  return {
+    pointCount: snapshot.pointCount,
+    cellCount: snapshot.cellCount,
+  }
+}
+
+async function loadOpfsDynamicIndex(
+  catalogEpoch: number,
+): Promise<{ pointCount: number; cellCount: number } | undefined> {
+  try {
+    const directory = await dynamicIndexOpfsDirectory()
+    const [manifestFile, dataFile] = await Promise.all([
+      readOpfsFile(directory, 'manifest.json'),
+      readOpfsFile(directory, 'index.bin'),
+    ])
+    if (!manifestFile || !dataFile) return undefined
+
+    return await restoreDynamicIndexFromData(
+      JSON.parse(await manifestFile.text()) as DynamicZOrderIndexManifest,
+      await dataFile.arrayBuffer(),
+      catalogEpoch,
+    )
+  } catch {
+    return undefined
+  }
+}
+
+async function saveOpfsDynamicIndex(catalogEpoch: number): Promise<void> {
+  const index = dynamicZOrderIndex()
+  const snapshot = index.snapshot()
+  const data = encodeDynamicZOrderSnapshot(snapshot)
+  const manifest = createDynamicZOrderManifest(
+    snapshot,
+    catalogEpoch,
+    await sha256Hex(data),
+  )
+  const directory = await dynamicIndexOpfsDirectory()
+  await writeOpfsFile(directory, 'index.bin', data)
+  await writeOpfsFile(
+    directory,
+    'manifest.json',
+    JSON.stringify(manifest),
+  )
+}
+
+async function loadIdbDynamicIndex(
+  catalogEpoch: number,
+): Promise<{ pointCount: number; cellCount: number } | undefined> {
+  try {
+    const database = await requireIndexedDb()
+    const transaction = database.transaction('indexCache', 'readonly')
+    const done = idbTransactionDone(transaction)
+    const row = await idbRequest<IdbIndexCache | undefined>(
+      transaction.objectStore('indexCache').get(DYNAMIC_INDEX_CACHE_KEY),
+    )
+    await done
+    if (!row) return undefined
+    return await restoreDynamicIndexFromData(
+      row.manifest,
+      row.data,
+      catalogEpoch,
+    )
+  } catch {
+    return undefined
+  }
+}
+
+async function saveIdbDynamicIndex(catalogEpoch: number): Promise<void> {
+  const snapshot = dynamicZOrderIndex().snapshot()
+  const data = encodeDynamicZOrderSnapshot(snapshot)
+  const manifest = createDynamicZOrderManifest(
+    snapshot,
+    catalogEpoch,
+    await sha256Hex(data),
+  )
+  const database = await requireIndexedDb()
+  const transaction = database.transaction('indexCache', 'readwrite')
+  const done = idbTransactionDone(transaction)
+  transaction.objectStore('indexCache').put({
+    id: DYNAMIC_INDEX_CACHE_KEY,
+    manifest,
+    data,
+  } satisfies IdbIndexCache)
+  await done
 }
 
 function idbAssetFromItem(item: MediaItem): IdbAsset {
@@ -519,6 +785,7 @@ async function idbUpsertMedia(items: MediaItem[]): Promise<number> {
   }
 
   await done
+  await idbBumpCatalogEpoch()
   return items.length
 }
 
@@ -568,6 +835,8 @@ async function idbRemoveSources(sourceIds: string[]): Promise<void> {
     }
     await assetDone
   }
+
+  await idbBumpCatalogEpoch()
 }
 
 async function idbPrepareImportSource(
@@ -787,6 +1056,7 @@ async function idbClear(): Promise<void> {
   transaction.objectStore('locations').clear()
   transaction.objectStore('assets').clear()
   await done
+  await idbBumpCatalogEpoch()
 }
 
 function locationFromRow(row: Record<string, unknown>): MediaLocation {
@@ -1151,6 +1421,7 @@ function removeSourcesFromSqlite(activeDb: SqliteDb, sourceIds: string[]): void 
       WHERE l.content_hash = media_assets.content_hash
     )
   `)
+  bumpSqliteCatalogEpochInDb(activeDb)
 }
 
 function prepareImportSource(
@@ -2289,6 +2560,207 @@ async function listMedia(query: CatalogQuery): Promise<MediaItem[]> {
   return mediaItemsFromAssetRows(activeDb, rows, query.sourceId)
 }
 
+function defaultSearchStats(
+  engineId: string,
+  engineLabel: string,
+): SearchIndexStats {
+  return {
+    engineId,
+    engineLabel,
+    exact: true,
+    persistent: true,
+    pointCount: 0,
+    distanceComputations: 0,
+    nodesVisited: 0,
+    pagesRead: 0,
+    candidatesInspected: 0,
+    prunedByGeo: 0,
+    prunedByTime: 0,
+  }
+}
+
+function searchSpecToCatalogQuery(
+  spec: SearchSpec,
+  limit: number,
+): CatalogQuery {
+  return {
+    startTime: spec.startTime,
+    endTime: spec.endTime,
+    kind: spec.kind,
+    sourceId: spec.sourceId,
+    hasGeo: spec.hasGeo,
+    geoBounds: spec.geoBounds,
+    sort: spec.order.kind === 'timestamp' ? spec.order.sort : 'timestamp_desc',
+    limit,
+    offset: spec.offset,
+  }
+}
+
+function mediaItemsToSearchResults(items: MediaItem[]): SearchPage['items'] {
+  return items.map((item) => ({
+    item,
+    mediaId: item.id,
+  }))
+}
+
+async function enrichDistanceResults(
+  getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
+  results: GeoSearchResult[],
+): Promise<SearchPage['items']> {
+  const resultIds = Array.from(new Set(results.map((result) => result.mediaId)))
+  const itemChunks = await Promise.all(
+    Array.from({ length: Math.ceil(resultIds.length / 500) }, (_, index) =>
+      getMediaByIdsFn(resultIds.slice(index * 500, (index + 1) * 500)),
+    ),
+  )
+  const itemsById = new Map(
+    itemChunks.flat().map((item) => [item.id, item]),
+  )
+  return results.flatMap((result) => {
+    const item = itemsById.get(result.mediaId)
+    return item ? [{ ...result, item }] : []
+  })
+}
+
+function createSqlSearchEngine(
+  engineId: string,
+  engineLabel: string,
+  supportsGeoBounds: boolean,
+  listMediaFn: (query: CatalogQuery) => Promise<MediaItem[]>,
+): SearchIndexEngine {
+  return {
+    id: engineId,
+    label: engineLabel,
+    capabilities: {
+      exact: true,
+      persistent: true,
+      requiresBuild: false,
+      supportsTimestampOrder: true,
+      supportsDistanceOrder: false,
+      supportsGeoBounds,
+      supportsTimeRange: true,
+      supportsKind: true,
+      supportsSource: true,
+    },
+    canHandle(spec) {
+      return spec.order.kind === 'timestamp' && Boolean(spec.geoBounds) === supportsGeoBounds
+    },
+    async search(spec) {
+      const limit = Math.max(1, Math.min(spec.limit ?? 500, 10_000))
+      const rows = await listMediaFn(searchSpecToCatalogQuery(spec, limit + 1))
+      const limitedRows = rows.slice(0, limit)
+      return {
+        items: mediaItemsToSearchResults(limitedRows),
+        resultMetrics: defaultSearchStats(engineId, engineLabel),
+        engineId,
+        engineLabel,
+        limitReached: rows.length > limit,
+      }
+    },
+    async stats() {
+      return defaultSearchStats(engineId, engineLabel)
+    },
+  }
+}
+
+function createDistanceSearchEngine(
+  geoIndex: (typeof geoIndexRegistry.indexes)[number],
+  getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
+): SearchIndexEngine {
+  return {
+    id: geoIndex.id,
+    label: geoIndex.label,
+    capabilities: {
+      exact: geoIndex.capabilities.exact,
+      persistent: geoIndex.capabilities.persistent,
+      requiresBuild: true,
+      supportsTimestampOrder: false,
+      supportsDistanceOrder: true,
+      supportsGeoBounds: true,
+      supportsTimeRange: true,
+      supportsKind: true,
+      supportsSource: false,
+    },
+    canHandle(spec) {
+      return spec.order.kind === 'distance' && !spec.sourceId
+    },
+    async search(spec) {
+      if (spec.order.kind !== 'distance') {
+        throw new Error(`${geoIndex.label} cannot serve timestamp queries.`)
+      }
+
+      const limit = Math.max(1, Math.min(spec.limit ?? 500, 10_000))
+      const results = await searchGeoIndex({
+        indexId: geoIndex.id,
+        query: {
+          startTime: spec.startTime,
+          endTime: spec.endTime,
+          lat: spec.order.point.lat,
+          lon: spec.order.point.lon,
+          k: limit,
+          offset: spec.offset,
+          kind: spec.kind,
+          geoBounds: spec.geoBounds,
+        },
+      })
+      const resultMetrics = {
+        ...(await geoIndex.stats()),
+        engineLabel: geoIndex.label,
+        exact: geoIndex.capabilities.exact,
+        persistent: geoIndex.capabilities.persistent,
+      }
+      return {
+        items: await enrichDistanceResults(getMediaByIdsFn, results),
+        resultMetrics,
+        engineId: geoIndex.id,
+        engineLabel: geoIndex.label,
+        limitReached:
+          results.length >= limit &&
+          resultMetrics.pointCount > (spec.offset ?? 0) + limit,
+      }
+    },
+    async stats() {
+      return {
+        ...(await geoIndex.stats()),
+        engineLabel: geoIndex.label,
+        exact: geoIndex.capabilities.exact,
+        persistent: geoIndex.capabilities.persistent,
+      }
+    },
+  }
+}
+
+function createSearchRegistry(
+  listMediaFn: (query: CatalogQuery) => Promise<MediaItem[]>,
+  getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
+): SearchIndexEngineRegistry {
+  return new SearchIndexEngineRegistry([
+    createSqlSearchEngine(
+      'sqlite-timestamp',
+      'SQLite timestamp B-tree',
+      false,
+      listMediaFn,
+    ),
+    createSqlSearchEngine(
+      'sqlite-bbox-time',
+      'SQLite bbox/time B-tree',
+      true,
+      listMediaFn,
+    ),
+    ...geoIndexRegistry.indexes.map((index) =>
+      createDistanceSearchEngine(index, getMediaByIdsFn),
+    ),
+  ])
+}
+
+async function searchMediaWithCatalogFunctions(
+  spec: SearchSpec,
+  listMediaFn: (query: CatalogQuery) => Promise<MediaItem[]>,
+  getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
+): Promise<SearchPage> {
+  return createSearchRegistry(listMediaFn, getMediaByIdsFn).search(spec)
+}
+
 async function getMediaByIds(ids: string[]): Promise<MediaItem[]> {
   await ensureDb()
   if (ids.length === 0) return []
@@ -2422,6 +2894,100 @@ async function buildGeoIndexes(
   return summary
 }
 
+async function buildSearchIndexes(
+  store: CatalogStore,
+  postProgress: (progress: GeoIndexBuildProgress) => void,
+): Promise<GeoIndexBuildSummary & { engineCount: number }> {
+  const startedAt = performance.now()
+  const totalIndexes = 1
+
+  postProgress({
+    phase: 'loading',
+    pointCount: 0,
+    builtIndexes: 0,
+    totalIndexes,
+    currentIndexId: 'dynamic-z-order-cells',
+    currentIndexLabel: 'Dynamic Z-order cells',
+  })
+
+  const catalogEpoch = await store.catalogEpoch()
+  const restored = await store.loadPersistedDynamicIndex(catalogEpoch)
+  if (restored) {
+    postProgress({
+      phase: 'ready',
+      pointCount: restored.pointCount,
+      builtIndexes: totalIndexes,
+      totalIndexes,
+      currentIndexId: 'dynamic-z-order-cells',
+      currentIndexLabel: 'Dynamic Z-order cells',
+      currentIndexProcessedPoints: restored.pointCount,
+      currentIndexTotalPoints: restored.pointCount,
+    })
+
+    return {
+      pointCount: restored.pointCount,
+      buildTimeMs: performance.now() - startedAt,
+      engineCount: geoIndexRegistry.indexes.length + 2,
+    }
+  }
+
+  const points = await store.getGeoPoints({})
+
+  postProgress({
+    phase: 'building',
+    pointCount: points.length,
+    builtIndexes: 0,
+    totalIndexes,
+    currentIndexId: 'dynamic-z-order-cells',
+    currentIndexLabel: 'Dynamic Z-order cells',
+    currentIndexProcessedPoints: 0,
+    currentIndexTotalPoints: points.length,
+  })
+
+  await dynamicZOrderIndex().build(points, {
+    yieldEvery: 2_000,
+    onProgress: (progress) => {
+      postProgress({
+        phase: 'building',
+        pointCount: points.length,
+        builtIndexes: 0,
+        totalIndexes,
+        currentIndexId: progress.indexId,
+        currentIndexLabel: progress.indexLabel,
+        currentIndexProcessedPoints: progress.processedPoints,
+        currentIndexTotalPoints: progress.totalPoints,
+      })
+    },
+  })
+
+  try {
+    await store.savePersistedDynamicIndex(catalogEpoch)
+  } catch {
+    // The index cache is disposable. Search remains correct with the in-memory index.
+  }
+
+  const summary = {
+    pointCount: points.length,
+    buildTimeMs: performance.now() - startedAt,
+  }
+
+  postProgress({
+    phase: 'ready',
+    pointCount: points.length,
+    builtIndexes: totalIndexes,
+    totalIndexes,
+    currentIndexId: 'dynamic-z-order-cells',
+    currentIndexLabel: 'Dynamic Z-order cells',
+    currentIndexProcessedPoints: points.length,
+    currentIndexTotalPoints: points.length,
+  })
+
+  return {
+    ...summary,
+    engineCount: geoIndexRegistry.indexes.length + 2,
+  }
+}
+
 async function searchGeoIndex(payload: {
   indexId: string
   query: GeoSearchQuery
@@ -2431,6 +2997,22 @@ async function searchGeoIndex(payload: {
 
 async function getGeoIndexStats(indexId: string): Promise<GeoIndexStats> {
   return geoIndexRegistry.get(indexId).stats()
+}
+
+async function getSearchIndexStats(): Promise<SearchIndexStats[]> {
+  const sqlStats = [
+    defaultSearchStats('sqlite-timestamp', 'SQLite timestamp B-tree'),
+    defaultSearchStats('sqlite-bbox-time', 'SQLite bbox/time B-tree'),
+  ]
+  const geoStats = await Promise.all(
+    geoIndexRegistry.indexes.map(async (index) => ({
+      ...(await index.stats()),
+      engineLabel: index.label,
+      exact: index.capabilities.exact,
+      persistent: index.capabilities.persistent,
+    })),
+  )
+  return [...sqlStats, ...geoStats]
 }
 
 async function validateGeoIndex(payload: {
@@ -2480,6 +3062,7 @@ async function removeSources(sourceIds: string[]): Promise<void> {
       WHERE l.content_hash = media_assets.content_hash
     )
   `)
+  bumpSqliteCatalogEpochInDb(activeDb)
 }
 
 async function countMedia(): Promise<number> {
@@ -2503,6 +3086,7 @@ async function clearCatalog(): Promise<void> {
     DELETE FROM media_locations;
     DELETE FROM media_assets;
   `)
+  bumpSqliteCatalogEpochInDb(requireDb())
 }
 
 type SqliteImportTransactionState = {
@@ -2557,11 +3141,15 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
     async upsertMedia(items) {
       await ensureMode()
       upsertMediaIntoSqlite(requireDb(), items)
+      if (items.length > 0) bumpSqliteCatalogEpochInDb(requireDb())
       return items.length
     },
     async prepareImportSource(source, duplicateSourceIds) {
       await ensureMode()
       prepareImportSource(requireDb(), source, duplicateSourceIds)
+      if (duplicateSourceIds.length > 0) {
+        bumpSqliteCatalogEpochInDb(requireDb())
+      }
     },
     async writeMediaBatch(items) {
       const startedAt = performance.now()
@@ -2596,6 +3184,7 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
         transactionActive = true
       }
       const sqliteTiming = upsertMediaIntoSqlite(activeDb, items)
+      bumpSqliteCatalogEpochInDb(activeDb)
       if (transactionState) {
         transactionState.writtenItems += items.length
       }
@@ -2671,6 +3260,10 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
       await ensureMode()
       return listMedia(query)
     },
+    async searchMedia(spec) {
+      await ensureMode()
+      return searchMediaWithCatalogFunctions(spec, listMedia, getMediaByIds)
+    },
     async getMediaByIds(ids) {
       await ensureMode()
       return getMediaByIds(ids)
@@ -2678,6 +3271,29 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
     async getGeoPoints(range) {
       await ensureMode()
       return getGeoPoints(range)
+    },
+    async catalogEpoch() {
+      await ensureMode()
+      return sqliteCatalogEpoch()
+    },
+    async bumpCatalogEpoch() {
+      await ensureMode()
+      return sqliteBumpCatalogEpoch()
+    },
+    async loadPersistedDynamicIndex(catalogEpoch) {
+      await ensureMode()
+      return loadOpfsDynamicIndex(catalogEpoch)
+    },
+    async savePersistedDynamicIndex(catalogEpoch) {
+      await ensureMode()
+      return saveOpfsDynamicIndex(catalogEpoch)
+    },
+    async buildSearchIndexes(postProgress) {
+      await ensureMode()
+      return buildSearchIndexes(this, postProgress)
+    },
+    async getSearchIndexStats() {
+      return getSearchIndexStats()
     },
     async listSources() {
       await ensureMode()
@@ -2750,8 +3366,19 @@ const indexedDbCatalogStore: CatalogStore = {
     }
   },
   listMedia: idbListMedia,
+  searchMedia(spec) {
+    return searchMediaWithCatalogFunctions(spec, idbListMedia, idbGetMediaByIds)
+  },
   getMediaByIds: idbGetMediaByIds,
   getGeoPoints: idbGetGeoPoints,
+  catalogEpoch: idbCatalogEpoch,
+  bumpCatalogEpoch: idbBumpCatalogEpoch,
+  loadPersistedDynamicIndex: loadIdbDynamicIndex,
+  savePersistedDynamicIndex: saveIdbDynamicIndex,
+  buildSearchIndexes(postProgress) {
+    return buildSearchIndexes(this, postProgress)
+  },
+  getSearchIndexStats,
   listSources: idbListSources,
   removeSources: idbRemoveSources,
   countMedia: idbCountMedia,
@@ -2800,6 +3427,8 @@ async function handleRequest(
       return undefined
     case 'listMedia':
       return store.listMedia(request.payload as CatalogQuery)
+    case 'searchMedia':
+      return store.searchMedia(request.payload as SearchSpec)
     case 'getMediaByIds':
       return store.getMediaByIds(request.payload as string[])
     case 'getGeoPoints':
@@ -2812,12 +3441,16 @@ async function handleRequest(
       return store.countMedia()
     case 'buildGeoIndexes':
       return buildGeoIndexes(store, postProgress)
+    case 'buildSearchIndexes':
+      return store.buildSearchIndexes(postProgress)
     case 'searchGeoIndex':
       return searchGeoIndex(
         request.payload as { indexId: string; query: GeoSearchQuery },
       )
     case 'getGeoIndexStats':
       return getGeoIndexStats(request.payload as string)
+    case 'getSearchIndexStats':
+      return store.getSearchIndexStats()
     case 'validateGeoIndex':
       return validateGeoIndex(
         request.payload as { indexId: string; query: GeoSearchQuery },

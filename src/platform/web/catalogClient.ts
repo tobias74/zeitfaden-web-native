@@ -6,6 +6,9 @@ import type {
   GeoSearchResult,
   MediaItem,
   MediaSource,
+  SearchIndexStats,
+  SearchPage,
+  SearchSpec,
   TimeRange,
   ValidationReport,
 } from '../../types'
@@ -15,6 +18,7 @@ import type {
   GeoIndexBuildSummary,
   ImportProgress,
   ImportSummary,
+  SearchIndexBuildSummary,
 } from '../types'
 import type { WebCatalogStorageMode } from './storageMode'
 
@@ -87,6 +91,22 @@ export class CatalogClient {
 
   commitImport(): Promise<void> {
     return this.request('commitImport')
+  }
+
+  searchMedia(spec: SearchSpec): Promise<SearchPage> {
+    return this.request('searchMedia', spec)
+  }
+
+  buildSearchIndexes(
+    onProgress?: (progress: GeoIndexBuildProgress) => void,
+  ): Promise<SearchIndexBuildSummary> {
+    return this.request('buildSearchIndexes', undefined, (progress) => {
+      onProgress?.(progress as GeoIndexBuildProgress)
+    })
+  }
+
+  getSearchIndexStats(): Promise<SearchIndexStats[]> {
+    return this.request('getSearchIndexStats')
   }
 
   listMedia(query: CatalogQuery): Promise<MediaItem[]> {

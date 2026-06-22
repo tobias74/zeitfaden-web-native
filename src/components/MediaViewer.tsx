@@ -310,7 +310,8 @@ export function MediaViewer({
                   <dd>{geo}</dd>
                 </div>
               )}
-              {Number.isFinite(result.distanceMeters) && (
+              {typeof result.distanceMeters === 'number' &&
+                Number.isFinite(result.distanceMeters) && (
                 <div>
                   <dt>{t('distance')}</dt>
                   <dd>{formatDistance(result.distanceMeters)}</dd>

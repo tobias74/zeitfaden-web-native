@@ -25,6 +25,19 @@ type Cell = {
   points: Map<string, GeoIndexPoint>
 }
 
+export type DynamicZOrderSnapshotCell = Omit<Cell, 'points'> & {
+  points: GeoIndexPoint[]
+}
+
+export type DynamicZOrderGeoIndexSnapshot = {
+  engineId: 'dynamic-z-order-cells'
+  version: 1
+  resolution: number
+  pointCount: number
+  cellCount: number
+  cells: DynamicZOrderSnapshotCell[]
+}
+
 type CellCandidate = {
   cell: Cell
   lowerBound: number
@@ -125,7 +138,7 @@ export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
   readonly label = 'Dynamic Z-order cells'
   readonly capabilities = {
     exact: true,
-    persistent: false,
+    persistent: true,
     incrementalInsert: true,
     incrementalDelete: true,
     supportsTimePruning: true,
@@ -290,6 +303,94 @@ export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
 
   async stats(): Promise<GeoIndexStats> {
     return this.lastStats
+  }
+
+  snapshot(): DynamicZOrderGeoIndexSnapshot {
+    const cells = [...this.cells.values()]
+      .sort((a, b) => a.z - b.z || a.key.localeCompare(b.key))
+      .map((cell) => ({
+        key: cell.key,
+        z: cell.z,
+        x: cell.x,
+        y: cell.y,
+        latMin: cell.latMin,
+        latMax: cell.latMax,
+        lonMin: cell.lonMin,
+        lonMax: cell.lonMax,
+        minTimestamp: cell.minTimestamp,
+        maxTimestamp: cell.maxTimestamp,
+        points: [...cell.points.values()].sort((a, b) =>
+          a.mediaId.localeCompare(b.mediaId),
+        ),
+      }))
+
+    return {
+      engineId: this.id,
+      version: 1,
+      resolution: this.resolution,
+      pointCount: this.pointsById.size,
+      cellCount: cells.length,
+      cells,
+    }
+  }
+
+  restore(snapshot: DynamicZOrderGeoIndexSnapshot): void {
+    if (
+      snapshot.engineId !== this.id ||
+      snapshot.version !== 1 ||
+      snapshot.resolution !== this.resolution
+    ) {
+      throw new Error('Dynamic Z-order index snapshot is incompatible.')
+    }
+
+    this.pointsById.clear()
+    this.pointCellKey.clear()
+    this.cells.clear()
+
+    for (const snapshotCell of snapshot.cells) {
+      const cell: Cell = {
+        key: snapshotCell.key,
+        z: snapshotCell.z,
+        x: snapshotCell.x,
+        y: snapshotCell.y,
+        latMin: snapshotCell.latMin,
+        latMax: snapshotCell.latMax,
+        lonMin: snapshotCell.lonMin,
+        lonMax: snapshotCell.lonMax,
+        minTimestamp: snapshotCell.minTimestamp,
+        maxTimestamp: snapshotCell.maxTimestamp,
+        points: new Map(),
+      }
+
+      for (const point of snapshotCell.points) {
+        const normalizedPoint = {
+          ...point,
+          lon: normalizeLon(point.lon),
+        }
+        cell.points.set(normalizedPoint.mediaId, normalizedPoint)
+        this.pointsById.set(normalizedPoint.mediaId, normalizedPoint)
+        this.pointCellKey.set(normalizedPoint.mediaId, cell.key)
+      }
+
+      this.cells.set(cell.key, cell)
+    }
+
+    if (
+      snapshot.pointCount !== this.pointsById.size ||
+      snapshot.cellCount !== this.cells.size
+    ) {
+      this.pointsById.clear()
+      this.pointCellKey.clear()
+      this.cells.clear()
+      throw new Error('Dynamic Z-order index snapshot is incomplete.')
+    }
+
+    this.lastStats = {
+      ...this.emptyStats(),
+      pointCount: this.pointsById.size,
+      indexSizeBytes: this.estimateSizeBytes(),
+      buildTimeMs: 0,
+    }
   }
 
   async validateAgainstBruteForce(
