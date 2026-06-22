@@ -1543,8 +1543,7 @@ function App() {
                   </div>
                 )}
               </dl>
-              {selectedIndexId === 'segmented-kd-tree' &&
-                effectiveIndexStats.needsOptimization && (
+              {selectedIndexId === 'segmented-kd-tree' && (
                 <button
                   type="button"
                   className="secondary"
