@@ -98,9 +98,10 @@ export class CatalogClient {
   }
 
   buildSearchIndexes(
+    indexId: string,
     onProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<SearchIndexBuildSummary> {
-    return this.request('buildSearchIndexes', undefined, (progress) => {
+    return this.request('buildSearchIndexes', { indexId }, (progress) => {
       onProgress?.(progress as GeoIndexBuildProgress)
     })
   }

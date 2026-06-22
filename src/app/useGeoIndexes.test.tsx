@@ -77,7 +77,6 @@ function Harness({
     catalogInfo,
     catalogRevision: revision,
     selectedIndexId,
-    indexCount: 2,
     onError,
   })
   return null
@@ -88,7 +87,7 @@ describe('useGeoIndexes', () => {
     cleanup()
   })
 
-  it('rebuilds on catalog revision changes, not selected index changes', async () => {
+  it('prepares the selected index on selection and catalog revision changes', async () => {
     const catalog = createCatalog()
     const onError = vi.fn()
     const { rerender } = render(
@@ -103,6 +102,10 @@ describe('useGeoIndexes', () => {
     await waitFor(() => {
       expect(catalog.buildSearchIndexes).toHaveBeenCalledTimes(1)
     })
+    expect(catalog.buildSearchIndexes).toHaveBeenLastCalledWith(
+      'brute-force',
+      expect.any(Function),
+    )
 
     rerender(
       <Harness
@@ -114,9 +117,12 @@ describe('useGeoIndexes', () => {
     )
 
     await waitFor(() => {
-      expect(catalog.getSearchIndexStats).toHaveBeenCalled()
+      expect(catalog.buildSearchIndexes).toHaveBeenCalledTimes(2)
     })
-    expect(catalog.buildSearchIndexes).toHaveBeenCalledTimes(1)
+    expect(catalog.buildSearchIndexes).toHaveBeenLastCalledWith(
+      'dynamic-z-order-cells',
+      expect.any(Function),
+    )
 
     rerender(
       <Harness
@@ -128,7 +134,11 @@ describe('useGeoIndexes', () => {
     )
 
     await waitFor(() => {
-      expect(catalog.buildSearchIndexes).toHaveBeenCalledTimes(2)
+      expect(catalog.buildSearchIndexes).toHaveBeenCalledTimes(3)
     })
+    expect(catalog.buildSearchIndexes).toHaveBeenLastCalledWith(
+      'dynamic-z-order-cells',
+      expect.any(Function),
+    )
   })
 })

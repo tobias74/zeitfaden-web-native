@@ -97,7 +97,6 @@ const DEFAULT_RESULT_PAGE_SIZE = 100
 const MAP_POINT_LIMIT = 500
 const DEFAULT_DISTANCE_ENGINE_ID = 'dynamic-z-order-cells'
 const DISTANCE_ENGINE_IDS = ['brute-force', 'dynamic-z-order-cells'] as const
-const SEARCH_ENGINE_COUNT = 4
 const DEFAULT_QUERY_POINT = {
   lat: 47.3769,
   lon: 8.5417,
@@ -270,7 +269,11 @@ function geoIndexProgressLabel(
   progress: GeoIndexBuildProgress,
   t: (key: TranslationKey, values?: TranslationValues) => string,
 ): string {
-  if (progress.phase === 'loading') return t('loadingGeoPoints')
+  if (progress.phase === 'loading') {
+    return t('loadingDistanceIndex', {
+      indexLabel: progress.currentIndexLabel ?? '',
+    })
+  }
   if (progress.phase === 'ready') return t('geoIndexesReady')
   return t('buildingGeoIndex', {
     indexLabel: progress.currentIndexLabel ?? '',
@@ -418,6 +421,7 @@ function App() {
     setStartDate,
     setEndDate,
     setSort,
+    setSelectedIndexId,
     setKindFilter,
     setGeoBounds,
     clearGeoBounds,
@@ -516,7 +520,6 @@ function App() {
     catalogInfo,
     catalogRevision,
     selectedIndexId,
-    indexCount: SEARCH_ENGINE_COUNT,
     onError: reportError,
   })
   const [indexStatsOverride, setIndexStatsOverride] =
@@ -532,10 +535,7 @@ function App() {
       return {
         kind: 'distance',
         point: queryPoint,
-        engineId:
-          selectedIndexId === DEFAULT_DISTANCE_ENGINE_ID
-            ? undefined
-            : selectedIndexId,
+        engineId: selectedIndexId,
       }
     }
 
@@ -1413,6 +1413,20 @@ function App() {
                   </option>
                 </select>
               </label>
+              {distanceSortActive && (
+                <label>
+                  {t('distanceEngine')}
+                  <select
+                    value={selectedIndexId}
+                    onChange={(event) => setSelectedIndexId(event.target.value)}
+                  >
+                    <option value="dynamic-z-order-cells">
+                      {t('dynamicZOrderCells')}
+                    </option>
+                    <option value="brute-force">{t('bruteForceOracle')}</option>
+                  </select>
+                </label>
+              )}
             </section>
 
             <section className="panel metrics-panel">

@@ -2924,9 +2924,23 @@ fn build_geo_indexes(app: AppHandle, window: Window) -> AppResult<GeoIndexBuildS
 }
 
 #[tauri::command]
-fn build_search_indexes(app: AppHandle, window: Window) -> AppResult<SearchIndexBuildSummary> {
+fn build_search_indexes(
+    app: AppHandle,
+    window: Window,
+    index_id: String,
+) -> AppResult<SearchIndexBuildSummary> {
     let started = Instant::now();
     let total_indexes = 1_usize;
+    let selected_index_id = if index_id == "brute-force" {
+        "brute-force"
+    } else {
+        "dynamic-z-order-cells"
+    };
+    let selected_index_label = if selected_index_id == "brute-force" {
+        "Brute force oracle"
+    } else {
+        "Dynamic Z-order cells"
+    };
     emit_geo_index_progress(
         &window,
         GeoIndexBuildProgress {
@@ -2934,34 +2948,40 @@ fn build_search_indexes(app: AppHandle, window: Window) -> AppResult<SearchIndex
             point_count: 0,
             built_indexes: 0,
             total_indexes,
-            current_index_id: Some("dynamic-z-order-cells".to_string()),
-            current_index_label: Some("Dynamic Z-order cells".to_string()),
+            current_index_id: Some(selected_index_id.to_string()),
+            current_index_label: Some(selected_index_label.to_string()),
             current_index_processed_points: None,
             current_index_total_points: None,
         },
     );
 
-    let conn = connect(&app)?;
-    let epoch = catalog_epoch(&conn)?;
-    if let Some((point_count, _cell_count)) = load_persisted_dynamic_index(&app, epoch)? {
-        emit_geo_index_progress(
-            &window,
-            GeoIndexBuildProgress {
-                phase: "ready".to_string(),
+    let epoch = if selected_index_id == "dynamic-z-order-cells" {
+        let conn = connect(&app)?;
+        Some(catalog_epoch(&conn)?)
+    } else {
+        None
+    };
+    if let Some(epoch) = epoch {
+        if let Some((point_count, _cell_count)) = load_persisted_dynamic_index(&app, epoch)? {
+            emit_geo_index_progress(
+                &window,
+                GeoIndexBuildProgress {
+                    phase: "ready".to_string(),
+                    point_count,
+                    built_indexes: total_indexes,
+                    total_indexes,
+                    current_index_id: Some(selected_index_id.to_string()),
+                    current_index_label: Some(selected_index_label.to_string()),
+                    current_index_processed_points: Some(point_count),
+                    current_index_total_points: Some(point_count),
+                },
+            );
+            return Ok(SearchIndexBuildSummary {
                 point_count,
-                built_indexes: total_indexes,
-                total_indexes,
-                current_index_id: Some("dynamic-z-order-cells".to_string()),
-                current_index_label: Some("Dynamic Z-order cells".to_string()),
-                current_index_processed_points: Some(point_count),
-                current_index_total_points: Some(point_count),
-            },
-        );
-        return Ok(SearchIndexBuildSummary {
-            point_count,
-            build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
-            engine_count: 4,
-        });
+                build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
+                engine_count: 4,
+            });
+        }
     }
 
     let points = get_geo_points(
@@ -2978,8 +2998,8 @@ fn build_search_indexes(app: AppHandle, window: Window) -> AppResult<SearchIndex
             point_count: points.len(),
             built_indexes: 0,
             total_indexes,
-            current_index_id: Some("dynamic-z-order-cells".to_string()),
-            current_index_label: Some("Dynamic Z-order cells".to_string()),
+            current_index_id: Some(selected_index_id.to_string()),
+            current_index_label: Some(selected_index_label.to_string()),
             current_index_processed_points: Some(0),
             current_index_total_points: Some(points.len()),
         },
@@ -2989,27 +3009,33 @@ fn build_search_indexes(app: AppHandle, window: Window) -> AppResult<SearchIndex
         let mut registry = geo_index_registry()
             .lock()
             .map_err(|error| error.to_string())?;
-        registry
-            .dynamic_z_order
-            .build(&points, |processed_points| {
-                emit_geo_index_progress(
-                    &window,
-                    GeoIndexBuildProgress {
-                        phase: "building".to_string(),
-                        point_count: points.len(),
-                        built_indexes: 0,
-                        total_indexes,
-                        current_index_id: Some("dynamic-z-order-cells".to_string()),
-                        current_index_label: Some("Dynamic Z-order cells".to_string()),
-                        current_index_processed_points: Some(processed_points),
-                        current_index_total_points: Some(points.len()),
-                    },
-                );
-                Ok(())
-            })?;
+        if selected_index_id == "brute-force" {
+            registry.brute_force.build(&points);
+        } else {
+            registry
+                .dynamic_z_order
+                .build(&points, |processed_points| {
+                    emit_geo_index_progress(
+                        &window,
+                        GeoIndexBuildProgress {
+                            phase: "building".to_string(),
+                            point_count: points.len(),
+                            built_indexes: 0,
+                            total_indexes,
+                            current_index_id: Some(selected_index_id.to_string()),
+                            current_index_label: Some(selected_index_label.to_string()),
+                            current_index_processed_points: Some(processed_points),
+                            current_index_total_points: Some(points.len()),
+                        },
+                    );
+                    Ok(())
+                })?;
+        }
     }
 
-    let _ = save_persisted_dynamic_index(&app, epoch);
+    if let Some(epoch) = epoch {
+        let _ = save_persisted_dynamic_index(&app, epoch);
+    }
     let summary = GeoIndexBuildSummary {
         point_count: points.len(),
         build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
@@ -3021,8 +3047,8 @@ fn build_search_indexes(app: AppHandle, window: Window) -> AppResult<SearchIndex
             point_count: points.len(),
             built_indexes: total_indexes,
             total_indexes,
-            current_index_id: Some("dynamic-z-order-cells".to_string()),
-            current_index_label: Some("Dynamic Z-order cells".to_string()),
+            current_index_id: Some(selected_index_id.to_string()),
+            current_index_label: Some(selected_index_label.to_string()),
             current_index_processed_points: Some(points.len()),
             current_index_total_points: Some(points.len()),
         },

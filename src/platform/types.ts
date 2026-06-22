@@ -83,6 +83,7 @@ export interface CatalogBackend {
   upsertMedia(items: MediaItem[]): Promise<number>
   searchMedia(spec: SearchSpec): Promise<SearchPage>
   buildSearchIndexes(
+    indexId: string,
     onProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<SearchIndexBuildSummary>
   getSearchIndexStats(): Promise<SearchIndexStats[]>

@@ -211,6 +211,7 @@ type CatalogStore = {
   ): Promise<{ pointCount: number; cellCount: number } | undefined>
   savePersistedDynamicIndex(catalogEpoch: number): Promise<void>
   buildSearchIndexes(
+    indexId: string,
     postProgress: (progress: GeoIndexBuildProgress) => void,
   ): Promise<GeoIndexBuildSummary & { engineCount: number }>
   getSearchIndexStats(): Promise<SearchIndexStats[]>
@@ -226,6 +227,13 @@ let sqliteMode: SqliteStorageMode | undefined
 let indexedDb: IDBDatabase | undefined
 let indexedDbInitResult: InitResult | undefined
 const geoIndexRegistry = new GeoIndexRegistry()
+let preparedSearchIndex:
+  | {
+      indexId: string
+      catalogEpoch: number
+      cacheDirty: boolean
+    }
+  | undefined
 
 const IMPORT_BATCH_SIZE = 1000
 const SQLITE_BIND_CHUNK_LIMIT = 12000
@@ -599,6 +607,58 @@ function dynamicZOrderIndex(): DynamicZOrderGeoIndex {
   return index
 }
 
+function geoIndexPointFromMediaItem(item: MediaItem): GeoIndexPoint | undefined {
+  if (
+    typeof item.latitude !== 'number' ||
+    typeof item.longitude !== 'number' ||
+    !Number.isFinite(item.latitude) ||
+    !Number.isFinite(item.longitude)
+  ) {
+    return undefined
+  }
+
+  return {
+    mediaId: item.id,
+    kind: item.kind,
+    lat: item.latitude,
+    lon: item.longitude,
+    timestamp: item.timestamp,
+  }
+}
+
+async function applyIncrementalSearchIndexUpdate(
+  items: MediaItem[],
+  catalogEpoch: number,
+): Promise<void> {
+  if (!preparedSearchIndex) return
+
+  const index = geoIndexRegistry.get(preparedSearchIndex.indexId)
+  if (!index.capabilities.incrementalInsert) {
+    preparedSearchIndex = undefined
+    return
+  }
+
+  const points = items.flatMap((item) => {
+    const point = geoIndexPointFromMediaItem(item)
+    return point ? [point] : []
+  })
+
+  for (const point of points) {
+    await index.insert(point)
+  }
+
+  preparedSearchIndex = {
+    indexId: index.id,
+    catalogEpoch,
+    cacheDirty:
+      preparedSearchIndex.cacheDirty || index.id === 'dynamic-z-order-cells',
+  }
+}
+
+function invalidatePreparedSearchIndex(): void {
+  preparedSearchIndex = undefined
+}
+
 async function restoreDynamicIndexFromData(
   manifest: DynamicZOrderIndexManifest,
   data: ArrayBuffer,
@@ -804,7 +864,8 @@ async function idbUpsertMedia(items: MediaItem[]): Promise<number> {
   }
 
   await done
-  await idbBumpCatalogEpoch()
+  const catalogEpoch = await idbBumpCatalogEpoch()
+  await applyIncrementalSearchIndexUpdate(items, catalogEpoch)
   return items.length
 }
 
@@ -856,6 +917,7 @@ async function idbRemoveSources(sourceIds: string[]): Promise<void> {
   }
 
   await idbBumpCatalogEpoch()
+  invalidatePreparedSearchIndex()
 }
 
 async function idbPrepareImportSource(
@@ -1082,6 +1144,7 @@ async function idbClear(): Promise<void> {
   transaction.objectStore('assets').clear()
   await done
   await idbBumpCatalogEpoch()
+  invalidatePreparedSearchIndex()
 }
 
 function locationFromRow(row: Record<string, unknown>): MediaLocation {
@@ -1447,6 +1510,7 @@ function removeSourcesFromSqlite(activeDb: SqliteDb, sourceIds: string[]): void 
     )
   `)
   bumpSqliteCatalogEpochInDb(activeDb)
+  invalidatePreparedSearchIndex()
 }
 
 function prepareImportSource(
@@ -3029,38 +3093,84 @@ async function buildGeoIndexes(
 
 async function buildSearchIndexes(
   store: CatalogStore,
+  indexId: string,
   postProgress: (progress: GeoIndexBuildProgress) => void,
 ): Promise<GeoIndexBuildSummary & { engineCount: number }> {
   const startedAt = performance.now()
   const totalIndexes = 1
+  const index =
+    indexId === 'brute-force'
+      ? geoIndexRegistry.get('brute-force')
+      : dynamicZOrderIndex()
 
   postProgress({
     phase: 'loading',
     pointCount: 0,
     builtIndexes: 0,
     totalIndexes,
-    currentIndexId: 'dynamic-z-order-cells',
-    currentIndexLabel: 'Dynamic Z-order cells',
+    currentIndexId: index.id,
+    currentIndexLabel: index.label,
   })
 
   const catalogEpoch = await store.catalogEpoch()
-  const restored = await store.loadPersistedDynamicIndex(catalogEpoch)
-  if (restored) {
+  if (
+    preparedSearchIndex?.indexId === index.id &&
+    preparedSearchIndex.catalogEpoch === catalogEpoch
+  ) {
+    const stats = await index.stats()
+    if (
+      index.id === 'dynamic-z-order-cells' &&
+      preparedSearchIndex.cacheDirty
+    ) {
+      try {
+        await store.savePersistedDynamicIndex(catalogEpoch)
+        preparedSearchIndex = { ...preparedSearchIndex, cacheDirty: false }
+      } catch {
+        // The index cache is disposable. Search remains correct with the in-memory index.
+      }
+    }
     postProgress({
       phase: 'ready',
-      pointCount: restored.pointCount,
+      pointCount: stats.pointCount,
       builtIndexes: totalIndexes,
       totalIndexes,
-      currentIndexId: 'dynamic-z-order-cells',
-      currentIndexLabel: 'Dynamic Z-order cells',
-      currentIndexProcessedPoints: restored.pointCount,
-      currentIndexTotalPoints: restored.pointCount,
+      currentIndexId: index.id,
+      currentIndexLabel: index.label,
+      currentIndexProcessedPoints: stats.pointCount,
+      currentIndexTotalPoints: stats.pointCount,
     })
 
     return {
-      pointCount: restored.pointCount,
+      pointCount: stats.pointCount,
       buildTimeMs: performance.now() - startedAt,
       engineCount: geoIndexRegistry.indexes.length + 2,
+    }
+  }
+
+  if (index.id === 'dynamic-z-order-cells') {
+    const restored = await store.loadPersistedDynamicIndex(catalogEpoch)
+    if (restored) {
+      preparedSearchIndex = {
+        indexId: index.id,
+        catalogEpoch,
+        cacheDirty: false,
+      }
+      postProgress({
+        phase: 'ready',
+        pointCount: restored.pointCount,
+        builtIndexes: totalIndexes,
+        totalIndexes,
+        currentIndexId: index.id,
+        currentIndexLabel: index.label,
+        currentIndexProcessedPoints: restored.pointCount,
+        currentIndexTotalPoints: restored.pointCount,
+      })
+
+      return {
+        pointCount: restored.pointCount,
+        buildTimeMs: performance.now() - startedAt,
+        engineCount: geoIndexRegistry.indexes.length + 2,
+      }
     }
   }
 
@@ -3071,13 +3181,13 @@ async function buildSearchIndexes(
     pointCount: points.length,
     builtIndexes: 0,
     totalIndexes,
-    currentIndexId: 'dynamic-z-order-cells',
-    currentIndexLabel: 'Dynamic Z-order cells',
+    currentIndexId: index.id,
+    currentIndexLabel: index.label,
     currentIndexProcessedPoints: 0,
     currentIndexTotalPoints: points.length,
   })
 
-  await dynamicZOrderIndex().build(points, {
+  await index.build(points, {
     yieldEvery: 2_000,
     onProgress: (progress) => {
       postProgress({
@@ -3093,10 +3203,19 @@ async function buildSearchIndexes(
     },
   })
 
-  try {
-    await store.savePersistedDynamicIndex(catalogEpoch)
-  } catch {
-    // The index cache is disposable. Search remains correct with the in-memory index.
+  preparedSearchIndex = {
+    indexId: index.id,
+    catalogEpoch,
+    cacheDirty: index.id === 'dynamic-z-order-cells',
+  }
+
+  if (index.id === 'dynamic-z-order-cells') {
+    try {
+      await store.savePersistedDynamicIndex(catalogEpoch)
+      preparedSearchIndex = { ...preparedSearchIndex, cacheDirty: false }
+    } catch {
+      // The index cache is disposable. Search remains correct with the in-memory index.
+    }
   }
 
   const summary = {
@@ -3109,8 +3228,8 @@ async function buildSearchIndexes(
     pointCount: points.length,
     builtIndexes: totalIndexes,
     totalIndexes,
-    currentIndexId: 'dynamic-z-order-cells',
-    currentIndexLabel: 'Dynamic Z-order cells',
+    currentIndexId: index.id,
+    currentIndexLabel: index.label,
     currentIndexProcessedPoints: points.length,
     currentIndexTotalPoints: points.length,
   })
@@ -3220,6 +3339,7 @@ async function clearCatalog(): Promise<void> {
     DELETE FROM media_assets;
   `)
   bumpSqliteCatalogEpochInDb(requireDb())
+  invalidatePreparedSearchIndex()
 }
 
 type SqliteImportTransactionState = {
@@ -3274,7 +3394,10 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
     async upsertMedia(items) {
       await ensureMode()
       upsertMediaIntoSqlite(requireDb(), items)
-      if (items.length > 0) bumpSqliteCatalogEpochInDb(requireDb())
+      if (items.length > 0) {
+        const catalogEpoch = bumpSqliteCatalogEpochInDb(requireDb())
+        await applyIncrementalSearchIndexUpdate(items, catalogEpoch)
+      }
       return items.length
     },
     async prepareImportSource(source, duplicateSourceIds) {
@@ -3282,6 +3405,7 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
       prepareImportSource(requireDb(), source, duplicateSourceIds)
       if (duplicateSourceIds.length > 0) {
         bumpSqliteCatalogEpochInDb(requireDb())
+        invalidatePreparedSearchIndex()
       }
     },
     async writeMediaBatch(items) {
@@ -3317,7 +3441,8 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
         transactionActive = true
       }
       const sqliteTiming = upsertMediaIntoSqlite(activeDb, items)
-      bumpSqliteCatalogEpochInDb(activeDb)
+      const catalogEpoch = bumpSqliteCatalogEpochInDb(activeDb)
+      await applyIncrementalSearchIndexUpdate(items, catalogEpoch)
       if (transactionState) {
         transactionState.writtenItems += items.length
       }
@@ -3426,9 +3551,9 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
       await ensureMode()
       return saveOpfsDynamicIndex(catalogEpoch)
     },
-    async buildSearchIndexes(postProgress) {
+    async buildSearchIndexes(indexId, postProgress) {
       await ensureMode()
-      return buildSearchIndexes(this, postProgress)
+      return buildSearchIndexes(this, indexId, postProgress)
     },
     async getSearchIndexStats() {
       return getSearchIndexStats()
@@ -3518,8 +3643,8 @@ const indexedDbCatalogStore: CatalogStore = {
   bumpCatalogEpoch: idbBumpCatalogEpoch,
   loadPersistedDynamicIndex: loadIdbDynamicIndex,
   savePersistedDynamicIndex: saveIdbDynamicIndex,
-  buildSearchIndexes(postProgress) {
-    return buildSearchIndexes(this, postProgress)
+  buildSearchIndexes(indexId, postProgress) {
+    return buildSearchIndexes(this, indexId, postProgress)
   },
   getSearchIndexStats,
   listSources: idbListSources,
@@ -3585,7 +3710,11 @@ async function handleRequest(
     case 'buildGeoIndexes':
       return buildGeoIndexes(store, postProgress)
     case 'buildSearchIndexes':
-      return store.buildSearchIndexes(postProgress)
+      return store.buildSearchIndexes(
+        (request.payload as { indexId?: string } | undefined)?.indexId ??
+          'dynamic-z-order-cells',
+        postProgress,
+      )
     case 'searchGeoIndex':
       return searchGeoIndex(
         request.payload as { indexId: string; query: GeoSearchQuery },

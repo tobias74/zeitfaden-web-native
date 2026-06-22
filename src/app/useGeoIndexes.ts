@@ -25,7 +25,6 @@ export type UseGeoIndexesOptions = {
   catalogInfo: CatalogInfo | undefined
   catalogRevision: number
   selectedIndexId: string
-  indexCount: number
   onError(message: string): void
 }
 
@@ -34,7 +33,6 @@ export function useGeoIndexes({
   catalogInfo,
   catalogRevision,
   selectedIndexId,
-  indexCount,
   onError,
 }: UseGeoIndexesOptions): {
   geoPointCount: number
@@ -68,11 +66,12 @@ export function useGeoIndexes({
         phase: 'loading',
         pointCount: 0,
         builtIndexes: 0,
-        totalIndexes: indexCount,
+        totalIndexes: 1,
+        currentIndexId: selectedIndexId,
       })
 
       catalog
-        .buildSearchIndexes((progress) => {
+        .buildSearchIndexes(selectedIndexId, (progress) => {
           if (!cancelled) setGeoIndexProgress(progress)
         })
         .then(
@@ -96,7 +95,14 @@ export function useGeoIndexes({
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [catalog, catalogInfo, catalogRevision, indexCount, onError, resetIndexState])
+  }, [
+    catalog,
+    catalogInfo,
+    catalogRevision,
+    onError,
+    resetIndexState,
+    selectedIndexId,
+  ])
 
   useEffect(() => {
     if (!catalogInfo) return

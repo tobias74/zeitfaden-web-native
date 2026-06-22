@@ -73,7 +73,10 @@ class TauriCatalogBackend implements CatalogBackend {
   async buildGeoIndexes(
     onProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<GeoIndexBuildSummary> {
-    const summary = await this.buildSearchIndexes(onProgress)
+    const summary = await this.buildSearchIndexes(
+      'dynamic-z-order-cells',
+      onProgress,
+    )
     return {
       pointCount: summary.pointCount,
       buildTimeMs: summary.buildTimeMs,
@@ -81,6 +84,7 @@ class TauriCatalogBackend implements CatalogBackend {
   }
 
   async buildSearchIndexes(
+    indexId: string,
     onProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<SearchIndexBuildSummary> {
     const unlisten = await listen<GeoIndexBuildProgress>(
@@ -91,7 +95,7 @@ class TauriCatalogBackend implements CatalogBackend {
     )
 
     try {
-      return await invoke('build_search_indexes')
+      return await invoke('build_search_indexes', { indexId })
     } finally {
       unlisten()
     }
