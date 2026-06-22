@@ -200,4 +200,25 @@ describe('App pagination', () => {
       expect(screen.getAllByText('item-100.jpg')).not.toHaveLength(0)
     })
   })
+
+  it('passes the explain setting into catalog search specs', async () => {
+    const { default: App } = await import('./App')
+
+    render(<App />)
+
+    expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
+
+    fireEvent.click(screen.getByText('Settings'))
+    fireEvent.click(screen.getByLabelText('Explain SQLite queries'))
+
+    await waitFor(() => {
+      expect(
+        searchMediaCalls.some(
+          (query) =>
+            query.purpose === 'results' &&
+            query.diagnostics?.explainSql === true,
+        ),
+      ).toBe(true)
+    })
+  })
 })

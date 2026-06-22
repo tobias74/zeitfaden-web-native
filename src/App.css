@@ -461,6 +461,42 @@
   font-weight: 720;
 }
 
+.metrics-grid .metric-text {
+  font-size: 13px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.sql-plan-panel {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid #d9e1dd;
+  border-radius: 6px;
+  background: #fbfcfb;
+  color: #162018;
+  font-size: 12px;
+}
+
+.sql-plan-panel span {
+  color: #68746f;
+}
+
+.sql-plan-panel strong {
+  display: block;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.sql-plan-list {
+  max-height: 118px;
+  margin: 0;
+  padding-left: 18px;
+  overflow: auto;
+  color: #47534d;
+  line-height: 1.35;
+}
+
 .validation {
   min-height: 32px;
   display: flex;
@@ -695,6 +731,21 @@
 
 .settings-select-row select {
   width: 100%;
+}
+
+.settings-checkbox-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #162018;
+  font-size: 13px;
+}
+
+.settings-checkbox-row input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
 }
 
 .settings-hint {

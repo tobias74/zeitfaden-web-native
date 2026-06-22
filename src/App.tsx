@@ -90,6 +90,7 @@ const MAP_HEIGHT_KEY = 'geo-media-index-lab:map-height'
 const RESULT_DISPLAY_MODE_KEY = 'geo-media-index-lab:result-display-mode'
 const RESULT_THUMBNAIL_SIZE_KEY = 'geo-media-index-lab:result-thumbnail-size'
 const RESULT_METADATA_KEY = 'geo-media-index-lab:result-metadata'
+const EXPLAIN_SQL_KEY = 'geo-media-index-lab:explain-sql'
 const RESULT_PAGE_SIZE_KEY = 'geo-media-index-lab:result-page-size'
 const RESULT_PAGE_SIZE_OPTIONS = [50, 100, 250, 500] as const
 const DEFAULT_RESULT_PAGE_SIZE = 100
@@ -454,6 +455,9 @@ function App() {
   const [showResultMetadata, setShowResultMetadata] = useState(() =>
     storedBoolean(RESULT_METADATA_KEY, true),
   )
+  const [explainSqlQueries, setExplainSqlQueries] = useState(() =>
+    storedBoolean(EXPLAIN_SQL_KEY, false),
+  )
   const [leftWidth, setLeftWidth] = useState(() =>
     clamp(storedNumber(LEFT_WIDTH_KEY, DEFAULT_LEFT_WIDTH), MIN_LEFT_WIDTH, MAX_LEFT_WIDTH),
   )
@@ -517,6 +521,12 @@ function App() {
   })
   const [indexStatsOverride, setIndexStatsOverride] =
     useState<SearchIndexStats>()
+  const searchDiagnostics = useMemo(
+    () => ({
+      explainSql: explainSqlQueries,
+    }),
+    [explainSqlQueries],
+  )
   const searchOrder = useMemo<SearchSpec['order']>(() => {
     if (distanceSortActive) {
       return {
@@ -548,12 +558,14 @@ function App() {
       limit: resultPageSize,
       offset: resultOffset,
       purpose: 'results',
+      diagnostics: searchDiagnostics,
     }),
     [
       geoBounds,
       kindFilter,
       resultOffset,
       resultPageSize,
+      searchDiagnostics,
       searchOrder,
       timeRange,
     ],
@@ -567,8 +579,9 @@ function App() {
       limit: MAP_POINT_LIMIT,
       offset: 0,
       purpose: 'map',
+      diagnostics: searchDiagnostics,
     }),
-    [kindFilter, searchOrder, timeRange],
+    [kindFilter, searchDiagnostics, searchOrder, timeRange],
   )
   const searchWindows = useSearchResults({
     catalog,
@@ -694,6 +707,11 @@ function App() {
       webCatalogStorageMode,
     ],
   )
+
+  const changeExplainSqlQueries = useCallback((checked: boolean) => {
+    setExplainSqlQueries(checked)
+    window.localStorage.setItem(EXPLAIN_SQL_KEY, checked ? 'true' : 'false')
+  }, [])
 
   useEffect(() => {
     return () => platform.dispose()
@@ -1124,6 +1142,21 @@ function App() {
                   </div>
                 )}
                 <div className="display-section">
+                  <label className="settings-checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={explainSqlQueries}
+                      onChange={(event) =>
+                        changeExplainSqlQueries(event.currentTarget.checked)
+                      }
+                    />
+                    <span>{t('explainSqlQueries')}</span>
+                  </label>
+                  <p className="settings-hint">
+                    {t('explainSqlQueriesDescription')}
+                  </p>
+                </div>
+                <div className="display-section">
                   <span>{t('activityLog')}</span>
                   <div className="activity-log" aria-label={t('activityLog')}>
                     {activityLog.map((entry) => (
@@ -1389,13 +1422,46 @@ function App() {
               </div>
               <dl className="metrics-grid">
                 <div>
+                  <dt>{t('engine')}</dt>
+                  <dd className="metric-text">
+                    {effectiveIndexStats.engineLabel ??
+                      effectiveIndexStats.engineId}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t('storage')}</dt>
+                  <dd className="metric-text">
+                    {effectiveIndexStats.storageMode ?? '-'}
+                  </dd>
+                </div>
+                <div>
                   <dt>{t('geoPoints')}</dt>
                   <dd>{geoPointCount.toLocaleString(locale)}</dd>
                 </div>
                 <div>
                   <dt>{t('query')}</dt>
                   <dd>
-                    {effectiveIndexStats.lastQueryTimeMs?.toFixed(2) ?? '0'} ms
+                    {(
+                      effectiveIndexStats.queryTimeMs ??
+                      effectiveIndexStats.lastQueryTimeMs ??
+                      0
+                    ).toFixed(2)}{' '}
+                    ms
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t('rows')}</dt>
+                  <dd>
+                    {statsNumber(
+                      effectiveIndexStats.rowsReturned ?? resultItems.length,
+                      locale,
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t('offset')}</dt>
+                  <dd>
+                    {statsNumber(effectiveIndexStats.offset ?? resultOffset, locale)}
                   </dd>
                 </div>
                 <div>
@@ -1425,6 +1491,25 @@ function App() {
                   </dd>
                 </div>
               </dl>
+              {explainSqlQueries && effectiveIndexStats.sqlPlan && (
+                <div className="sql-plan-panel">
+                  <div>
+                    <span>{t('usedIndexes')}</span>
+                    <strong>
+                      {effectiveIndexStats.sqlPlan.usedIndexes.length > 0
+                        ? effectiveIndexStats.sqlPlan.usedIndexes.join(', ')
+                        : t('none')}
+                    </strong>
+                  </div>
+                  <ol className="sql-plan-list">
+                    {effectiveIndexStats.sqlPlan.rows.map((row) => (
+                      <li key={`${row.id}-${row.parent}-${row.detail}`}>
+                        {row.detail}
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              )}
               {validation && (
                 <p
                   className={

@@ -42,6 +42,9 @@ const en = {
   distanceFromMapPoint: 'Distance from map point',
   distances: 'Distances',
   engine: 'Engine',
+  explainSqlQueries: 'Explain SQLite queries',
+  explainSqlQueriesDescription:
+    'Adds SQLite query-plan diagnostics when SQLite answers a query. This can add a little overhead.',
   filesCouldNotBeRead: '{count} files could not be read.',
   filesFound: '{count} items found',
   from: 'From',
@@ -83,6 +86,7 @@ const en = {
   nextItem: 'Next item',
   nextPage: 'Next page',
   nodes: 'Nodes',
+  none: 'None',
   noTimestamp: 'No timestamp',
   oldestFirst: 'Oldest first',
   page: 'Page',
@@ -108,12 +112,16 @@ const en = {
   sort: 'Sort',
   sources: 'sources',
   sqliteOpfs: 'SQLite OPFS',
+  offset: 'Offset',
+  rows: 'Rows',
+  storage: 'Storage',
   thumbnailSize: 'Thumbnail size',
   to: 'To',
   video: 'video',
   videos: 'Videos',
   visible: 'visible',
   visited: 'Visited',
+  usedIndexes: 'Used indexes',
 } as const
 
 export type TranslationKey = keyof typeof en
@@ -152,6 +160,9 @@ const de: Record<TranslationKey, string> = {
   distanceFromMapPoint: 'Distanz vom Kartenpunkt',
   distances: 'Distanzen',
   engine: 'Engine',
+  explainSqlQueries: 'SQLite-Abfragen erklaeren',
+  explainSqlQueriesDescription:
+    'Fuegt SQLite-Abfrageplan-Diagnostik hinzu, wenn SQLite eine Abfrage beantwortet. Das kann etwas Overhead erzeugen.',
   filesCouldNotBeRead: '{count} Dateien konnten nicht gelesen werden.',
   filesFound: '{count} Elemente gefunden',
   from: 'Von',
@@ -194,6 +205,7 @@ const de: Record<TranslationKey, string> = {
   nextItem: 'Nächstes Element',
   nextPage: 'Nächste Seite',
   nodes: 'Knoten',
+  none: 'Keine',
   noTimestamp: 'Kein Zeitstempel',
   oldestFirst: 'Älteste zuerst',
   page: 'Seite',
@@ -220,12 +232,16 @@ const de: Record<TranslationKey, string> = {
   sort: 'Sortierung',
   sources: 'Quellen',
   sqliteOpfs: 'SQLite OPFS',
+  offset: 'Offset',
+  rows: 'Zeilen',
+  storage: 'Speicher',
   thumbnailSize: 'Vorschaugröße',
   to: 'Bis',
   video: 'Video',
   videos: 'Videos',
   visible: 'sichtbar',
   visited: 'Besucht',
+  usedIndexes: 'Genutzte Indizes',
 }
 
 const dictionaries: Record<Language, Record<TranslationKey, string>> = {

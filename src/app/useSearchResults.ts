@@ -35,6 +35,13 @@ const defaultResultMetrics: SearchIndexStats = {
   candidatesInspected: 0,
   prunedByGeo: 0,
   prunedByTime: 0,
+  queryPurpose: 'results',
+  storageMode: 'sqlite',
+  queryTimeMs: 0,
+  rowsReturned: 0,
+  limit: 0,
+  offset: 0,
+  limitReached: false,
 }
 
 function searchPageItemsToMediaItems(items: EnrichedSearchResult[]): MediaItem[] {

@@ -96,6 +96,10 @@ export type SearchOrder =
       engineId?: string
     }
 
+export type SearchDiagnostics = {
+  explainSql?: boolean
+}
+
 export type SearchSpec = TimeRange & {
   kind?: KindFilter
   sourceId?: string
@@ -105,6 +109,7 @@ export type SearchSpec = TimeRange & {
   limit?: number
   offset?: number
   purpose: SearchPurpose
+  diagnostics?: SearchDiagnostics
 }
 
 export type GeoIndexBuildStep = {
@@ -143,10 +148,31 @@ export type GeoIndexStats = {
   prunedByTime: number
 }
 
+export type SearchStorageMode = 'sqlite' | 'indexeddb' | 'native'
+
+export type SqlExplainPlanRow = {
+  id: number
+  parent: number
+  detail: string
+}
+
+export type SqlExplainPlan = {
+  rows: SqlExplainPlanRow[]
+  usedIndexes: string[]
+}
+
 export type SearchIndexStats = GeoIndexStats & {
   engineLabel?: string
   exact?: boolean
   persistent?: boolean
+  queryPurpose?: SearchPurpose
+  storageMode?: SearchStorageMode
+  queryTimeMs?: number
+  rowsReturned?: number
+  limit?: number
+  offset?: number
+  limitReached?: boolean
+  sqlPlan?: SqlExplainPlan
 }
 
 export type SearchResultMetrics = SearchIndexStats

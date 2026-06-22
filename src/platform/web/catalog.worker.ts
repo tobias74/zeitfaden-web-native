@@ -17,6 +17,7 @@ import {
 } from '../../lib/geoPoint'
 import { GoogleTakeoutLocationStreamParser } from '../../lib/googleTakeoutStream'
 import { detectMediaKind, pathDisplayName } from '../../lib/media'
+import { createSqlExplainPlan } from '../../lib/sqlExplain'
 import { SearchIndexRegistry as SearchIndexEngineRegistry } from '../../search/registry'
 import type {
   CatalogQuery,
@@ -31,6 +32,8 @@ import type {
   SearchIndexStats,
   SearchPage,
   SearchSpec,
+  SearchStorageMode,
+  SqlExplainPlan,
   TimeRange,
   ValidationReport,
 } from '../../types'
@@ -70,6 +73,22 @@ type SqliteDb = {
   ) => Record<string, unknown>[]
   selectValue: (sql: string, bind?: unknown[]) => unknown
 }
+
+type SqliteSelectPlanRow = {
+  id?: unknown
+  parent?: unknown
+  detail?: unknown
+}
+
+type MediaSearchRows = {
+  items: MediaItem[]
+  sqlPlan?: SqlExplainPlan
+}
+
+type MediaSearchRowsFn = (
+  query: CatalogQuery,
+  options?: { explainSql?: boolean },
+) => Promise<MediaSearchRows>
 
 type SqliteModule = Awaited<ReturnType<typeof sqlite3InitModule>>
 type SqliteStorageMode = 'opfs'
@@ -952,6 +971,12 @@ async function idbListMedia(query: CatalogQuery): Promise<MediaItem[]> {
   matches.sort((a, b) => compareIdbAssetsBytimestamp(query.sort, a, b))
   const results = matches.slice(offset, offset + limit)
   return idbMediaItemsFromAssets(database, results, query.sourceId)
+}
+
+async function idbSearchRows(query: CatalogQuery): Promise<MediaSearchRows> {
+  return {
+    items: await idbListMedia(query),
+  }
 }
 
 async function idbGetMediaByIds(ids: string[]): Promise<MediaItem[]> {
@@ -2497,9 +2522,12 @@ async function importGeoFileIntoCatalog(
   }
 }
 
-async function listMedia(query: CatalogQuery): Promise<MediaItem[]> {
-  await ensureDb()
-  const activeDb = requireDb()
+function sqliteListMediaStatement(query: CatalogQuery): {
+  sql: string
+  bind: unknown[]
+  limit: number
+  offset: number
+} {
   const where = [
     `EXISTS (
       SELECT 1 FROM media_locations l
@@ -2546,8 +2574,8 @@ async function listMedia(query: CatalogQuery): Promise<MediaItem[]> {
   const offset = Math.max(0, query.offset ?? 0)
   bind.push(limit, offset)
 
-  const rows = activeDb.selectObjects(
-    `
+  return {
+    sql: `
       SELECT a.*
       FROM media_assets a
       WHERE ${where.join(' AND ')}
@@ -2555,9 +2583,50 @@ async function listMedia(query: CatalogQuery): Promise<MediaItem[]> {
       LIMIT ? OFFSET ?
     `,
     bind,
-  )
+    limit,
+    offset,
+  }
+}
 
-  return mediaItemsFromAssetRows(activeDb, rows, query.sourceId)
+function sqliteExplainPlan(
+  activeDb: SqliteDb,
+  sql: string,
+  bind: unknown[],
+): SqlExplainPlan {
+  const rows = activeDb.selectObjects(
+    `EXPLAIN QUERY PLAN ${sql}`,
+    bind,
+  ) as SqliteSelectPlanRow[]
+
+  return createSqlExplainPlan(
+    rows.map((row) => ({
+      id: Number(row.id ?? 0),
+      parent: Number(row.parent ?? 0),
+      detail: String(row.detail ?? ''),
+    })),
+  )
+}
+
+async function sqliteSearchRows(
+  query: CatalogQuery,
+  options?: { explainSql?: boolean },
+): Promise<MediaSearchRows> {
+  await ensureDb()
+  const activeDb = requireDb()
+  const statement = sqliteListMediaStatement(query)
+  const sqlPlan = options?.explainSql
+    ? sqliteExplainPlan(activeDb, statement.sql, statement.bind)
+    : undefined
+  const rows = activeDb.selectObjects(statement.sql, statement.bind)
+
+  return {
+    items: mediaItemsFromAssetRows(activeDb, rows, query.sourceId),
+    sqlPlan,
+  }
+}
+
+async function listMedia(query: CatalogQuery): Promise<MediaItem[]> {
+  return (await sqliteSearchRows(query)).items
 }
 
 function defaultSearchStats(
@@ -2576,6 +2645,31 @@ function defaultSearchStats(
     candidatesInspected: 0,
     prunedByGeo: 0,
     prunedByTime: 0,
+  }
+}
+
+function withQueryMetrics(
+  base: SearchIndexStats,
+  spec: SearchSpec,
+  storageMode: SearchStorageMode,
+  queryTimeMs: number,
+  rowsReturned: number,
+  limit: number,
+  offset: number,
+  limitReached: boolean,
+  sqlPlan?: SqlExplainPlan,
+): SearchIndexStats {
+  return {
+    ...base,
+    queryPurpose: spec.purpose,
+    storageMode,
+    queryTimeMs,
+    lastQueryTimeMs: base.lastQueryTimeMs ?? queryTimeMs,
+    rowsReturned,
+    limit,
+    offset,
+    limitReached,
+    sqlPlan,
   }
 }
 
@@ -2626,7 +2720,8 @@ function createSqlSearchEngine(
   engineId: string,
   engineLabel: string,
   supportsGeoBounds: boolean,
-  listMediaFn: (query: CatalogQuery) => Promise<MediaItem[]>,
+  storageMode: SearchStorageMode,
+  searchRowsFn: MediaSearchRowsFn,
 ): SearchIndexEngine {
   return {
     id: engineId,
@@ -2647,14 +2742,29 @@ function createSqlSearchEngine(
     },
     async search(spec) {
       const limit = Math.max(1, Math.min(spec.limit ?? 500, 10_000))
-      const rows = await listMediaFn(searchSpecToCatalogQuery(spec, limit + 1))
-      const limitedRows = rows.slice(0, limit)
+      const offset = Math.max(0, spec.offset ?? 0)
+      const startedAt = performance.now()
+      const rows = await searchRowsFn(searchSpecToCatalogQuery(spec, limit + 1), {
+        explainSql: spec.diagnostics?.explainSql,
+      })
+      const limitedRows = rows.items.slice(0, limit)
+      const limitReached = rows.items.length > limit
       return {
         items: mediaItemsToSearchResults(limitedRows),
-        resultMetrics: defaultSearchStats(engineId, engineLabel),
+        resultMetrics: withQueryMetrics(
+          defaultSearchStats(engineId, engineLabel),
+          spec,
+          storageMode,
+          performance.now() - startedAt,
+          limitedRows.length,
+          limit,
+          offset,
+          limitReached,
+          rows.sqlPlan,
+        ),
         engineId,
         engineLabel,
-        limitReached: rows.length > limit,
+        limitReached,
       }
     },
     async stats() {
@@ -2666,6 +2776,7 @@ function createSqlSearchEngine(
 function createDistanceSearchEngine(
   geoIndex: (typeof geoIndexRegistry.indexes)[number],
   getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
+  storageMode: SearchStorageMode,
 ): SearchIndexEngine {
   return {
     id: geoIndex.id,
@@ -2690,6 +2801,8 @@ function createDistanceSearchEngine(
       }
 
       const limit = Math.max(1, Math.min(spec.limit ?? 500, 10_000))
+      const offset = Math.max(0, spec.offset ?? 0)
+      const startedAt = performance.now()
       const results = await searchGeoIndex({
         indexId: geoIndex.id,
         query: {
@@ -2709,14 +2822,25 @@ function createDistanceSearchEngine(
         exact: geoIndex.capabilities.exact,
         persistent: geoIndex.capabilities.persistent,
       }
+      const items = await enrichDistanceResults(getMediaByIdsFn, results)
+      const limitReached =
+        results.length >= limit &&
+        resultMetrics.pointCount > offset + limit
       return {
-        items: await enrichDistanceResults(getMediaByIdsFn, results),
-        resultMetrics,
+        items,
+        resultMetrics: withQueryMetrics(
+          resultMetrics,
+          spec,
+          storageMode,
+          performance.now() - startedAt,
+          items.length,
+          limit,
+          offset,
+          limitReached,
+        ),
         engineId: geoIndex.id,
         engineLabel: geoIndex.label,
-        limitReached:
-          results.length >= limit &&
-          resultMetrics.pointCount > (spec.offset ?? 0) + limit,
+        limitReached,
       }
     },
     async stats() {
@@ -2731,34 +2855,42 @@ function createDistanceSearchEngine(
 }
 
 function createSearchRegistry(
-  listMediaFn: (query: CatalogQuery) => Promise<MediaItem[]>,
+  searchRowsFn: MediaSearchRowsFn,
   getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
+  storageMode: SearchStorageMode,
 ): SearchIndexEngineRegistry {
   return new SearchIndexEngineRegistry([
     createSqlSearchEngine(
       'sqlite-timestamp',
       'SQLite timestamp B-tree',
       false,
-      listMediaFn,
+      storageMode,
+      searchRowsFn,
     ),
     createSqlSearchEngine(
       'sqlite-bbox-time',
       'SQLite bbox/time B-tree',
       true,
-      listMediaFn,
+      storageMode,
+      searchRowsFn,
     ),
     ...geoIndexRegistry.indexes.map((index) =>
-      createDistanceSearchEngine(index, getMediaByIdsFn),
+      createDistanceSearchEngine(index, getMediaByIdsFn, storageMode),
     ),
   ])
 }
 
 async function searchMediaWithCatalogFunctions(
   spec: SearchSpec,
-  listMediaFn: (query: CatalogQuery) => Promise<MediaItem[]>,
+  searchRowsFn: MediaSearchRowsFn,
   getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
+  storageMode: SearchStorageMode,
 ): Promise<SearchPage> {
-  return createSearchRegistry(listMediaFn, getMediaByIdsFn).search(spec)
+  return createSearchRegistry(
+    searchRowsFn,
+    getMediaByIdsFn,
+    storageMode,
+  ).search(spec)
 }
 
 async function getMediaByIds(ids: string[]): Promise<MediaItem[]> {
@@ -3262,7 +3394,12 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
     },
     async searchMedia(spec) {
       await ensureMode()
-      return searchMediaWithCatalogFunctions(spec, listMedia, getMediaByIds)
+      return searchMediaWithCatalogFunctions(
+        spec,
+        sqliteSearchRows,
+        getMediaByIds,
+        'sqlite',
+      )
     },
     async getMediaByIds(ids) {
       await ensureMode()
@@ -3367,7 +3504,12 @@ const indexedDbCatalogStore: CatalogStore = {
   },
   listMedia: idbListMedia,
   searchMedia(spec) {
-    return searchMediaWithCatalogFunctions(spec, idbListMedia, idbGetMediaByIds)
+    return searchMediaWithCatalogFunctions(
+      spec,
+      idbSearchRows,
+      idbGetMediaByIds,
+      'indexeddb',
+    )
   },
   getMediaByIds: idbGetMediaByIds,
   getGeoPoints: idbGetGeoPoints,

@@ -8,7 +8,7 @@ use rusqlite::{params, params_from_iter, Connection, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -175,6 +175,12 @@ struct SearchOrder {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SearchDiagnostics {
+    explain_sql: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SearchSpec {
     kind: Option<String>,
     source_id: Option<String>,
@@ -186,6 +192,22 @@ struct SearchSpec {
     purpose: String,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    diagnostics: Option<SearchDiagnostics>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SqlExplainPlanRow {
+    id: i64,
+    parent: i64,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SqlExplainPlan {
+    rows: Vec<SqlExplainPlanRow>,
+    used_indexes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +229,14 @@ struct SearchIndexStats {
     candidates_inspected: i64,
     pruned_by_geo: i64,
     pruned_by_time: i64,
+    query_purpose: Option<String>,
+    storage_mode: Option<String>,
+    query_time_ms: Option<f64>,
+    rows_returned: Option<usize>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    limit_reached: Option<bool>,
+    sql_plan: Option<SqlExplainPlan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -437,6 +467,14 @@ fn empty_search_index_stats(engine_id: &str, engine_label: &str) -> SearchIndexS
         candidates_inspected: 0,
         pruned_by_geo: 0,
         pruned_by_time: 0,
+        query_purpose: None,
+        storage_mode: None,
+        query_time_ms: None,
+        rows_returned: None,
+        limit: None,
+        offset: None,
+        limit_reached: None,
+        sql_plan: None,
     }
 }
 
@@ -463,7 +501,64 @@ fn search_stats_from_geo(
         candidates_inspected: stats.candidates_inspected,
         pruned_by_geo: stats.pruned_by_geo,
         pruned_by_time: stats.pruned_by_time,
+        query_purpose: None,
+        storage_mode: None,
+        query_time_ms: None,
+        rows_returned: None,
+        limit: None,
+        offset: None,
+        limit_reached: None,
+        sql_plan: None,
     }
+}
+
+fn with_query_metrics(
+    mut stats: SearchIndexStats,
+    spec: &SearchSpec,
+    storage_mode: &str,
+    query_time_ms: f64,
+    rows_returned: usize,
+    limit: i64,
+    offset: i64,
+    limit_reached: bool,
+    sql_plan: Option<SqlExplainPlan>,
+) -> SearchIndexStats {
+    stats.query_purpose = Some(spec.purpose.clone());
+    stats.storage_mode = Some(storage_mode.to_string());
+    stats.query_time_ms = Some(query_time_ms);
+    if stats.last_query_time_ms.is_none() {
+        stats.last_query_time_ms = Some(query_time_ms);
+    }
+    stats.rows_returned = Some(rows_returned);
+    stats.limit = Some(limit);
+    stats.offset = Some(offset);
+    stats.limit_reached = Some(limit_reached);
+    stats.sql_plan = sql_plan;
+    stats
+}
+
+fn extract_sqlite_used_indexes(details: &[String]) -> Vec<String> {
+    let mut indexes = BTreeSet::<String>::new();
+    for detail in details {
+        for marker in [
+            "USING COVERING INDEX ",
+            "USING INDEX ",
+            "USING AUTOMATIC COVERING INDEX ",
+            "USING AUTOMATIC INDEX ",
+        ] {
+            if let Some(start) = detail.find(marker) {
+                let value = detail[start + marker.len()..]
+                    .split(|ch: char| ch.is_whitespace() || ch == ')')
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if !value.is_empty() {
+                    indexes.insert(value.to_string());
+                }
+            }
+        }
+    }
+    indexes.into_iter().collect()
 }
 
 fn to_radians(degrees: f64) -> f64 {
@@ -2378,6 +2473,42 @@ fn upsert_media(app: AppHandle, items: Vec<MediaItem>) -> AppResult<usize> {
 
 #[tauri::command]
 fn list_media(app: AppHandle, query: CatalogQuery) -> AppResult<Vec<MediaItem>> {
+    Ok(list_media_with_plan(app, query, false)?.0)
+}
+
+fn explain_query_plan(conn: &Connection, sql: &str, bind: &[Value]) -> AppResult<SqlExplainPlan> {
+    let explain_sql = format!("EXPLAIN QUERY PLAN {sql}");
+    let mut stmt = conn
+        .prepare(&explain_sql)
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params_from_iter(bind.iter()), |row| {
+            Ok(SqlExplainPlanRow {
+                id: row.get(0)?,
+                parent: row.get(1)?,
+                detail: row.get(3)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let mut plan_rows = Vec::new();
+    for row in rows {
+        plan_rows.push(row.map_err(|error| error.to_string())?);
+    }
+    let details = plan_rows
+        .iter()
+        .map(|row| row.detail.clone())
+        .collect::<Vec<_>>();
+    Ok(SqlExplainPlan {
+        rows: plan_rows,
+        used_indexes: extract_sqlite_used_indexes(&details),
+    })
+}
+
+fn list_media_with_plan(
+    app: AppHandle,
+    query: CatalogQuery,
+    explain_sql: bool,
+) -> AppResult<(Vec<MediaItem>, Option<SqlExplainPlan>)> {
     let conn = connect(&app)?;
     let mut where_sql = vec![
         "EXISTS (SELECT 1 FROM media_locations l WHERE l.content_hash = a.content_hash)"
@@ -2441,6 +2572,11 @@ fn list_media(app: AppHandle, query: CatalogQuery) -> AppResult<Vec<MediaItem>> 
         ",
         where_sql.join(" AND ")
     );
+    let sql_plan = if explain_sql {
+        Some(explain_query_plan(&conn, &sql, &bind)?)
+    } else {
+        None
+    };
     let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
     let rows = stmt
         .query_map(params_from_iter(bind.iter()), asset_from_row)
@@ -2450,7 +2586,10 @@ fn list_media(app: AppHandle, query: CatalogQuery) -> AppResult<Vec<MediaItem>> 
         items.push(row.map_err(|error| error.to_string())?);
     }
 
-    attach_locations(&conn, items, query.source_id.as_deref())
+    Ok((
+        attach_locations(&conn, items, query.source_id.as_deref())?,
+        sql_plan,
+    ))
 }
 
 fn sql_search_engine(spec: &SearchSpec) -> (&'static str, &'static str) {
@@ -2516,7 +2655,9 @@ fn enriched_distance_rows(
 
 #[tauri::command]
 fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
+    let started_at = Instant::now();
     let limit = spec.limit.unwrap_or(500).clamp(1, 10_000);
+    let offset = spec.offset.unwrap_or(0).max(0);
 
     if spec.order.kind == "distance" {
         let point = spec
@@ -2551,12 +2692,22 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
         } else {
             ("Dynamic Z-order cells", true, true)
         };
-        let result_metrics = search_stats_from_geo(geo_stats, engine_label, exact, persistent);
-        let offset = spec.offset.unwrap_or(0).max(0);
-        let limit_reached = (offset + limit) < result_metrics.point_count as i64;
+        let rows = enriched_distance_rows(items, results);
+        let limit_reached = (offset + limit) < geo_stats.point_count as i64;
+        let result_metrics = with_query_metrics(
+            search_stats_from_geo(geo_stats, engine_label, exact, persistent),
+            &spec,
+            "native",
+            started_at.elapsed().as_secs_f64() * 1000.0,
+            rows.len(),
+            limit,
+            offset,
+            limit_reached,
+            None,
+        );
 
         return Ok(SearchPage {
-            items: enriched_distance_rows(items, results),
+            items: rows,
             result_metrics,
             engine_id,
             engine_label: engine_label.to_string(),
@@ -2565,16 +2716,31 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
     }
 
     let (engine_id, engine_label) = sql_search_engine(&spec);
-    let rows = list_media(
+    let (rows, sql_plan) = list_media_with_plan(
         app,
         search_spec_to_catalog_query(&spec, limit.saturating_add(1)),
+        spec.diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.explain_sql)
+            .unwrap_or(false),
     )?;
     let limit_reached = rows.len() > limit as usize;
     let items = rows.into_iter().take(limit as usize).collect::<Vec<_>>();
+    let rows_returned = items.len();
 
     Ok(SearchPage {
         items: media_items_to_search_rows(items),
-        result_metrics: empty_search_index_stats(engine_id, engine_label),
+        result_metrics: with_query_metrics(
+            empty_search_index_stats(engine_id, engine_label),
+            &spec,
+            "native",
+            started_at.elapsed().as_secs_f64() * 1000.0,
+            rows_returned,
+            limit,
+            offset,
+            limit_reached,
+            sql_plan,
+        ),
         engine_id: engine_id.to_string(),
         engine_label: engine_label.to_string(),
         limit_reached: Some(limit_reached),
@@ -3758,6 +3924,21 @@ mod tests {
         assert_eq!(
             sha256_string("abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn extracts_sqlite_index_names_from_explain_details() {
+        assert_eq!(
+            extract_sqlite_used_indexes(&[
+                "SEARCH a USING COVERING INDEX idx_assets_kind_timestamp_hash (kind=?)".to_string(),
+                "SEARCH l USING INDEX idx_locations_content_hash (content_hash=?)".to_string(),
+                "SCAN media_assets".to_string(),
+            ]),
+            vec![
+                "idx_assets_kind_timestamp_hash".to_string(),
+                "idx_locations_content_hash".to_string(),
+            ]
         );
     }
 
