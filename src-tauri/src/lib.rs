@@ -2552,10 +2552,11 @@ fn list_media_with_plan(
         bind.push(Value::Integer(end_time));
     }
 
+    where_sql.push("a.timestamp IS NOT NULL".to_string());
     let order = if query.sort == "timestamp_asc" {
-        "CASE WHEN a.timestamp IS NULL THEN 1 ELSE 0 END, a.timestamp ASC, a.content_hash ASC"
+        "a.timestamp ASC, a.content_hash ASC"
     } else {
-        "CASE WHEN a.timestamp IS NULL THEN 1 ELSE 0 END, a.timestamp DESC, a.content_hash ASC"
+        "a.timestamp DESC, a.content_hash DESC"
     };
     let limit = query.limit.unwrap_or(500).clamp(1, 10_000);
     let offset = query.offset.unwrap_or(0).max(0);

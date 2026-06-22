@@ -2564,12 +2564,13 @@ function sqliteListMediaStatement(query: CatalogQuery): {
     bind.push(query.geoBounds.minLon, query.geoBounds.maxLon)
   }
 
+  where.push('a.timestamp IS NOT NULL')
   timeWhere(query, where, bind, 'a.')
 
   const order =
     query.sort === 'timestamp_asc'
-      ? 'CASE WHEN a.timestamp IS NULL THEN 1 ELSE 0 END, a.timestamp ASC, a.content_hash ASC'
-      : 'CASE WHEN a.timestamp IS NULL THEN 1 ELSE 0 END, a.timestamp DESC, a.content_hash ASC'
+      ? 'a.timestamp ASC, a.content_hash ASC'
+      : 'a.timestamp DESC, a.content_hash DESC'
   const limit = Math.max(1, Math.min(query.limit ?? 500, 10_000))
   const offset = Math.max(0, query.offset ?? 0)
   bind.push(limit, offset)
