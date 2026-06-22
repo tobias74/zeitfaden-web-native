@@ -33,11 +33,7 @@ import {
   validateSegmentedKdTreeManifest,
 } from '../../geo/segmentedKdTreePersistence'
 import {
-  S2_CELL_INDEX_LEVEL,
   s2CellIdHexForLatLon,
-  s2ChildCells,
-  s2RootCells,
-  type S2QueuedCell,
 } from '../../geo/s2Cells'
 import { GeoIndexRegistry } from '../../geo/registry'
 import { haversineMeters } from '../../lib/distance'
@@ -3564,88 +3560,6 @@ type S2DistanceCandidate = {
   distanceMeters: number
 }
 
-class S2CellQueue {
-  private readonly cells: S2QueuedCell[] = []
-
-  get length(): number {
-    return this.cells.length
-  }
-
-  push(cell: S2QueuedCell): void {
-    this.cells.push(cell)
-    this.bubbleUp(this.cells.length - 1)
-  }
-
-  pushMany(cells: S2QueuedCell[]): void {
-    for (const cell of cells) this.push(cell)
-  }
-
-  peek(): S2QueuedCell | undefined {
-    return this.cells[0]
-  }
-
-  pop(): S2QueuedCell | undefined {
-    if (this.cells.length === 0) return undefined
-    const first = this.cells[0]
-    const last = this.cells.pop()
-    if (last && this.cells.length > 0) {
-      this.cells[0] = last
-      this.bubbleDown(0)
-    }
-    return first
-  }
-
-  private bubbleUp(index: number): void {
-    let current = index
-    while (current > 0) {
-      const parent = Math.floor((current - 1) / 2)
-      if (compareQueuedCells(this.cells[parent], this.cells[current]) <= 0) {
-        break
-      }
-      this.swap(parent, current)
-      current = parent
-    }
-  }
-
-  private bubbleDown(index: number): void {
-    let current = index
-    while (true) {
-      const left = current * 2 + 1
-      const right = left + 1
-      let smallest = current
-      if (
-        left < this.cells.length &&
-        compareQueuedCells(this.cells[left], this.cells[smallest]) < 0
-      ) {
-        smallest = left
-      }
-      if (
-        right < this.cells.length &&
-        compareQueuedCells(this.cells[right], this.cells[smallest]) < 0
-      ) {
-        smallest = right
-      }
-      if (smallest === current) break
-      this.swap(current, smallest)
-      current = smallest
-    }
-  }
-
-  private swap(left: number, right: number): void {
-    const oldLeft = this.cells[left]
-    this.cells[left] = this.cells[right]
-    this.cells[right] = oldLeft
-  }
-}
-
-function compareQueuedCells(a: S2QueuedCell, b: S2QueuedCell): number {
-  return (
-    a.lowerBoundMeters - b.lowerBoundMeters ||
-    a.level - b.level ||
-    a.hex.localeCompare(b.hex)
-  )
-}
-
 function compareDistanceCandidates(
   a: S2DistanceCandidate,
   b: S2DistanceCandidate,
@@ -3664,6 +3578,45 @@ function trimDistanceCandidates(
   if (candidates.length > retainedLimit) {
     candidates.length = retainedLimit
   }
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max)
+}
+
+function cellSummaryLowerBoundMeters(
+  row: GeoS2CellRow,
+  queryLat: number,
+  queryLon: number,
+): number {
+  const minLat = toNumber(row.min_latitude)
+  const maxLat = toNumber(row.max_latitude)
+  const minLon = toNumber(row.min_longitude)
+  const maxLon = toNumber(row.max_longitude)
+  if (
+    typeof minLat !== 'number' ||
+    typeof maxLat !== 'number' ||
+    typeof minLon !== 'number' ||
+    typeof maxLon !== 'number'
+  ) {
+    return Number.POSITIVE_INFINITY
+  }
+
+  if (
+    queryLat >= minLat &&
+    queryLat <= maxLat &&
+    queryLon >= minLon &&
+    queryLon <= maxLon
+  ) {
+    return 0
+  }
+
+  return haversineMeters(
+    queryLat,
+    queryLon,
+    clampNumber(queryLat, minLat, maxLat),
+    clampNumber(queryLon, minLon, maxLon),
+  )
 }
 
 function geoS2CellMatchesSpec(
@@ -3844,6 +3797,7 @@ async function sqliteS2DistanceSearch(
   if (spec.order.kind !== 'distance') {
     throw new Error('S2 cell B-tree cannot serve timestamp queries.')
   }
+  const queryPoint = spec.order.point
 
   const activeDb = requireDb()
   const startedAt = performance.now()
@@ -3866,8 +3820,6 @@ async function sqliteS2DistanceSearch(
         optionalSqliteBind(totalCandidateStatement.bind),
       ),
     ) ?? 0
-  const queue = new S2CellQueue()
-  queue.pushMany(s2RootCells(spec.order.point.lat, spec.order.point.lon))
   const candidates: S2DistanceCandidate[] = []
   const pointStatement = geoS2PointSql(spec)
   let distanceComputations = 0
@@ -3875,7 +3827,7 @@ async function sqliteS2DistanceSearch(
   let pagesRead = 0
   let candidatesInspected = 0
   let prunedByGeo = 0
-  let prunedByTime = 0
+  const prunedByTime = 0
   let sqliteQueryCount = 3 + (sqlPlan ? 1 : 0)
 
   if (totalCandidateCount <= retainedLimit) {
@@ -3937,56 +3889,49 @@ async function sqliteS2DistanceSearch(
     }
   }
 
-  while (queue.length > 0) {
-    const nextCell = queue.peek()
+  sqliteQueryCount += 1
+  const occupiedCells = (
+    activeDb.selectObjects('SELECT * FROM geo_s2_cells') as GeoS2CellRow[]
+  )
+    .filter((row) => geoS2CellMatchesSpec(row, spec))
+    .map((row) => ({
+      row,
+      cellId: String(row.cell_id ?? ''),
+      lowerBoundMeters: cellSummaryLowerBoundMeters(
+        row,
+        queryPoint.lat,
+        queryPoint.lon,
+      ),
+    }))
+    .filter(
+      (cell) =>
+        cell.cellId !== '' && Number.isFinite(cell.lowerBoundMeters),
+    )
+    .sort(
+      (a, b) =>
+        a.lowerBoundMeters - b.lowerBoundMeters ||
+        a.cellId.localeCompare(b.cellId),
+    )
+
+  for (const cell of occupiedCells) {
     const worstDistance =
       candidates.length >= retainedLimit
         ? candidates[retainedLimit - 1]?.distanceMeters
         : undefined
     if (
-      nextCell &&
       typeof worstDistance === 'number' &&
-      nextCell.lowerBoundMeters > worstDistance
+      cell.lowerBoundMeters > worstDistance
     ) {
-      prunedByGeo += queue.length
+      prunedByGeo += occupiedCells.length - nodesVisited
       break
     }
 
-    const cell = queue.pop()
-    if (!cell) break
     nodesVisited += 1
-
-    if (cell.level < S2_CELL_INDEX_LEVEL) {
-      queue.pushMany(
-        s2ChildCells(cell, spec.order.point.lat, spec.order.point.lon),
-      )
-      continue
-    }
-
-    sqliteQueryCount += 1
-    const cellRows = activeDb.selectObjects(
-      'SELECT * FROM geo_s2_cells WHERE cell_id = ?',
-      [cell.hex],
-    ) as GeoS2CellRow[]
-    if (cellRows.length === 0) continue
-
-    const cellRow = cellRows[0]
-    if (!geoS2CellMatchesSpec(cellRow, spec)) {
-      if (
-        typeof spec.startTime === 'number' ||
-        typeof spec.endTime === 'number'
-      ) {
-        prunedByTime += 1
-      } else {
-        prunedByGeo += 1
-      }
-      continue
-    }
 
     sqliteQueryCount += 1
     pagesRead += 1
     const pointRows = activeDb.selectObjects(pointStatement.sql, [
-      cell.hex,
+      cell.cellId,
       ...pointStatement.bind,
     ]) as GeoS2PointRow[]
 
