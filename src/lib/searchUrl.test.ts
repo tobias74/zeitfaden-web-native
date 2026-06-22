@@ -46,7 +46,7 @@ describe('search URL state', () => {
       allowedPageSizes,
     )
 
-    expect(state.sort).toBe('captured_at_desc')
+    expect(state.sort).toBe('timestamp_desc')
     expect(state.kindFilter).toBe('all')
     expect(state.resultPage).toBe(0)
     expect(state.resultPageSize).toBe(100)
@@ -64,7 +64,7 @@ describe('search URL state', () => {
     const state: SearchUrlState = {
       startDate: '',
       endDate: '2026-06-21T12:45',
-      sort: 'captured_at_asc',
+      sort: 'timestamp_asc',
       kindFilter: 'video',
       resultPage: 1,
       resultPageSize: 50,
@@ -79,7 +79,7 @@ describe('search URL state', () => {
     }
 
     expect(buildSearchUrlParams(state, defaults).toString()).toBe(
-      'to=2026-06-21T12%3A45&sort=captured_at_asc&kind=video&page=2&pageSize=50&minLat=46.123457&maxLat=49&minLon=7&maxLon=12',
+      'to=2026-06-21T12%3A45&sort=timestamp_asc&kind=video&page=2&pageSize=50&minLat=46.123457&maxLat=49&minLon=7&maxLon=12',
     )
   })
 
@@ -101,7 +101,7 @@ describe('search URL state', () => {
 
     expect(
       buildSearchUrlParams(
-        { ...state, sort: 'captured_at_desc' },
+        { ...state, sort: 'timestamp_desc' },
         defaults,
     ).toString(),
     ).toBe('')

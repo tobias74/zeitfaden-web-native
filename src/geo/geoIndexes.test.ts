@@ -5,13 +5,13 @@ import { DynamicZOrderGeoIndex } from './dynamicZOrderGeoIndex'
 import { GeoIndexRegistry } from './registry'
 
 const points: GeoIndexPoint[] = [
-  { mediaId: 'zurich-a', lat: 47.3769, lon: 8.5417, capturedAt: 100 },
-  { mediaId: 'zurich-b', lat: 47.3769, lon: 8.5417, capturedAt: 200 },
-  { mediaId: 'basel', lat: 47.5596, lon: 7.5886, capturedAt: 300 },
-  { mediaId: 'munich', lat: 48.1351, lon: 11.582, capturedAt: 400 },
-  { mediaId: 'dateline-east', lat: 0, lon: 179.9, capturedAt: 500 },
-  { mediaId: 'dateline-west', lat: 0, lon: -179.9, capturedAt: 600 },
-  { mediaId: 'north-pole', lat: 89.9, lon: 15, capturedAt: 700 },
+  { mediaId: 'zurich-a', lat: 47.3769, lon: 8.5417, timestamp: 100 },
+  { mediaId: 'zurich-b', lat: 47.3769, lon: 8.5417, timestamp: 200 },
+  { mediaId: 'basel', lat: 47.5596, lon: 7.5886, timestamp: 300 },
+  { mediaId: 'munich', lat: 48.1351, lon: 11.582, timestamp: 400 },
+  { mediaId: 'dateline-east', lat: 0, lon: 179.9, timestamp: 500 },
+  { mediaId: 'dateline-west', lat: 0, lon: -179.9, timestamp: 600 },
+  { mediaId: 'north-pole', lat: 89.9, lon: 15, timestamp: 700 },
   { mediaId: 'missing-time', lat: 45.4408, lon: 12.3155 },
 ]
 
@@ -154,7 +154,7 @@ describe('geo indexes', () => {
       mediaId: `dense-${index.toString().padStart(6, '0')}`,
       lat: 48.137,
       lon: 11.576,
-      capturedAt: index,
+      timestamp: index,
     }))
     const index = new DynamicZOrderGeoIndex()
     const processedCounts: number[] = []

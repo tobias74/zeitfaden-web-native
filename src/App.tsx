@@ -11,6 +11,7 @@ import {
   Languages,
   List,
   MapPin,
+  Save,
   Settings2,
   Trash2,
   Video,
@@ -303,9 +304,6 @@ function geoIndexProgressDetail(
 }
 
 function formatDimensions(item: MediaItem): string | undefined {
-  if (typeof item.width === 'number' && typeof item.height === 'number') {
-    return `${item.width} x ${item.height}`
-  }
   if (typeof item.durationMs === 'number') {
     return `${Math.round(item.durationMs / 1_000)} s`
   }
@@ -587,10 +585,12 @@ function App() {
   const {
     busy: importBusy,
     importProgress,
+    activeImportKind,
     cancelling: cancellingImport,
     importFolder,
     importGeoFile,
     cancelImport,
+    commitImport,
   } = useImports({
     platform,
     locale,
@@ -600,6 +600,10 @@ function App() {
     onImported: handleImported,
   })
   const busy = importBusy || catalogBusy
+  const canCommitImport =
+    Boolean(importProgress) &&
+    activeImportKind === 'geo' &&
+    (platform.kind === 'tauri' || webCatalogStorageMode === 'sqlite')
   const visibleResults = distanceSortActive
   const catalogPageResultItems = useMemo(
     () => mediaItemsToResults(mediaItems),
@@ -1145,7 +1149,6 @@ function App() {
                         disabled={busy}
                       >
                         <option value="sqlite">{t('sqliteOpfs')}</option>
-                        <option value="sqlite-memory">{t('sqliteMemory')}</option>
                         <option value="indexeddb">{t('indexedDb')}</option>
                       </select>
                     </label>
@@ -1194,6 +1197,16 @@ function App() {
                   <span>{importProgressLabel(importProgress, t, locale)}</span>
                   <div className="import-progress-actions">
                     <strong>{importProgressDetail(importProgress, t, locale)}</strong>
+                    {canCommitImport && (
+                      <button
+                        type="button"
+                        className="import-cancel-button"
+                        onClick={commitImport}
+                      >
+                        <Save size={13} />
+                        {t('commitImport')}
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="import-cancel-button"
@@ -1394,8 +1407,8 @@ function App() {
                     setSortMode(event.target.value as SearchSortMode)
                   }
                 >
-                  <option value="captured_at_desc">{t('newestFirst')}</option>
-                  <option value="captured_at_asc">{t('oldestFirst')}</option>
+                  <option value="timestamp_desc">{t('newestFirst')}</option>
+                  <option value="timestamp_asc">{t('oldestFirst')}</option>
                   <option value="distance">
                     {t('distanceFromMapPoint')}
                   </option>
@@ -1646,7 +1659,7 @@ function App() {
                     <>
                       <p>
                         {formatDateTime(
-                          result.item.capturedAt,
+                          result.item.timestamp,
                           locale,
                           t('noTimestamp'),
                         )}
@@ -1681,7 +1694,7 @@ function App() {
                   <span>{t(result.item.kind)}</span>
                   <span>
                     {formatDateTime(
-                      result.item.capturedAt,
+                      result.item.timestamp,
                       locale,
                       t('noTimestamp'),
                     )}

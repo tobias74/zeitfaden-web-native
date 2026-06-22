@@ -5,7 +5,7 @@ import type { CatalogBackend, CatalogInfo } from '../platform/types'
 import type { GeoIndexStats } from '../types'
 
 const catalogInfo: CatalogInfo = {
-  storageMode: 'memory',
+  storageMode: 'opfs',
   sqliteVersion: 'test',
   filename: ':memory:',
 }

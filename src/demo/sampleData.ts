@@ -3,10 +3,7 @@ import type { MediaItem, MediaSource } from '../types'
 export const sampleSource: MediaSource = {
   id: 'sample-source',
   label: 'Sample geotagged library',
-  addedAt: 1_704_067_200_000,
 }
-
-const day = 24 * 60 * 60 * 1_000
 
 function sampleItem(item: Omit<MediaItem, 'contentHash' | 'locations'>): MediaItem {
   return {
@@ -17,10 +14,8 @@ function sampleItem(item: Omit<MediaItem, 'contentHash' | 'locations'>): MediaIt
         id: `${item.id}-location`,
         sourceId: item.sourceId,
         sourceLabel: sampleSource.label,
-        sourceAddedAt: sampleSource.addedAt,
+        rootPath: sampleSource.rootPath,
         relativePath: item.relativePath,
-        displayName: item.displayName,
-        lastSeenAt: item.lastSeenAt,
       },
     ],
   }
@@ -35,14 +30,9 @@ export const sampleMedia: MediaItem[] = [
     kind: 'image',
     mimeType: 'image/jpeg',
     sizeBytes: 4_200_000,
-    width: 4000,
-    height: 3000,
-    capturedAt: Date.UTC(2024, 4, 11, 18, 20),
-    capturedAtSource: 'exif',
+    timestamp: Date.UTC(2024, 4, 11, 18, 20),
     latitude: 47.3769,
     longitude: 8.5417,
-    geoSource: 'exif',
-    lastSeenAt: Date.now(),
   }),
   sampleItem({
     id: 'sample-basel-rhine',
@@ -52,14 +42,9 @@ export const sampleMedia: MediaItem[] = [
     kind: 'image',
     mimeType: 'image/jpeg',
     sizeBytes: 3_600_000,
-    width: 3840,
-    height: 2160,
-    capturedAt: Date.UTC(2023, 8, 2, 10, 5),
-    capturedAtSource: 'exif',
+    timestamp: Date.UTC(2023, 8, 2, 10, 5),
     latitude: 47.5596,
     longitude: 7.5886,
-    geoSource: 'exif',
-    lastSeenAt: Date.now() - day,
   }),
   sampleItem({
     id: 'sample-munich-park',
@@ -69,14 +54,9 @@ export const sampleMedia: MediaItem[] = [
     kind: 'image',
     mimeType: 'image/jpeg',
     sizeBytes: 5_100_000,
-    width: 4200,
-    height: 2800,
-    capturedAt: Date.UTC(2022, 6, 20, 14, 45),
-    capturedAtSource: 'exif',
+    timestamp: Date.UTC(2022, 6, 20, 14, 45),
     latitude: 48.1582,
     longitude: 11.5878,
-    geoSource: 'exif',
-    lastSeenAt: Date.now() - 2 * day,
   }),
   sampleItem({
     id: 'sample-venice-canal',
@@ -87,12 +67,9 @@ export const sampleMedia: MediaItem[] = [
     mimeType: 'video/mp4',
     sizeBytes: 32_000_000,
     durationMs: 42_000,
-    capturedAt: Date.UTC(2021, 9, 5, 9, 15),
-    capturedAtSource: 'filesystem',
+    timestamp: Date.UTC(2021, 9, 5, 9, 15),
     latitude: 45.4408,
     longitude: 12.3155,
-    geoSource: 'manual',
-    lastSeenAt: Date.now() - 3 * day,
   }),
   sampleItem({
     id: 'sample-reykjavik-harbor',
@@ -102,14 +79,9 @@ export const sampleMedia: MediaItem[] = [
     kind: 'image',
     mimeType: 'image/jpeg',
     sizeBytes: 6_400_000,
-    width: 4600,
-    height: 3000,
-    capturedAt: Date.UTC(2020, 1, 12, 16, 0),
-    capturedAtSource: 'exif',
+    timestamp: Date.UTC(2020, 1, 12, 16, 0),
     latitude: 64.1466,
     longitude: -21.9426,
-    geoSource: 'exif',
-    lastSeenAt: Date.now() - 4 * day,
   }),
   sampleItem({
     id: 'sample-no-gps',
@@ -119,10 +91,6 @@ export const sampleMedia: MediaItem[] = [
     kind: 'image',
     mimeType: 'image/jpeg',
     sizeBytes: 2_100_000,
-    width: 3000,
-    height: 2000,
-    capturedAt: Date.UTC(2024, 0, 7, 8, 30),
-    capturedAtSource: 'filesystem',
-    lastSeenAt: Date.now() - 5 * day,
+    timestamp: Date.UTC(2024, 0, 7, 8, 30),
   }),
 ]

@@ -35,7 +35,7 @@ function matchesSearchQuery(
   query: GeoSearchQuery,
 ): boolean {
   return (
-    matchesTimeRange(point.capturedAt, query) &&
+    matchesTimeRange(point.timestamp, query) &&
     matchesKind(point, query) &&
     matchesGeoBounds(point, query)
   )

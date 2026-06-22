@@ -46,13 +46,13 @@ function dateInput(value: string | null): string {
 
 function sortMode(value: string | null): SearchSortMode {
   if (
-    value === 'captured_at_asc' ||
-    value === 'captured_at_desc' ||
+    value === 'timestamp_asc' ||
+    value === 'timestamp_desc' ||
     value === 'distance'
   ) {
     return value
   }
-  return 'captured_at_desc'
+  return 'timestamp_desc'
 }
 
 function kindFilter(value: string | null): KindFilter {
@@ -178,7 +178,7 @@ export function buildSearchUrlParams(
 
   if (state.startDate) params.set('from', state.startDate)
   if (state.endDate) params.set('to', state.endDate)
-  if (state.sort !== 'captured_at_desc') params.set('sort', state.sort)
+  if (state.sort !== 'timestamp_desc') params.set('sort', state.sort)
   if (state.kindFilter !== 'all') params.set('kind', state.kindFilter)
   if (state.resultPage > 0) params.set('page', String(state.resultPage + 1))
   if (state.resultPageSize !== defaults.resultPageSize) {

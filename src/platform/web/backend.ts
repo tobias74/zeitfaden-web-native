@@ -25,7 +25,6 @@ import type { MediaItem, MediaLocation, MediaSource } from '../../types'
 type ImportSourceRecord = {
   id: string
   label: string
-  addedAt: number
   handle: FileSystemDirectoryHandle
   duplicateSourceIds: string[]
 }
@@ -33,7 +32,6 @@ type ImportSourceRecord = {
 type ImportGeoFileRecord = {
   id: string
   label: string
-  addedAt: number
   handle: FileSystemFileHandle
   duplicateSourceIds: string[]
 }
@@ -56,14 +54,11 @@ async function sourceRecordForHandle(
     }
 
     if (matchingRecords.length > 0) {
-      matchingRecords.sort(
-        (a, b) => a.addedAt - b.addedAt || a.id.localeCompare(b.id),
-      )
+      matchingRecords.sort((a, b) => a.id.localeCompare(b.id))
       const [primaryRecord, ...duplicateRecords] = matchingRecords
       return {
         id: primaryRecord.id,
         label: handle.name || primaryRecord.label,
-        addedAt: primaryRecord.addedAt,
         handle,
         duplicateSourceIds: duplicateRecords.map((record) => record.id),
       }
@@ -73,7 +68,6 @@ async function sourceRecordForHandle(
   return {
     id: crypto.randomUUID(),
     label: handle.name,
-    addedAt: Date.now(),
     handle,
     duplicateSourceIds: [],
   }
@@ -97,14 +91,11 @@ async function sourceRecordForGeoFileHandle(
     }
 
     if (matchingRecords.length > 0) {
-      matchingRecords.sort(
-        (a, b) => a.addedAt - b.addedAt || a.id.localeCompare(b.id),
-      )
+      matchingRecords.sort((a, b) => a.id.localeCompare(b.id))
       const [primaryRecord, ...duplicateRecords] = matchingRecords
       return {
         id: primaryRecord.id,
         label: handle.name || primaryRecord.label,
-        addedAt: primaryRecord.addedAt,
         handle,
         duplicateSourceIds: duplicateRecords.map((record) => record.id),
       }
@@ -114,7 +105,6 @@ async function sourceRecordForGeoFileHandle(
   return {
     id: crypto.randomUUID(),
     label: handle.name,
-    addedAt: Date.now(),
     handle,
     duplicateSourceIds: [],
   }
@@ -123,12 +113,10 @@ async function sourceRecordForGeoFileHandle(
 function sourceFromRecord(record: {
   id: string
   label: string
-  addedAt: number
 }): MediaSource {
   return {
     id: record.id,
     label: record.label,
-    addedAt: record.addedAt,
   }
 }
 
@@ -142,7 +130,6 @@ class WebImportBackend implements ImportBackend {
   private cancelledSummary(sourceRecord: {
     id: string
     label: string
-    addedAt: number
   }): ImportSummary {
     return {
       source: sourceFromRecord(sourceRecord),
@@ -173,7 +160,6 @@ class WebImportBackend implements ImportBackend {
     await putDirectoryHandle({
       id: sourceRecord.id,
       label: sourceRecord.label,
-      addedAt: sourceRecord.addedAt,
       handle: sourceRecord.handle,
     })
     await Promise.all(
@@ -225,7 +211,6 @@ class WebImportBackend implements ImportBackend {
     await putGeoFileHandle({
       id: sourceRecord.id,
       label: sourceRecord.label,
-      addedAt: sourceRecord.addedAt,
       handle: sourceRecord.handle,
     })
     await Promise.all(
@@ -242,6 +227,10 @@ class WebImportBackend implements ImportBackend {
       onProgress,
       options.signal,
     )
+  }
+
+  commitImport(): Promise<void> {
+    return this.catalog.commitImport()
   }
 
   dispose(): void {}

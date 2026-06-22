@@ -14,7 +14,7 @@ use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, Window};
 use walkdir::WalkDir;
 
@@ -22,11 +22,12 @@ type AppResult<T> = Result<T, String>;
 
 const IMPORT_BATCH_SIZE: usize = 1000;
 const SQLITE_BIND_CHUNK_LIMIT: usize = 12000;
-const ASSET_BIND_COLUMNS: usize = 14;
-const LOCATION_BIND_COLUMNS: usize = 9;
+const ASSET_BIND_COLUMNS: usize = 9;
+const LOCATION_BIND_COLUMNS: usize = 7;
 const GEO_IMPORT_PREFIX_BYTES: usize = 512 * 1024;
 const PROGRESS_HEARTBEAT_MS: u128 = 1000;
 static IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
+static IMPORT_COMMIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,7 +42,7 @@ struct CatalogInfo {
 struct MediaSource {
     id: String,
     label: String,
-    added_at: i64,
+    root_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,12 +50,11 @@ struct MediaSource {
 struct MediaLocation {
     id: String,
     source_id: String,
-    source_label: Option<String>,
-    source_added_at: Option<i64>,
+    source_label: String,
+    root_path: Option<String>,
     relative_path: Option<String>,
     absolute_path: Option<String>,
-    display_name: String,
-    last_seen_at: i64,
+    point_index: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,16 +68,11 @@ struct MediaItem {
     kind: String,
     mime_type: String,
     size_bytes: i64,
-    width: Option<i64>,
-    height: Option<i64>,
     duration_ms: Option<i64>,
-    captured_at: Option<i64>,
-    captured_at_source: Option<String>,
+    timestamp: Option<i64>,
     latitude: Option<f64>,
     longitude: Option<f64>,
-    geo_source: Option<String>,
     thumbnail_key: Option<String>,
-    last_seen_at: i64,
     locations: Vec<MediaLocation>,
 }
 
@@ -118,7 +113,7 @@ struct GeoIndexPoint {
     kind: Option<String>,
     lat: f64,
     lon: f64,
-    captured_at: Option<i64>,
+    timestamp: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,7 +216,7 @@ struct ParsedGeoPoint {
     index: i64,
     latitude: f64,
     longitude: f64,
-    captured_at: i64,
+    timestamp: i64,
 }
 
 #[cfg(test)]
@@ -240,13 +235,9 @@ enum GeoFileFormat {
 
 #[derive(Default)]
 struct NativeMetadata {
-    width: Option<i64>,
-    height: Option<i64>,
-    captured_at: Option<i64>,
-    captured_at_source: Option<String>,
+    timestamp: Option<i64>,
     latitude: Option<f64>,
     longitude: Option<f64>,
-    geo_source: Option<String>,
 }
 
 #[derive(Clone)]
@@ -254,8 +245,8 @@ struct NativeCell {
     z: u32,
     lat_min: f64,
     lat_max: f64,
-    min_captured_at: Option<i64>,
-    max_captured_at: Option<i64>,
+    min_timestamp: Option<i64>,
+    max_timestamp: Option<i64>,
     points: Vec<GeoIndexPoint>,
 }
 
@@ -357,14 +348,14 @@ fn distance_meters(point: &GeoIndexPoint, query: &GeoSearchQuery) -> f64 {
     2.0 * EARTH_RADIUS_METERS * a.sqrt().atan2((1.0 - a).sqrt())
 }
 
-fn matches_time_range(captured_at: Option<i64>, query: &GeoSearchQuery) -> bool {
+fn matches_time_range(timestamp: Option<i64>, query: &GeoSearchQuery) -> bool {
     if let Some(start_time) = query.start_time {
-        if captured_at.is_none_or(|value| value < start_time) {
+        if timestamp.is_none_or(|value| value < start_time) {
             return false;
         }
     }
     if let Some(end_time) = query.end_time {
-        if captured_at.is_none_or(|value| value > end_time) {
+        if timestamp.is_none_or(|value| value > end_time) {
             return false;
         }
     }
@@ -390,23 +381,23 @@ fn matches_geo_bounds(point: &GeoIndexPoint, query: &GeoSearchQuery) -> bool {
 }
 
 fn matches_geo_search_query(point: &GeoIndexPoint, query: &GeoSearchQuery) -> bool {
-    matches_time_range(point.captured_at, query)
+    matches_time_range(point.timestamp, query)
         && matches_kind(point, query)
         && matches_geo_bounds(point, query)
 }
 
 fn overlaps_time_range(
-    min_captured_at: Option<i64>,
-    max_captured_at: Option<i64>,
+    min_timestamp: Option<i64>,
+    max_timestamp: Option<i64>,
     query: &GeoSearchQuery,
 ) -> bool {
     if let Some(start_time) = query.start_time {
-        if max_captured_at.is_some_and(|value| value < start_time) {
+        if max_timestamp.is_some_and(|value| value < start_time) {
             return false;
         }
     }
     if let Some(end_time) = query.end_time {
-        if min_captured_at.is_some_and(|value| value > end_time) {
+        if min_timestamp.is_some_and(|value| value > end_time) {
             return false;
         }
     }
@@ -513,7 +504,7 @@ impl NativeDynamicZOrderIndex {
 
         let mut candidates = Vec::<(&NativeCell, f64)>::new();
         for cell in self.cells.values() {
-            if !overlaps_time_range(cell.min_captured_at, cell.max_captured_at, query) {
+            if !overlaps_time_range(cell.min_timestamp, cell.max_timestamp, query) {
                 stats.pruned_by_time += 1;
                 continue;
             }
@@ -583,18 +574,18 @@ impl NativeDynamicZOrderIndex {
             kind: point.kind.clone(),
             lat: point.lat,
             lon: normalize_lon(point.lon),
-            captured_at: point.captured_at,
+            timestamp: point.timestamp,
         };
         let (key, z, lat_min, lat_max) = cell_address(&normalized);
         let cell = self.cells.entry(key).or_insert_with(|| NativeCell {
             z,
             lat_min,
             lat_max,
-            min_captured_at: None,
-            max_captured_at: None,
+            min_timestamp: None,
+            max_timestamp: None,
             points: Vec::new(),
         });
-        update_cell_time_range(cell, normalized.captured_at);
+        update_cell_time_range(cell, normalized.timestamp);
         cell.points.push(normalized);
         self.point_count += 1;
     }
@@ -627,15 +618,15 @@ fn interleave_morton(x: u32, y: u32) -> u32 {
     z
 }
 
-fn update_cell_time_range(cell: &mut NativeCell, captured_at: Option<i64>) {
-    let Some(captured_at) = captured_at else {
+fn update_cell_time_range(cell: &mut NativeCell, timestamp: Option<i64>) {
+    let Some(timestamp) = timestamp else {
         return;
     };
-    if cell.min_captured_at.is_none_or(|value| captured_at < value) {
-        cell.min_captured_at = Some(captured_at);
+    if cell.min_timestamp.is_none_or(|value| timestamp < value) {
+        cell.min_timestamp = Some(timestamp);
     }
-    if cell.max_captured_at.is_none_or(|value| captured_at > value) {
-        cell.max_captured_at = Some(captured_at);
+    if cell.max_timestamp.is_none_or(|value| timestamp > value) {
+        cell.max_timestamp = Some(timestamp);
     }
 }
 
@@ -647,13 +638,6 @@ fn cell_lower_bound_meters(cell: &NativeCell, query: &GeoSearchQuery) -> f64 {
     } else {
         0.0
     }
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 fn app_data_dir(app: &AppHandle) -> AppResult<PathBuf> {
@@ -675,7 +659,7 @@ fn app_cache_dir(app: &AppHandle) -> AppResult<PathBuf> {
 }
 
 fn catalog_path(app: &AppHandle) -> AppResult<PathBuf> {
-    Ok(app_data_dir(app)?.join("catalog-v5.sqlite3"))
+    Ok(app_data_dir(app)?.join("catalog-v7.sqlite3"))
 }
 
 fn connect(app: &AppHandle) -> AppResult<Connection> {
@@ -693,16 +677,11 @@ fn ensure_schema(conn: &Connection) -> AppResult<()> {
           kind TEXT NOT NULL,
           mime_type TEXT NOT NULL,
           size_bytes INTEGER NOT NULL,
-          width INTEGER,
-          height INTEGER,
           duration_ms INTEGER,
-          captured_at INTEGER,
-          captured_at_source TEXT,
+          timestamp INTEGER,
           latitude REAL,
           longitude REAL,
-          geo_source TEXT,
-          thumbnail_key TEXT,
-          last_seen_at INTEGER NOT NULL
+          thumbnail_key TEXT
         );
 
         CREATE TABLE IF NOT EXISTS media_locations (
@@ -710,11 +689,9 @@ fn ensure_schema(conn: &Connection) -> AppResult<()> {
           content_hash TEXT NOT NULL,
           source_id TEXT NOT NULL,
           source_label TEXT NOT NULL,
-          source_added_at INTEGER NOT NULL,
+          root_path TEXT,
           relative_path TEXT,
-          absolute_path TEXT NOT NULL,
-          display_name TEXT NOT NULL,
-          last_seen_at INTEGER NOT NULL
+          point_index INTEGER
         );
 
         CREATE INDEX IF NOT EXISTS idx_media_locations_content_hash
@@ -730,12 +707,12 @@ fn sha256_string(value: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn geo_point_identity_input(latitude: f64, longitude: f64, captured_at: i64) -> String {
-    format!("geo_point:v1:{latitude:.9}:{longitude:.9}:{captured_at}")
+fn geo_point_identity_input(latitude: f64, longitude: f64, timestamp: i64) -> String {
+    format!("geo_point:v1:{latitude:.9}:{longitude:.9}:{timestamp}")
 }
 
-fn geo_point_content_hash(latitude: f64, longitude: f64, captured_at: i64) -> String {
-    geo_point_identity_input(latitude, longitude, captured_at)
+fn geo_point_content_hash(latitude: f64, longitude: f64, timestamp: i64) -> String {
+    geo_point_identity_input(latitude, longitude, timestamp)
 }
 
 fn geo_point_location_id(source_id: &str, content_hash: &str) -> String {
@@ -926,21 +903,21 @@ fn parse_gpx_points(xml: &str) -> AppResult<ParsedGeoFile> {
         index += 1;
         let latitude = node.attribute("lat").and_then(|value| value.parse().ok());
         let longitude = node.attribute("lon").and_then(|value| value.parse().ok());
-        let captured_at = node
+        let timestamp = node
             .children()
             .find(|child| child.is_element() && child.tag_name().name() == "time")
             .and_then(|child| child.text())
             .and_then(parse_gpx_time);
 
-        match (latitude, longitude, captured_at) {
-            (Some(latitude), Some(longitude), Some(captured_at))
+        match (latitude, longitude, timestamp) {
+            (Some(latitude), Some(longitude), Some(timestamp))
                 if valid_latitude(latitude) && valid_longitude(longitude) =>
             {
                 points.push(ParsedGeoPoint {
                     index,
                     latitude,
                     longitude,
-                    captured_at,
+                    timestamp,
                 });
             }
             _ => {
@@ -1259,9 +1236,9 @@ fn stream_gpx_points(
                     }
                 } else if matches!(local_name.as_ref(), b"trkpt" | b"rtept" | b"wpt") {
                     if let Some(point) = current.take() {
-                        let captured_at = parse_gpx_time(point.time_text.trim());
-                        match (point.latitude, point.longitude, captured_at) {
-                            (Some(latitude), Some(longitude), Some(captured_at))
+                        let timestamp = parse_gpx_time(point.time_text.trim());
+                        match (point.latitude, point.longitude, timestamp) {
+                            (Some(latitude), Some(longitude), Some(timestamp))
                                 if valid_latitude(latitude) && valid_longitude(longitude) =>
                             {
                                 on_event(GpxStreamEvent::Point(
@@ -1269,7 +1246,7 @@ fn stream_gpx_points(
                                         index: point.index,
                                         latitude,
                                         longitude,
-                                        captured_at,
+                                        timestamp,
                                     },
                                     reader.buffer_position(),
                                 ))?;
@@ -1298,21 +1275,21 @@ fn stream_gpx_points(
 fn parse_google_takeout_location_entry(entry: &JsonValue, index: i64) -> Option<ParsedGeoPoint> {
     let latitude = json_number(entry.get("latitudeE7")).map(|value| value / 10_000_000.0);
     let longitude = json_number(entry.get("longitudeE7")).map(|value| value / 10_000_000.0);
-    let captured_at = entry
+    let timestamp = entry
         .get("timestamp")
         .and_then(parse_json_timestamp)
         .or_else(|| entry.get("timestampMs").and_then(parse_json_timestamp_ms))
         .or_else(|| entry.get("timestampMS").and_then(parse_json_timestamp_ms));
 
-    match (latitude, longitude, captured_at) {
-        (Some(latitude), Some(longitude), Some(captured_at))
+    match (latitude, longitude, timestamp) {
+        (Some(latitude), Some(longitude), Some(timestamp))
             if valid_latitude(latitude) && valid_longitude(longitude) =>
         {
             Some(ParsedGeoPoint {
                 index,
                 latitude,
                 longitude,
-                captured_at,
+                timestamp,
             })
         }
         _ => None,
@@ -1435,11 +1412,6 @@ fn parse_exif_date(value: &str) -> Option<i64> {
 fn read_image_metadata(path: &Path) -> NativeMetadata {
     let mut metadata = NativeMetadata::default();
 
-    if let Ok((width, height)) = image::image_dimensions(path) {
-        metadata.width = Some(width as i64);
-        metadata.height = Some(height as i64);
-    }
-
     let file = match File::open(path) {
         Ok(file) => file,
         Err(_) => return metadata,
@@ -1450,12 +1422,11 @@ fn read_image_metadata(path: &Path) -> NativeMetadata {
         Err(_) => return metadata,
     };
 
-    if metadata.captured_at.is_none() {
+    if metadata.timestamp.is_none() {
         for tag in [Tag::DateTimeOriginal, Tag::DateTimeDigitized, Tag::DateTime] {
             if let Some(field) = exif.get_field(tag, In::PRIMARY) {
                 if let Some(value) = exif_ascii(field).and_then(|value| parse_exif_date(&value)) {
-                    metadata.captured_at = Some(value);
-                    metadata.captured_at_source = Some("exif".to_string());
+                    metadata.timestamp = Some(value);
                     break;
                 }
             }
@@ -1486,7 +1457,6 @@ fn read_image_metadata(path: &Path) -> NativeMetadata {
         }
         metadata.latitude = Some(lat);
         metadata.longitude = Some(lon);
-        metadata.geo_source = Some("exif".to_string());
     }
 
     metadata
@@ -1519,24 +1489,18 @@ fn media_from_path(
         Some(kind) => kind,
         None => return Ok(None),
     };
-    let absolute_path = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .to_string();
     let relative_path = relative_path(root, path);
     let content_hash = file_hash(path)?;
-    let location_id = sha256_string(&format!("{}\n{absolute_path}", source.id));
-    let last_seen_at = now_ms();
+    let location_id = sha256_string(&format!("{}\n{relative_path}", source.id));
+    let display_name = display_name(path);
     let location = MediaLocation {
         id: location_id,
         source_id: source.id.clone(),
-        source_label: Some(source.label.clone()),
-        source_added_at: Some(source.added_at),
+        source_label: source.label.clone(),
+        root_path: source.root_path.clone(),
         relative_path: Some(relative_path.clone()),
-        absolute_path: Some(absolute_path),
-        display_name: display_name(path),
-        last_seen_at,
+        absolute_path: None,
+        point_index: None,
     };
     let size_bytes = path
         .metadata()
@@ -1547,32 +1511,23 @@ fn media_from_path(
         content_hash: content_hash.clone(),
         source_id: source.id.clone(),
         relative_path,
-        display_name: location.display_name.clone(),
+        display_name,
         kind: kind.to_string(),
         mime_type: mime_type(path, kind),
         size_bytes,
-        width: None,
-        height: None,
         duration_ms: None,
-        captured_at: modified_ms(path),
-        captured_at_source: modified_ms(path).map(|_| "filesystem".to_string()),
+        timestamp: modified_ms(path),
         latitude: None,
         longitude: None,
-        geo_source: None,
         thumbnail_key: None,
-        last_seen_at,
         locations: vec![location],
     };
 
     if kind == "image" {
         let metadata = read_image_metadata(path);
-        item.width = metadata.width;
-        item.height = metadata.height;
-        item.captured_at = metadata.captured_at.or(item.captured_at);
-        item.captured_at_source = metadata.captured_at_source.or(item.captured_at_source);
+        item.timestamp = metadata.timestamp.or(item.timestamp);
         item.latitude = metadata.latitude;
         item.longitude = metadata.longitude;
-        item.geo_source = metadata.geo_source;
         item.thumbnail_key = write_thumbnail(app, &content_hash, path);
     }
 
@@ -1592,7 +1547,7 @@ fn source_from_root(root: &Path) -> MediaSource {
             .and_then(|value| value.to_str())
             .unwrap_or(&absolute)
             .to_string(),
-        added_at: now_ms(),
+        root_path: Some(absolute),
     }
 }
 
@@ -1609,28 +1564,26 @@ fn source_from_file(path: &Path) -> MediaSource {
             .and_then(|value| value.to_str())
             .unwrap_or(&absolute)
             .to_string(),
-        added_at: now_ms(),
+        root_path: Some(absolute),
     }
 }
 
 fn geo_point_item_from_parsed_point(
     source: &MediaSource,
-    absolute_path: &str,
+    _absolute_path: &str,
     mime_type: &str,
     point: &ParsedGeoPoint,
 ) -> MediaItem {
-    let content_hash = geo_point_content_hash(point.latitude, point.longitude, point.captured_at);
-    let last_seen_at = now_ms();
+    let content_hash = geo_point_content_hash(point.latitude, point.longitude, point.timestamp);
     let display_name = format!("{} #{}", source.label, point.index);
     let location = MediaLocation {
         id: geo_point_location_id(&source.id, &content_hash),
         source_id: source.id.clone(),
-        source_label: Some(source.label.clone()),
-        source_added_at: Some(source.added_at),
-        relative_path: Some(source.label.clone()),
-        absolute_path: Some(absolute_path.to_string()),
-        display_name: display_name.clone(),
-        last_seen_at,
+        source_label: source.label.clone(),
+        root_path: source.root_path.clone(),
+        relative_path: None,
+        absolute_path: None,
+        point_index: Some(point.index as i64),
     };
 
     MediaItem {
@@ -1642,16 +1595,11 @@ fn geo_point_item_from_parsed_point(
         kind: "geo_point".to_string(),
         mime_type: mime_type.to_string(),
         size_bytes: 0,
-        width: None,
-        height: None,
         duration_ms: None,
-        captured_at: Some(point.captured_at),
-        captured_at_source: Some("geo-file".to_string()),
+        timestamp: Some(point.timestamp),
         latitude: Some(point.latitude),
         longitude: Some(point.longitude),
-        geo_source: Some("geo-file".to_string()),
         thumbnail_key: None,
-        last_seen_at,
         locations: vec![location],
     }
 }
@@ -1667,16 +1615,11 @@ fn asset_from_row(row: &Row<'_>) -> rusqlite::Result<MediaItem> {
         kind: row.get("kind")?,
         mime_type: row.get("mime_type")?,
         size_bytes: row.get("size_bytes")?,
-        width: row.get("width")?,
-        height: row.get("height")?,
         duration_ms: row.get("duration_ms")?,
-        captured_at: row.get("captured_at")?,
-        captured_at_source: row.get("captured_at_source")?,
+        timestamp: row.get("timestamp")?,
         latitude: row.get("latitude")?,
         longitude: row.get("longitude")?,
-        geo_source: row.get("geo_source")?,
         thumbnail_key: row.get("thumbnail_key")?,
-        last_seen_at: row.get("last_seen_at")?,
         locations: Vec::new(),
     })
 }
@@ -1686,12 +1629,53 @@ fn location_from_row(row: &Row<'_>) -> rusqlite::Result<MediaLocation> {
         id: row.get("id")?,
         source_id: row.get("source_id")?,
         source_label: row.get("source_label")?,
-        source_added_at: row.get("source_added_at")?,
+        root_path: row.get("root_path")?,
         relative_path: row.get("relative_path")?,
-        absolute_path: row.get("absolute_path")?,
-        display_name: row.get("display_name")?,
-        last_seen_at: row.get("last_seen_at")?,
+        absolute_path: None,
+        point_index: row.get("point_index")?,
     })
+}
+
+fn derived_absolute_path(kind: &str, location: &MediaLocation) -> Option<String> {
+    let root_path = location.root_path.as_ref()?;
+    if kind == "geo_point" {
+        return Some(root_path.clone());
+    }
+    let relative_path = location.relative_path.as_ref()?;
+    Some(
+        Path::new(root_path)
+            .join(relative_path)
+            .to_string_lossy()
+            .to_string(),
+    )
+}
+
+fn derived_relative_path(location: Option<&MediaLocation>) -> String {
+    location
+        .and_then(|location| location.relative_path.clone())
+        .or_else(|| location.map(|location| location.source_label.clone()))
+        .unwrap_or_default()
+}
+
+fn derived_display_name(
+    kind: &str,
+    content_hash: &str,
+    location: Option<&MediaLocation>,
+) -> String {
+    if kind == "geo_point" {
+        let base = location
+            .map(|location| location.source_label.clone())
+            .or_else(|| location.and_then(|location| location.relative_path.clone()))
+            .unwrap_or_else(|| content_hash.to_string());
+        return location
+            .and_then(|location| location.point_index)
+            .map(|index| format!("{base} #{index}"))
+            .unwrap_or(base);
+    }
+    location
+        .and_then(|location| location.relative_path.as_ref())
+        .map(|path| display_name(Path::new(path)))
+        .unwrap_or_else(|| content_hash.to_string())
 }
 
 fn attach_locations(
@@ -1713,7 +1697,7 @@ fn attach_locations(
         SELECT *
         FROM media_locations
         WHERE content_hash IN ({placeholders})
-        ORDER BY relative_path ASC, absolute_path ASC, id ASC
+        ORDER BY relative_path ASC, id ASC
         "
     );
     let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
@@ -1725,7 +1709,7 @@ fn attach_locations(
             ))
         })
         .map_err(|error| error.to_string())?;
-    let mut by_hash = std::collections::HashMap::<String, Vec<MediaLocation>>::new();
+    let mut by_hash = HashMap::<String, Vec<MediaLocation>>::new();
 
     for row in rows {
         let (content_hash, location) = row.map_err(|error| error.to_string())?;
@@ -1746,13 +1730,16 @@ fn attach_locations(
                 }
                 a.relative_path
                     .cmp(&b.relative_path)
-                    .then_with(|| a.absolute_path.cmp(&b.absolute_path))
                     .then_with(|| a.id.cmp(&b.id))
             });
+            let kind = item.kind.clone();
+            for location in locations.iter_mut() {
+                location.absolute_path = derived_absolute_path(&kind, location);
+            }
             if let Some(primary) = locations.first() {
                 item.source_id = primary.source_id.clone();
-                item.relative_path = primary.relative_path.clone().unwrap_or_default();
-                item.display_name = primary.display_name.clone();
+                item.relative_path = derived_relative_path(Some(primary));
+                item.display_name = derived_display_name(&kind, &item.content_hash, Some(primary));
             }
             item.locations = locations;
             item
@@ -1822,16 +1809,11 @@ fn asset_row(item: &MediaItem) -> Vec<Value> {
         value_text(&item.kind),
         value_text(&item.mime_type),
         Value::Integer(item.size_bytes),
-        value_optional_i64(item.width),
-        value_optional_i64(item.height),
         value_optional_i64(item.duration_ms),
-        value_optional_i64(item.captured_at),
-        value_optional_text(&item.captured_at_source),
+        value_optional_i64(item.timestamp),
         value_optional_f64(item.latitude),
         value_optional_f64(item.longitude),
-        value_optional_text(&item.geo_source),
         value_optional_text(&item.thumbnail_key),
-        Value::Integer(item.last_seen_at),
     ]
 }
 
@@ -1839,21 +1821,14 @@ fn location_rows(item: &MediaItem) -> Vec<Vec<Value>> {
     item.locations
         .iter()
         .map(|location| {
-            let absolute_path = location
-                .absolute_path
-                .clone()
-                .or_else(|| location.relative_path.clone())
-                .unwrap_or_else(|| location.id.clone());
             vec![
                 value_text(&location.id),
                 value_text(&item.content_hash),
                 value_text(&location.source_id),
-                value_text(location.source_label.as_deref().unwrap_or(&item.source_id)),
-                Value::Integer(location.source_added_at.unwrap_or(item.last_seen_at)),
+                value_text(&location.source_label),
+                value_optional_text(&location.root_path),
                 value_optional_text(&location.relative_path),
-                value_text(&absolute_path),
-                value_text(&location.display_name),
-                Value::Integer(location.last_seen_at),
+                value_optional_i64(location.point_index),
             ]
         })
         .collect()
@@ -1865,26 +1840,12 @@ fn upsert_media_rows(conn: &mut Connection, items: &[MediaItem]) -> AppResult<us
         conn,
         "
         INSERT INTO media_assets (
-          content_hash, kind, mime_type, size_bytes, width, height, duration_ms,
-          captured_at, captured_at_source, latitude, longitude, geo_source,
-          thumbnail_key, last_seen_at
+          content_hash, kind, mime_type, size_bytes, duration_ms,
+          timestamp, latitude, longitude, thumbnail_key
         )
         ",
         "
-        ON CONFLICT(content_hash) DO UPDATE SET
-          kind = excluded.kind,
-          mime_type = excluded.mime_type,
-          size_bytes = excluded.size_bytes,
-          width = excluded.width,
-          height = excluded.height,
-          duration_ms = excluded.duration_ms,
-          captured_at = excluded.captured_at,
-          captured_at_source = excluded.captured_at_source,
-          latitude = excluded.latitude,
-          longitude = excluded.longitude,
-          geo_source = excluded.geo_source,
-          thumbnail_key = COALESCE(excluded.thumbnail_key, media_assets.thumbnail_key),
-          last_seen_at = MAX(media_assets.last_seen_at, excluded.last_seen_at)
+        ON CONFLICT(content_hash) DO NOTHING
         ",
         &asset_rows,
         ASSET_BIND_COLUMNS,
@@ -1895,20 +1856,12 @@ fn upsert_media_rows(conn: &mut Connection, items: &[MediaItem]) -> AppResult<us
         conn,
         "
         INSERT INTO media_locations (
-          id, content_hash, source_id, source_label, source_added_at,
-          relative_path, absolute_path, display_name, last_seen_at
+          id, content_hash, source_id, source_label, root_path, relative_path,
+          point_index
         )
         ",
         "
-        ON CONFLICT(id) DO UPDATE SET
-          content_hash = excluded.content_hash,
-          source_id = excluded.source_id,
-          source_label = excluded.source_label,
-          source_added_at = excluded.source_added_at,
-          relative_path = excluded.relative_path,
-          absolute_path = excluded.absolute_path,
-          display_name = excluded.display_name,
-          last_seen_at = excluded.last_seen_at
+        ON CONFLICT(id) DO NOTHING
         ",
         &location_rows,
         LOCATION_BIND_COLUMNS,
@@ -1978,18 +1931,18 @@ fn list_media(app: AppHandle, query: CatalogQuery) -> AppResult<Vec<MediaItem>> 
         bind.push(Value::Real(bounds.max_lon));
     }
     if let Some(start_time) = query.start_time {
-        where_sql.push("a.captured_at >= ?".to_string());
+        where_sql.push("a.timestamp >= ?".to_string());
         bind.push(Value::Integer(start_time));
     }
     if let Some(end_time) = query.end_time {
-        where_sql.push("a.captured_at <= ?".to_string());
+        where_sql.push("a.timestamp <= ?".to_string());
         bind.push(Value::Integer(end_time));
     }
 
-    let order = if query.sort == "captured_at_asc" {
-        "CASE WHEN a.captured_at IS NULL THEN 1 ELSE 0 END, a.captured_at ASC, a.content_hash ASC"
+    let order = if query.sort == "timestamp_asc" {
+        "CASE WHEN a.timestamp IS NULL THEN 1 ELSE 0 END, a.timestamp ASC, a.content_hash ASC"
     } else {
-        "CASE WHEN a.captured_at IS NULL THEN 1 ELSE 0 END, a.captured_at DESC, a.content_hash ASC"
+        "CASE WHEN a.timestamp IS NULL THEN 1 ELSE 0 END, a.timestamp DESC, a.content_hash ASC"
     };
     let limit = query.limit.unwrap_or(500).clamp(1, 10_000);
     let offset = query.offset.unwrap_or(0).max(0);
@@ -2057,17 +2010,17 @@ fn get_geo_points(app: AppHandle, range: TimeRange) -> AppResult<Vec<GeoIndexPoi
     let mut bind = Vec::<Value>::new();
 
     if let Some(start_time) = range.start_time {
-        where_sql.push("a.captured_at >= ?".to_string());
+        where_sql.push("a.timestamp >= ?".to_string());
         bind.push(Value::Integer(start_time));
     }
     if let Some(end_time) = range.end_time {
-        where_sql.push("a.captured_at <= ?".to_string());
+        where_sql.push("a.timestamp <= ?".to_string());
         bind.push(Value::Integer(end_time));
     }
 
     let sql = format!(
         "
-        SELECT a.content_hash, a.kind, a.latitude, a.longitude, a.captured_at
+        SELECT a.content_hash, a.kind, a.latitude, a.longitude, a.timestamp
         FROM media_assets a
         WHERE {}
         ORDER BY a.content_hash ASC
@@ -2082,7 +2035,7 @@ fn get_geo_points(app: AppHandle, range: TimeRange) -> AppResult<Vec<GeoIndexPoi
                 kind: row.get("kind")?,
                 lat: row.get("latitude")?,
                 lon: row.get("longitude")?,
-                captured_at: row.get("captured_at")?,
+                timestamp: row.get("timestamp")?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -2262,22 +2215,19 @@ fn list_sources(app: AppHandle) -> AppResult<Vec<MediaSource>> {
     let mut stmt = conn
         .prepare(
             "
-            SELECT
-              source_id AS id,
-              source_label AS label,
-              MAX(source_added_at) AS added_at
+            SELECT source_id, source_label, root_path
             FROM media_locations
-            GROUP BY source_id, source_label
-            ORDER BY added_at DESC
+            GROUP BY source_id, source_label, root_path
+            ORDER BY source_label ASC
             ",
         )
         .map_err(|error| error.to_string())?;
     let rows = stmt
         .query_map([], |row| {
             Ok(MediaSource {
-                id: row.get("id")?,
-                label: row.get("label")?,
-                added_at: row.get("added_at")?,
+                id: row.get("source_id")?,
+                label: row.get("source_label")?,
+                root_path: row.get("root_path")?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -2353,10 +2303,19 @@ fn emit_progress(window: &Window, progress: ImportProgress) {
 
 fn reset_import_cancel() {
     IMPORT_CANCELLED.store(false, Ordering::SeqCst);
+    IMPORT_COMMIT_REQUESTED.store(false, Ordering::SeqCst);
 }
 
 fn request_import_cancel() {
     IMPORT_CANCELLED.store(true, Ordering::SeqCst);
+}
+
+fn request_import_commit() {
+    IMPORT_COMMIT_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+fn take_import_commit_requested() -> bool {
+    IMPORT_COMMIT_REQUESTED.swap(false, Ordering::SeqCst)
 }
 
 fn import_cancelled() -> bool {
@@ -2366,6 +2325,11 @@ fn import_cancelled() -> bool {
 #[tauri::command]
 fn cancel_import() {
     request_import_cancel();
+}
+
+#[tauri::command]
+fn commit_import() {
+    request_import_commit();
 }
 
 fn import_progress(
@@ -2419,6 +2383,32 @@ fn flush_media_batch(conn: &mut Connection, batch: &mut Vec<MediaItem>) -> AppRe
     let written = upsert_media_rows(conn, batch)?;
     batch.clear();
     Ok(written)
+}
+
+fn begin_geo_import_transaction(conn: &Connection) -> AppResult<()> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|error| error.to_string())
+}
+
+fn commit_geo_import_transaction(conn: &Connection) -> AppResult<()> {
+    conn.execute_batch("COMMIT")
+        .map_err(|error| error.to_string())
+}
+
+fn rollback_geo_import_transaction(conn: &Connection) {
+    let _ = conn.execute_batch("ROLLBACK");
+}
+
+fn flush_and_commit_geo_import_if_requested(
+    conn: &mut Connection,
+    batch: &mut Vec<MediaItem>,
+) -> AppResult<()> {
+    if !take_import_commit_requested() {
+        return Ok(());
+    }
+    flush_media_batch(conn, batch)?;
+    conn.execute_batch("COMMIT; BEGIN IMMEDIATE")
+        .map_err(|error| error.to_string())
 }
 
 fn read_file_prefix(path: &Path) -> AppResult<String> {
@@ -2516,6 +2506,7 @@ fn import_google_takeout_streaming(
                     ),
                 );
                 flush_media_batch(conn, &mut batch)?;
+                flush_and_commit_geo_import_if_requested(conn, &mut batch)?;
                 if import_cancelled() {
                     cancelled = true;
                     break;
@@ -2548,6 +2539,7 @@ fn import_google_takeout_streaming(
             scanned_bytes,
             total_bytes,
         );
+        flush_and_commit_geo_import_if_requested(conn, &mut batch)?;
     }
 
     if !cancelled {
@@ -2566,6 +2558,7 @@ fn import_google_takeout_streaming(
         ),
     );
     flush_media_batch(conn, &mut batch)?;
+    flush_and_commit_geo_import_if_requested(conn, &mut batch)?;
     Ok((accepted_media, parser.skipped_points, cancelled))
 }
 
@@ -2612,6 +2605,7 @@ fn import_gpx_streaming(
                         ),
                     );
                     flush_media_batch(conn, &mut batch)?;
+                    flush_and_commit_geo_import_if_requested(conn, &mut batch)?;
                     if import_cancelled() {
                         cancelled = true;
                         return Err("Import cancelled".to_string());
@@ -2639,6 +2633,7 @@ fn import_gpx_streaming(
                     position as i64,
                     total_bytes,
                 );
+                flush_and_commit_geo_import_if_requested(conn, &mut batch)?;
             }
             GpxStreamEvent::Skipped(count, position) => {
                 skipped_files = count;
@@ -2652,6 +2647,7 @@ fn import_gpx_streaming(
                     position as i64,
                     total_bytes,
                 );
+                flush_and_commit_geo_import_if_requested(conn, &mut batch)?;
             }
         }
         Ok(())
@@ -2679,6 +2675,7 @@ fn import_gpx_streaming(
         ),
     );
     flush_media_batch(conn, &mut batch)?;
+    flush_and_commit_geo_import_if_requested(conn, &mut batch)?;
     Ok((accepted_media, skipped_files, cancelled))
 }
 
@@ -2884,7 +2881,8 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
     let (accepted_media, skipped_files, cancelled) = if import_cancelled() {
         (0, 0, true)
     } else {
-        match format {
+        begin_geo_import_transaction(&conn)?;
+        let result = match format {
             GeoFileFormat::GoogleTakeoutJson => import_google_takeout_streaming(
                 &path,
                 &source,
@@ -2892,7 +2890,7 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
                 total_bytes,
                 &mut conn,
                 &window,
-            )?,
+            ),
             GeoFileFormat::Gpx => import_gpx_streaming(
                 &path,
                 &source,
@@ -2900,7 +2898,17 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
                 total_bytes,
                 &mut conn,
                 &window,
-            )?,
+            ),
+        };
+        match result {
+            Ok(summary) => {
+                commit_geo_import_transaction(&conn)?;
+                summary
+            }
+            Err(error) => {
+                rollback_geo_import_transaction(&conn);
+                return Err(error);
+            }
         }
     };
 
@@ -2952,6 +2960,7 @@ pub fn run() {
             count_media,
             clear_catalog,
             cancel_import,
+            commit_import,
             import_folder,
             import_geo_file,
             resolve_thumbnail_path,
@@ -2976,25 +2985,19 @@ mod tests {
             kind: "image".to_string(),
             mime_type: "image/jpeg".to_string(),
             size_bytes: 12,
-            width: Some(3),
-            height: Some(4),
             duration_ms: None,
-            captured_at: Some(1_700_000_000_000),
-            captured_at_source: Some("filesystem".to_string()),
+            timestamp: Some(1_700_000_000_000),
             latitude: Some(47.0),
             longitude: Some(8.0),
-            geo_source: Some("manual".to_string()),
             thumbnail_key: Some(format!("thumbs/{content_hash}.webp")),
-            last_seen_at: now_ms(),
             locations: vec![MediaLocation {
                 id: location_id,
                 source_id: source_id.to_string(),
-                source_label: Some(source_id.to_string()),
-                source_added_at: Some(now_ms()),
+                source_label: source_id.to_string(),
+                root_path: Some("/tmp/source".to_string()),
                 relative_path: Some(path.to_string()),
-                absolute_path: Some(path.to_string()),
-                display_name: display_name(Path::new(path)),
-                last_seen_at: now_ms(),
+                absolute_path: None,
+                point_index: None,
             }],
         }
     }
@@ -3100,15 +3103,15 @@ mod tests {
         assert_eq!(parsed.points[0].latitude, 48.1370673);
         assert_eq!(parsed.points[0].longitude, 11.5775995);
         assert_eq!(
-            parsed.points[0].captured_at,
+            parsed.points[0].timestamp,
             DateTime::parse_from_rfc3339("2012-10-28T14:21:22.010Z")
                 .unwrap()
                 .timestamp_millis()
         );
         assert_eq!(parsed.points[2].index, 4);
-        assert_eq!(parsed.points[2].captured_at, 1_351_434_205_077);
+        assert_eq!(parsed.points[2].timestamp, 1_351_434_205_077);
         assert_eq!(parsed.points[3].index, 5);
-        assert_eq!(parsed.points[3].captured_at, 1_351_434_206_077);
+        assert_eq!(parsed.points[3].timestamp, 1_351_434_206_077);
     }
 
     #[test]
@@ -3206,19 +3209,19 @@ mod tests {
         let source = MediaSource {
             id: "gpx-source".to_string(),
             label: "track.gpx".to_string(),
-            added_at: now_ms(),
+            root_path: Some("/tmp/track.gpx".to_string()),
         };
         let first = ParsedGeoPoint {
             index: 1,
             latitude: 48.1,
             longitude: 11.5,
-            captured_at: 1_782_036_000_000,
+            timestamp: 1_782_036_000_000,
         };
         let second = ParsedGeoPoint {
             index: 2,
             latitude: 48.2,
             longitude: 11.6,
-            captured_at: 1_782_036_060_000,
+            timestamp: 1_782_036_060_000,
         };
         let items = vec![
             geo_point_item_from_parsed_point(
@@ -3251,7 +3254,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_schema_has_no_source_table_or_soft_delete_columns() {
+    fn fresh_schema_has_two_tables_and_no_legacy_columns() {
         let conn = Connection::open_in_memory().unwrap();
         ensure_schema(&conn).unwrap();
 
@@ -3279,9 +3282,18 @@ mod tests {
 
         assert_eq!(source_table_count, 0);
         assert!(!asset_sql.contains("deleted_at"));
+        assert!(!asset_sql.contains("last_seen_at"));
+        assert!(!asset_sql.contains("timestamp_source"));
+        assert!(!asset_sql.contains("geo_source"));
+        assert!(!asset_sql.contains("width"));
+        assert!(!asset_sql.contains("height"));
         assert!(!location_sql.contains("deleted_at"));
+        assert!(!location_sql.contains("source_added_at"));
+        assert!(!location_sql.contains("last_seen_at"));
+        assert!(location_sql.contains("source_id"));
         assert!(location_sql.contains("source_label"));
-        assert!(location_sql.contains("source_added_at"));
+        assert!(location_sql.contains("root_path"));
+        assert!(location_sql.contains("point_index"));
     }
 
     #[test]
@@ -3292,7 +3304,7 @@ mod tests {
         let source = MediaSource {
             id: "source".to_string(),
             label: "Source".to_string(),
-            added_at: now_ms(),
+            root_path: Some("/tmp/source".to_string()),
         };
         upsert_source_tx(&conn, &source).unwrap();
 

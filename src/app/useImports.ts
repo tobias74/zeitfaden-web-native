@@ -31,13 +31,18 @@ export function useImports({
 }: UseImportsOptions): {
   busy: boolean
   importProgress: ImportProgress | undefined
+  activeImportKind: 'folder' | 'geo' | undefined
   cancelling: boolean
   importFolder(): Promise<void>
   importGeoFile(): Promise<void>
   cancelImport(): void
+  commitImport(): void
 } {
   const [busy, setBusy] = useState(false)
   const [cancelling, setCancelling] = useState(false)
+  const [activeImportKind, setActiveImportKind] = useState<
+    'folder' | 'geo' | undefined
+  >()
   const [importProgress, setImportProgress] = useState<ImportProgress>()
   const activeImportControllerRef = useRef<AbortController | undefined>(
     undefined,
@@ -71,11 +76,16 @@ export function useImports({
     activeImportControllerRef.current.abort()
   }, [])
 
+  const commitImport = useCallback(() => {
+    void platform.importer.commitImport()
+  }, [platform])
+
   const importFolder = useCallback(async () => {
     onError('')
     setImportProgress(undefined)
     setBusy(true)
     setCancelling(false)
+    setActiveImportKind('folder')
     const controller = new AbortController()
     activeImportControllerRef.current = controller
     try {
@@ -95,6 +105,7 @@ export function useImports({
       activeImportControllerRef.current = undefined
       setImportProgress(undefined)
       setCancelling(false)
+      setActiveImportKind(undefined)
       setBusy(false)
     }
   }, [finishImport, onError, platform, recordActivity])
@@ -104,6 +115,7 @@ export function useImports({
     setImportProgress(undefined)
     setBusy(true)
     setCancelling(false)
+    setActiveImportKind('geo')
     const controller = new AbortController()
     activeImportControllerRef.current = controller
     const startedAt = performance.now()
@@ -144,6 +156,7 @@ export function useImports({
       activeImportControllerRef.current = undefined
       setImportProgress(undefined)
       setCancelling(false)
+      setActiveImportKind(undefined)
       setBusy(false)
     }
   }, [finishImport, onError, platform, recordActivity])
@@ -151,9 +164,11 @@ export function useImports({
   return {
     busy,
     importProgress,
+    activeImportKind,
     cancelling,
     importFolder,
     importGeoFile,
     cancelImport,
+    commitImport,
   }
 }

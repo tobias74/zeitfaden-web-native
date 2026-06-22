@@ -1,24 +1,14 @@
 export type MediaKind = 'image' | 'video' | 'geo_point'
 export type KindFilter = MediaKind | 'all' | 'media'
 
-export type CapturedAtSource =
-  | 'exif'
-  | 'geo-file'
-  | 'video-metadata'
-  | 'filesystem'
-  | 'manual'
-
-export type GeoSource = 'exif' | 'geo-file' | 'video-metadata' | 'manual'
-
 export type MediaLocation = {
   id: string
   sourceId: string
-  sourceLabel?: string
-  sourceAddedAt?: number
+  sourceLabel: string
+  rootPath?: string
   relativePath?: string
   absolutePath?: string
-  displayName: string
-  lastSeenAt: number
+  pointIndex?: number
 }
 
 export type MediaItem = {
@@ -30,23 +20,18 @@ export type MediaItem = {
   kind: MediaKind
   mimeType: string
   sizeBytes: number
-  width?: number
-  height?: number
   durationMs?: number
-  capturedAt?: number
-  capturedAtSource?: CapturedAtSource
+  timestamp?: number
   latitude?: number
   longitude?: number
-  geoSource?: GeoSource
   thumbnailKey?: string
-  lastSeenAt: number
   locations: MediaLocation[]
 }
 
 export type MediaSource = {
   id: string
   label: string
-  addedAt: number
+  rootPath?: string
 }
 
 export type TimeRange = {
@@ -61,7 +46,7 @@ export type GeoBounds = {
   maxLon: number
 }
 
-export type CatalogSort = 'captured_at_asc' | 'captured_at_desc'
+export type CatalogSort = 'timestamp_asc' | 'timestamp_desc'
 
 export type CatalogQuery = TimeRange & {
   kind?: KindFilter
@@ -78,7 +63,7 @@ export type GeoIndexPoint = {
   kind?: MediaKind
   lat: number
   lon: number
-  capturedAt?: number
+  timestamp?: number
 }
 
 export type GeoSearchQuery = TimeRange & {

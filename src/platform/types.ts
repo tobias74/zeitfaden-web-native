@@ -12,7 +12,7 @@ import type {
 } from '../types'
 
 export type CatalogInfo = {
-  storageMode: 'opfs' | 'memory' | 'indexeddb' | 'native'
+  storageMode: 'opfs' | 'indexeddb' | 'native'
   sqliteVersion: string
   filename: string
 }
@@ -105,6 +105,7 @@ export interface ImportBackend {
     onProgress?: (progress: ImportProgress) => void,
     options?: ImportOptions,
   ): Promise<ImportSummary>
+  commitImport(): Promise<void> | void
   dispose(): void
 }
 

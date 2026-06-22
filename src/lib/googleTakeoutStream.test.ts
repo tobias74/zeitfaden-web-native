@@ -50,13 +50,13 @@ describe('GoogleTakeoutLocationStreamParser', () => {
         index: 1,
         latitude: 48.1370673,
         longitude: 11.5775995,
-        capturedAt: Date.parse('2012-10-28T14:21:22.010Z'),
+        timestamp: Date.parse('2012-10-28T14:21:22.010Z'),
       },
       {
         index: 2,
         latitude: 48.1374628,
         longitude: 11.5781587,
-        capturedAt: 1_351_434_206_077,
+        timestamp: 1_351_434_206_077,
       },
     ])
   })
@@ -78,7 +78,7 @@ describe('GoogleTakeoutLocationStreamParser', () => {
         index: 2,
         latitude: 48.1370674,
         longitude: 11.5775996,
-        capturedAt: 1_351_434_206_077,
+        timestamp: 1_351_434_206_077,
       },
     ])
   })

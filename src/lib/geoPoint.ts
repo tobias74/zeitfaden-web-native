@@ -2,7 +2,7 @@ export type ParsedGeoPoint = {
   index: number
   latitude: number
   longitude: number
-  capturedAt: number
+  timestamp: number
 }
 
 export type ParsedGeoFile = {
@@ -147,22 +147,22 @@ function isGpxDocument(document: Document): boolean {
 export function geoPointIdentityInput(
   latitude: number,
   longitude: number,
-  capturedAt: number,
+  timestamp: number,
 ): string {
   return [
     GEO_POINT_IDENTITY_VERSION,
     latitude.toFixed(9),
     longitude.toFixed(9),
-    String(capturedAt),
+    String(timestamp),
   ].join(':')
 }
 
 export function geoPointContentHash(
   latitude: number,
   longitude: number,
-  capturedAt: number,
+  timestamp: number,
 ): string {
-  return geoPointIdentityInput(latitude, longitude, capturedAt)
+  return geoPointIdentityInput(latitude, longitude, timestamp)
 }
 
 export function parseGpxPoints(xmlText: string): ParsedGeoFile {
@@ -181,12 +181,12 @@ export function parseGpxPoints(xmlText: string): ParsedGeoFile {
     index += 1
     const latitude = finiteCoordinate(element.getAttribute('lat'))
     const longitude = finiteCoordinate(element.getAttribute('lon'))
-    const capturedAt = pointTime(element)
+    const timestamp = pointTime(element)
 
     if (
       !validLatitude(latitude) ||
       !validLongitude(longitude) ||
-      capturedAt === undefined
+      timestamp === undefined
     ) {
       skippedPoints += 1
       continue
@@ -196,7 +196,7 @@ export function parseGpxPoints(xmlText: string): ParsedGeoFile {
       index,
       latitude,
       longitude,
-      capturedAt,
+      timestamp,
     })
   }
 
@@ -241,7 +241,7 @@ export function parseGoogleTakeoutLocationEntry(
     latitudeE7 === undefined ? undefined : latitudeE7 / 10_000_000
   const longitude =
     longitudeE7 === undefined ? undefined : longitudeE7 / 10_000_000
-  const capturedAt =
+  const timestamp =
     timestampMillis(entry.timestamp) ??
     timestampMs(entry.timestampMs) ??
     timestampMs(entry.timestampMS)
@@ -249,7 +249,7 @@ export function parseGoogleTakeoutLocationEntry(
   if (
     !validLatitude(latitude) ||
     !validLongitude(longitude) ||
-    capturedAt === undefined
+    timestamp === undefined
   ) {
     return undefined
   }
@@ -258,7 +258,7 @@ export function parseGoogleTakeoutLocationEntry(
     index,
     latitude,
     longitude,
-    capturedAt,
+    timestamp,
   }
 }
 

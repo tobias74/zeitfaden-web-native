@@ -34,9 +34,6 @@ type MediaUrlState = {
 }
 
 function formatDimensions(item: MediaItem): string | undefined {
-  if (typeof item.width === 'number' && typeof item.height === 'number') {
-    return `${item.width} x ${item.height}`
-  }
   if (typeof item.durationMs === 'number') {
     return `${Math.round(item.durationMs / 1_000)} s`
   }
@@ -57,8 +54,6 @@ function primaryLocation(item: MediaItem): MediaLocation | undefined {
       id: item.id,
       sourceId: item.sourceId,
       relativePath: item.relativePath,
-      displayName: item.displayName,
-      lastSeenAt: item.lastSeenAt,
     }
   )
 }
@@ -296,7 +291,7 @@ export function MediaViewer({
               <div>
                 <dt>{t('captured')}</dt>
                 <dd>
-                  {formatDateTime(item.capturedAt, locale, t('noTimestamp'))}
+                  {formatDateTime(item.timestamp, locale, t('noTimestamp'))}
                 </dd>
               </div>
               <div>

@@ -9,7 +9,7 @@ describe('web catalog storage mode', () => {
   it('validates supported storage modes', () => {
     expect(isWebCatalogStorageMode('sqlite')).toBe(true)
     expect(isWebCatalogStorageMode('sqlite-sahpool')).toBe(false)
-    expect(isWebCatalogStorageMode('sqlite-memory')).toBe(true)
+    expect(isWebCatalogStorageMode('temporary')).toBe(false)
     expect(isWebCatalogStorageMode('indexeddb')).toBe(true)
     expect(isWebCatalogStorageMode('native')).toBe(false)
   })
@@ -23,13 +23,13 @@ describe('web catalog storage mode', () => {
 
     window.localStorage.setItem(WEB_CATALOG_STORAGE_MODE_KEY, 'sqlite-sahpool')
     expect(storedWebCatalogStorageMode()).toBe('sqlite')
+
+    window.localStorage.setItem(WEB_CATALOG_STORAGE_MODE_KEY, 'temporary')
+    expect(storedWebCatalogStorageMode()).toBe('sqlite')
   })
 
   it('reads supported stored settings', () => {
     window.localStorage.setItem(WEB_CATALOG_STORAGE_MODE_KEY, 'indexeddb')
     expect(storedWebCatalogStorageMode()).toBe('indexeddb')
-
-    window.localStorage.setItem(WEB_CATALOG_STORAGE_MODE_KEY, 'sqlite-memory')
-    expect(storedWebCatalogStorageMode()).toBe('sqlite-memory')
   })
 })

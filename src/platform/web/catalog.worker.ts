@@ -9,9 +9,7 @@ import {
 import { GoogleTakeoutLocationStreamParser } from '../../lib/googleTakeoutStream'
 import { detectMediaKind, pathDisplayName } from '../../lib/media'
 import type {
-  CapturedAtSource,
   CatalogQuery,
-  GeoSource,
   GeoIndexPoint,
   GeoIndexStats,
   GeoSearchQuery,
@@ -38,7 +36,7 @@ type WorkerRequest = {
 }
 
 type InitResult = {
-  storageMode: 'opfs' | 'memory' | 'indexeddb'
+  storageMode: 'opfs' | 'indexeddb'
   sqliteVersion: string
   filename: string
 }
@@ -60,23 +58,18 @@ type SqliteDb = {
 }
 
 type SqliteModule = Awaited<ReturnType<typeof sqlite3InitModule>>
-type SqliteStorageMode = 'opfs' | 'memory'
+type SqliteStorageMode = 'opfs'
 
 type IdbAsset = {
   contentHash: string
   kind: MediaItem['kind']
   mimeType: string
   sizeBytes: number
-  width?: number
-  height?: number
   durationMs?: number
-  capturedAt?: number
-  capturedAtSource?: MediaItem['capturedAtSource']
+  timestamp?: number
   latitude?: number
   longitude?: number
-  geoSource?: MediaItem['geoSource']
   thumbnailKey?: string
-  lastSeenAt: number
 }
 
 type IdbLocation = MediaLocation & {
@@ -158,6 +151,7 @@ type CatalogStore = {
     items: MediaItem[],
     options?: { transactionActive?: boolean },
   ): Promise<MediaBatchWriteResult>
+  commitImport(): Promise<void>
   withImportTransaction<T>(
     run: () => Promise<T>,
     options?: ImportTransactionOptions,
@@ -180,16 +174,15 @@ const geoIndexRegistry = new GeoIndexRegistry()
 
 const IMPORT_BATCH_SIZE = 1000
 const SQLITE_BIND_CHUNK_LIMIT = 12000
-const ASSET_BIND_COLUMNS = 14
-const LOCATION_BIND_COLUMNS = 8
+const ASSET_BIND_COLUMNS = 9
+const LOCATION_BIND_COLUMNS = 7
 const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
 const GEO_IMPORT_PARSE_SLICE_MS = 250
 const PROGRESS_HEARTBEAT_MS = 1000
 const GEO_POINT_ITEM_BUILD_CHUNK_SIZE = 250
 const GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE = 250
 const GEO_IMPORT_INDEXEDDB_WRITE_BATCH_SIZE = 2000
-const SQLITE_IMPORT_TRANSACTION_ITEM_LIMIT = 100_000
-const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb'
+const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb-two-table-v1'
 const INDEXED_DB_VERSION = 1
 const IMPORT_TRACE_ENABLED = false
 
@@ -201,6 +194,7 @@ const ctx = self as unknown as {
   ) => void
 }
 const cancelledRequests = new Set<number>()
+let importCommitRequested = false
 
 type CancellationSignal = () => boolean
 
@@ -253,15 +247,7 @@ function yieldToEventLoop(): Promise<void> {
   })
 }
 
-async function openSqliteDb(
-  sqlite3: SqliteModule,
-  mode: SqliteStorageMode,
-): Promise<SqliteDb> {
-  if (mode === 'memory') {
-    const dbConstructor = sqlite3.oo1.DB as new (filename: string) => unknown
-    return new dbConstructor(':memory:') as SqliteDb
-  }
-
+async function openSqliteDb(sqlite3: SqliteModule): Promise<SqliteDb> {
   const opfsVfs = sqlite3.capi.sqlite3_vfs_find('opfs')
   const opfsDb = sqlite3.oo1.OpfsDb
 
@@ -271,7 +257,7 @@ async function openSqliteDb(
     )
   }
 
-  return new opfsDb('/catalog-v5.sqlite3') as unknown as SqliteDb
+  return new opfsDb('/catalog-v7.sqlite3') as unknown as SqliteDb
 }
 
 async function ensureDb(
@@ -280,7 +266,7 @@ async function ensureDb(
   if (db && initResult && sqliteMode === mode) return initResult
 
   const sqlite3 = await sqlite3InitModule()
-  db = await openSqliteDb(sqlite3, mode)
+  db = await openSqliteDb(sqlite3)
   sqliteMode = mode
   const activeDb = db
 
@@ -290,16 +276,11 @@ async function ensureDb(
       kind TEXT NOT NULL,
       mime_type TEXT NOT NULL,
       size_bytes INTEGER NOT NULL,
-      width INTEGER,
-      height INTEGER,
       duration_ms INTEGER,
-      captured_at INTEGER,
-      captured_at_source TEXT,
+      timestamp INTEGER,
       latitude REAL,
       longitude REAL,
-      geo_source TEXT,
-      thumbnail_key TEXT,
-      last_seen_at INTEGER NOT NULL
+      thumbnail_key TEXT
     );
 
     CREATE TABLE IF NOT EXISTS media_locations (
@@ -307,10 +288,9 @@ async function ensureDb(
       content_hash TEXT NOT NULL,
       source_id TEXT NOT NULL,
       source_label TEXT NOT NULL,
-      source_added_at INTEGER NOT NULL,
-      relative_path TEXT NOT NULL,
-      display_name TEXT NOT NULL,
-      last_seen_at INTEGER NOT NULL
+      root_path TEXT,
+      relative_path TEXT,
+      point_index INTEGER
     );
 
     CREATE INDEX IF NOT EXISTS idx_media_locations_content_hash
@@ -438,25 +418,17 @@ async function requireIndexedDb(): Promise<IDBDatabase> {
   return indexedDb
 }
 
-function idbAssetFromItem(
-  item: MediaItem,
-  existing?: IdbAsset,
-): IdbAsset {
+function idbAssetFromItem(item: MediaItem): IdbAsset {
   return {
     contentHash: item.contentHash,
     kind: item.kind,
     mimeType: item.mimeType,
     sizeBytes: item.sizeBytes,
-    width: item.width,
-    height: item.height,
     durationMs: item.durationMs,
-    capturedAt: item.capturedAt,
-    capturedAtSource: item.capturedAtSource,
+    timestamp: item.timestamp,
     latitude: item.latitude,
     longitude: item.longitude,
-    geoSource: item.geoSource,
-    thumbnailKey: item.thumbnailKey ?? existing?.thumbnailKey,
-    lastSeenAt: Math.max(existing?.lastSeenAt ?? 0, item.lastSeenAt),
+    thumbnailKey: item.thumbnailKey,
   }
 }
 
@@ -470,16 +442,11 @@ function mediaFromIdbAsset(
     kind: asset.kind,
     mime_type: asset.mimeType,
     size_bytes: asset.sizeBytes,
-    width: asset.width,
-    height: asset.height,
     duration_ms: asset.durationMs,
-    captured_at: asset.capturedAt,
-    captured_at_source: asset.capturedAtSource,
+    timestamp: asset.timestamp,
     latitude: asset.latitude,
     longitude: asset.longitude,
-    geo_source: asset.geoSource,
     thumbnail_key: asset.thumbnailKey,
-    last_seen_at: asset.lastSeenAt,
   }
   return mediaFromAssetRow(row, locations, preferredSourceId)
 }
@@ -489,35 +456,11 @@ function mediaLocationFromIdbLocation(location: IdbLocation): MediaLocation {
     id: location.id,
     sourceId: location.sourceId,
     sourceLabel: location.sourceLabel,
-    sourceAddedAt: location.sourceAddedAt,
+    rootPath: location.rootPath,
     relativePath: location.relativePath,
     absolutePath: location.absolutePath,
-    displayName: location.displayName,
-    lastSeenAt: location.lastSeenAt,
+    pointIndex: location.pointIndex,
   }
-}
-
-async function idbExistingAssets(
-  database: IDBDatabase,
-  contentHashes: string[],
-): Promise<Map<string, IdbAsset>> {
-  const uniqueHashes = Array.from(new Set(contentHashes))
-  if (uniqueHashes.length === 0) return new Map()
-
-  const transaction = database.transaction('assets', 'readonly')
-  const done = idbTransactionDone(transaction)
-  const store = transaction.objectStore('assets')
-  const requests = uniqueHashes.map((hash) =>
-    idbRequest<IdbAsset | undefined>(store.get(hash)),
-  )
-  const results = await Promise.all(requests)
-  await done
-
-  const assets = new Map<string, IdbAsset>()
-  for (const asset of results) {
-    if (asset) assets.set(asset.contentHash, asset)
-  }
-  return assets
 }
 
 async function idbLocationsForHash(
@@ -544,7 +487,11 @@ async function idbMediaItemsFromAssets(
   )
 
   return assets.map((asset, index) =>
-    mediaFromIdbAsset(asset, locationLists[index] ?? [], preferredSourceId),
+    mediaFromIdbAsset(
+      asset,
+      locationLists[index] ?? [],
+      preferredSourceId,
+    ),
   )
 }
 
@@ -556,22 +503,13 @@ async function idbUpsertMedia(items: MediaItem[]): Promise<number> {
   if (items.length === 0) return 0
 
   const database = await requireIndexedDb()
-  const needsExistingAssets = items.some(
-    (item) => item.kind !== 'geo_point' || item.thumbnailKey !== undefined,
-  )
-  const existingAssets = needsExistingAssets
-    ? await idbExistingAssets(
-        database,
-        items.map((item) => item.contentHash),
-      )
-    : new Map<string, IdbAsset>()
   const transaction = database.transaction(['assets', 'locations'], 'readwrite')
   const done = idbTransactionDone(transaction)
   const assets = transaction.objectStore('assets')
   const locations = transaction.objectStore('locations')
 
   for (const item of items) {
-    assets.put(idbAssetFromItem(item, existingAssets.get(item.contentHash)))
+    assets.put(idbAssetFromItem(item))
     for (const location of itemLocations(item)) {
       locations.put({
         ...location,
@@ -633,10 +571,11 @@ async function idbRemoveSources(sourceIds: string[]): Promise<void> {
 }
 
 async function idbPrepareImportSource(
-  _source: MediaSource,
+  source: MediaSource,
   duplicateSourceIds: string[],
 ): Promise<void> {
   await idbRemoveSources(duplicateSourceIds)
+  await idbUpsertSource(source)
 }
 
 function idbAssetMatchesQuery(
@@ -669,12 +608,12 @@ function idbAssetMatchesQuery(
     }
   }
   if (query.startTime !== undefined) {
-    if (asset.capturedAt === undefined || asset.capturedAt < query.startTime) {
+    if (asset.timestamp === undefined || asset.timestamp < query.startTime) {
       return false
     }
   }
   if (query.endTime !== undefined) {
-    if (asset.capturedAt === undefined || asset.capturedAt > query.endTime) {
+    if (asset.timestamp === undefined || asset.timestamp > query.endTime) {
       return false
     }
   }
@@ -703,20 +642,20 @@ async function idbSourceContentHashes(
   return hashes
 }
 
-function compareIdbAssetsByCapturedAt(
+function compareIdbAssetsBytimestamp(
   sort: CatalogQuery['sort'],
   a: IdbAsset,
   b: IdbAsset,
 ): number {
-  const aTime = a.capturedAt
-  const bTime = b.capturedAt
+  const aTime = a.timestamp
+  const bTime = b.timestamp
   const aMissing = aTime === undefined
   const bMissing = bTime === undefined
 
   if (aMissing && !bMissing) return 1
   if (!aMissing && bMissing) return -1
   if (!aMissing && !bMissing && aTime !== bTime) {
-    return sort === 'captured_at_asc' ? aTime - bTime : bTime - aTime
+    return sort === 'timestamp_asc' ? aTime - bTime : bTime - aTime
   }
 
   return a.contentHash.localeCompare(b.contentHash)
@@ -741,7 +680,7 @@ async function idbListMedia(query: CatalogQuery): Promise<MediaItem[]> {
   )
   await done
 
-  matches.sort((a, b) => compareIdbAssetsByCapturedAt(query.sort, a, b))
+  matches.sort((a, b) => compareIdbAssetsBytimestamp(query.sort, a, b))
   const results = matches.slice(offset, offset + limit)
   return idbMediaItemsFromAssets(database, results, query.sourceId)
 }
@@ -782,9 +721,9 @@ async function idbGetGeoPoints(range: TimeRange): Promise<GeoIndexPoint[]> {
         asset.latitude === undefined ||
         asset.longitude === undefined ||
         (range.startTime !== undefined &&
-          (asset.capturedAt === undefined || asset.capturedAt < range.startTime)) ||
+          (asset.timestamp === undefined || asset.timestamp < range.startTime)) ||
         (range.endTime !== undefined &&
-          (asset.capturedAt === undefined || asset.capturedAt > range.endTime))
+          (asset.timestamp === undefined || asset.timestamp > range.endTime))
       ) {
         return
       }
@@ -793,7 +732,7 @@ async function idbGetGeoPoints(range: TimeRange): Promise<GeoIndexPoint[]> {
         kind: asset.kind,
         lat: asset.latitude,
         lon: asset.longitude,
-        capturedAt: asset.capturedAt,
+        timestamp: asset.timestamp,
       })
     },
   )
@@ -811,19 +750,19 @@ async function idbListSources(): Promise<MediaSource[]> {
     transaction.objectStore('locations').openCursor(),
     (cursor) => {
       const location = cursor.value as IdbLocation
-      const current = sourcesById.get(location.sourceId)
-      const addedAt = location.sourceAddedAt ?? location.lastSeenAt
-      if (!current || addedAt > current.addedAt) {
+      if (!sourcesById.has(location.sourceId)) {
         sourcesById.set(location.sourceId, {
           id: location.sourceId,
-          label: location.sourceLabel ?? location.sourceId,
-          addedAt,
+          label: location.sourceLabel,
+          rootPath: location.rootPath,
         })
       }
     },
   )
   await done
-  return Array.from(sourcesById.values()).sort((a, b) => b.addedAt - a.addedAt)
+  return Array.from(sourcesById.values()).sort((a, b) =>
+    a.label.localeCompare(b.label),
+  )
 }
 
 async function idbCountMedia(): Promise<number> {
@@ -854,12 +793,31 @@ function locationFromRow(row: Record<string, unknown>): MediaLocation {
   return {
     id: String(row.id),
     sourceId: String(row.source_id),
-    sourceLabel: toString(row.source_label),
-    sourceAddedAt: toNumber(row.source_added_at),
-    relativePath: String(row.relative_path),
-    displayName: String(row.display_name),
-    lastSeenAt: toNumber(row.last_seen_at) ?? 0,
+    sourceLabel: String(row.source_label),
+    rootPath: toString(row.root_path),
+    relativePath: toString(row.relative_path),
+    pointIndex: toNumber(row.point_index),
   }
+}
+
+function displayNameForLocation(
+  kind: MediaItem['kind'],
+  contentHash: string,
+  location: MediaLocation | undefined,
+): string {
+  if (kind === 'geo_point') {
+    const base = location?.sourceLabel ?? location?.relativePath ?? contentHash
+    return typeof location?.pointIndex === 'number'
+      ? `${base} #${location.pointIndex}`
+      : base
+  }
+  return pathDisplayName(location?.relativePath ?? contentHash)
+}
+
+function relativePathForLocation(
+  location: MediaLocation | undefined,
+): string {
+  return location?.relativePath ?? location?.sourceLabel ?? ''
 }
 
 function mediaFromAssetRow(
@@ -868,6 +826,10 @@ function mediaFromAssetRow(
   preferredSourceId?: string,
 ): MediaItem {
   const contentHash = String(row.content_hash)
+  const kind =
+    row.kind === 'video' || row.kind === 'geo_point'
+      ? row.kind
+      : 'image'
   const sortedLocations = [...locations].sort((a, b) => {
     if (preferredSourceId) {
       if (a.sourceId === preferredSourceId && b.sourceId !== preferredSourceId) {
@@ -885,44 +847,29 @@ function mediaFromAssetRow(
   const primaryLocation = sortedLocations[0] ?? {
     id: contentHash,
     sourceId: '',
+    sourceLabel: '',
     relativePath: '',
-    displayName: contentHash,
-    lastSeenAt: toNumber(row.last_seen_at) ?? 0,
   }
 
   return {
     id: contentHash,
     contentHash,
     sourceId: primaryLocation.sourceId,
-    relativePath: primaryLocation.relativePath ?? '',
-    displayName: primaryLocation.displayName,
-    kind:
-      row.kind === 'video' || row.kind === 'geo_point'
-        ? row.kind
-        : 'image',
+    relativePath: relativePathForLocation(primaryLocation),
+    displayName: displayNameForLocation(
+      kind,
+      contentHash,
+      primaryLocation,
+    ),
+    kind,
     mimeType: String(row.mime_type),
     sizeBytes: toNumber(row.size_bytes) ?? 0,
-    width: toNumber(row.width),
-    height: toNumber(row.height),
     durationMs: toNumber(row.duration_ms),
-    capturedAt: toNumber(row.captured_at),
-    capturedAtSource: toString(row.captured_at_source) as
-      | MediaItem['capturedAtSource']
-      | undefined,
+    timestamp: toNumber(row.timestamp),
     latitude: toNumber(row.latitude),
     longitude: toNumber(row.longitude),
-    geoSource: toString(row.geo_source) as MediaItem['geoSource'] | undefined,
     thumbnailKey: toString(row.thumbnail_key),
-    lastSeenAt: toNumber(row.last_seen_at) ?? 0,
     locations: sortedLocations,
-  }
-}
-
-function sourceFromRow(row: Record<string, unknown>): MediaSource {
-  return {
-    id: String(row.id),
-    label: String(row.label),
-    addedAt: toNumber(row.added_at) ?? 0,
   }
 }
 
@@ -932,16 +879,11 @@ function assetBind(item: MediaItem): unknown[] {
     item.kind,
     item.mimeType,
     item.sizeBytes,
-    item.width ?? null,
-    item.height ?? null,
     item.durationMs ?? null,
-    item.capturedAt ?? null,
-    item.capturedAtSource ?? null,
+    item.timestamp ?? null,
     item.latitude ?? null,
     item.longitude ?? null,
-    item.geoSource ?? null,
     item.thumbnailKey ?? null,
-    item.lastSeenAt,
   ]
 }
 
@@ -952,10 +894,7 @@ function itemLocations(item: MediaItem): MediaLocation[] {
       id: `${item.sourceId}:${item.relativePath}`,
       sourceId: item.sourceId,
       sourceLabel: item.sourceId,
-      sourceAddedAt: item.lastSeenAt,
       relativePath: item.relativePath,
-      displayName: item.displayName,
-      lastSeenAt: item.lastSeenAt,
     },
   ]
 }
@@ -1078,28 +1017,14 @@ function upsertMediaIntoSqlite(
     'media_assets',
     `
     INSERT INTO media_assets (
-      content_hash, kind, mime_type, size_bytes, width, height, duration_ms,
-      captured_at, captured_at_source, latitude, longitude, geo_source,
-      thumbnail_key, last_seen_at
+      content_hash, kind, mime_type, size_bytes, duration_ms,
+      timestamp, latitude, longitude, thumbnail_key
     )
     `,
     assetRows,
     ASSET_BIND_COLUMNS,
     `
-    ON CONFLICT(content_hash) DO UPDATE SET
-      kind = excluded.kind,
-      mime_type = excluded.mime_type,
-      size_bytes = excluded.size_bytes,
-      width = excluded.width,
-      height = excluded.height,
-      duration_ms = excluded.duration_ms,
-      captured_at = excluded.captured_at,
-      captured_at_source = excluded.captured_at_source,
-      latitude = excluded.latitude,
-      longitude = excluded.longitude,
-      geo_source = excluded.geo_source,
-      thumbnail_key = COALESCE(excluded.thumbnail_key, media_assets.thumbnail_key),
-      last_seen_at = MAX(media_assets.last_seen_at, excluded.last_seen_at)
+    ON CONFLICT(content_hash) DO NOTHING
     `,
   )
 
@@ -1109,11 +1034,10 @@ function upsertMediaIntoSqlite(
       location.id,
       item.contentHash,
       location.sourceId,
-      location.sourceLabel ?? item.sourceId,
-      location.sourceAddedAt ?? item.lastSeenAt,
-      location.relativePath ?? '',
-      location.displayName,
-      location.lastSeenAt,
+      location.sourceLabel,
+      location.rootPath ?? null,
+      location.relativePath ?? null,
+      location.pointIndex ?? null,
     ]),
   )
   const locationRowsMs = performance.now() - locationRowsStartedAt
@@ -1123,21 +1047,14 @@ function upsertMediaIntoSqlite(
     'media_locations',
     `
     INSERT INTO media_locations (
-      id, content_hash, source_id, source_label, source_added_at,
-      relative_path, display_name, last_seen_at
+      id, content_hash, source_id, source_label, root_path, relative_path,
+      point_index
     )
     `,
     locationRows,
     LOCATION_BIND_COLUMNS,
     `
-    ON CONFLICT(id) DO UPDATE SET
-      content_hash = excluded.content_hash,
-      source_id = excluded.source_id,
-      source_label = excluded.source_label,
-      source_added_at = excluded.source_added_at,
-      relative_path = excluded.relative_path,
-      display_name = excluded.display_name,
-      last_seen_at = excluded.last_seen_at
+    ON CONFLICT(id) DO NOTHING
     `,
   )
 
@@ -1168,11 +1085,11 @@ function timeWhere(
   prefix = '',
 ): void {
   if (typeof query.startTime === 'number') {
-    where.push(`${prefix}captured_at >= ?`)
+    where.push(`${prefix}timestamp >= ?`)
     bind.push(query.startTime)
   }
   if (typeof query.endTime === 'number') {
-    where.push(`${prefix}captured_at <= ?`)
+    where.push(`${prefix}timestamp <= ?`)
     bind.push(query.endTime)
   }
 }
@@ -1200,7 +1117,8 @@ function mediaItemsFromAssetRows(
   for (const row of locationRows) {
     const contentHash = String(row.content_hash)
     const locations = locationsByHash.get(contentHash) ?? []
-    locations.push(locationFromRow(row))
+    const location = locationFromRow(row)
+    locations.push(location)
     locationsByHash.set(contentHash, locations)
   }
 
@@ -1211,6 +1129,11 @@ function mediaItemsFromAssetRows(
       preferredSourceId,
     ),
   )
+}
+
+function upsertSourceIntoSqlite(activeDb: SqliteDb, source: MediaSource): void {
+  void activeDb
+  void source
 }
 
 function removeSourcesFromSqlite(activeDb: SqliteDb, sourceIds: string[]): void {
@@ -1236,7 +1159,7 @@ function prepareImportSource(
   duplicateSourceIds: string[],
 ): void {
   removeSourcesFromSqlite(activeDb, duplicateSourceIds)
-  void source
+  upsertSourceIntoSqlite(activeDb, source)
 }
 
 export async function fileContentHash(file: File): Promise<string> {
@@ -1291,13 +1214,9 @@ async function writeThumbnail(id: string, file: File): Promise<string | undefine
 }
 
 async function readImageMetadata(file: File): Promise<{
-  width?: number
-  height?: number
-  capturedAt?: number
-  capturedAtSource?: CapturedAtSource
+  timestamp?: number
   latitude?: number
   longitude?: number
-  geoSource?: GeoSource
 }> {
   const metadata = await exifr
     .parse(file, {
@@ -1312,45 +1231,23 @@ async function readImageMetadata(file: File): Promise<{
   const record = isRecord(metadata) ? metadata : {}
   const latitude = numeric(record.latitude) ?? numeric(record.GPSLatitude)
   const longitude = numeric(record.longitude) ?? numeric(record.GPSLongitude)
-  const capturedAt =
+  const timestamp =
     dateMillis(record.DateTimeOriginal) ??
     dateMillis(record.CreateDate) ??
     dateMillis(record.DateCreated) ??
     dateMillis(record.ModifyDate) ??
     dateMillis(record.DateTime)
 
-  let width = numeric(record.ImageWidth) ?? numeric(record.ExifImageWidth)
-  let height = numeric(record.ImageHeight) ?? numeric(record.ExifImageHeight)
-
-  if ((!width || !height) && typeof createImageBitmap === 'function') {
-    try {
-      const bitmap = await createImageBitmap(file)
-      width = bitmap.width
-      height = bitmap.height
-      bitmap.close()
-    } catch {
-      // EXIF-less or browser-unsupported image formats are still valid media.
-    }
-  }
-
   return {
-    width,
-    height,
-    capturedAt,
-    capturedAtSource: capturedAt ? 'exif' : undefined,
+    timestamp,
     latitude,
     longitude,
-    geoSource:
-      typeof latitude === 'number' && typeof longitude === 'number'
-        ? 'exif'
-        : undefined,
   }
 }
 
 async function mediaFromFile(
   sourceId: string,
   sourceLabel: string,
-  sourceAddedAt: number,
   relativePath: string,
   fileHandle: FileSystemFileHandle,
 ): Promise<MediaItem | undefined> {
@@ -1360,34 +1257,28 @@ async function mediaFromFile(
 
   const contentHash = await fileContentHash(file)
   const locationId = await stableOccurrenceId(sourceId, relativePath)
-  const lastSeenAt = Date.now()
-  const location = {
+  const location: MediaLocation = {
     id: locationId,
     sourceId,
     sourceLabel,
-    sourceAddedAt,
     relativePath,
-    displayName: pathDisplayName(relativePath),
-    lastSeenAt,
   }
   const base = {
     id: contentHash,
     contentHash,
     sourceId,
     relativePath,
-    displayName: location.displayName,
+    displayName: pathDisplayName(relativePath),
     kind,
     mimeType: file.type || (kind === 'image' ? 'image/*' : 'video/*'),
     sizeBytes: file.size,
-    lastSeenAt,
     locations: [location],
   }
 
   if (kind === 'video') {
     return {
       ...base,
-      capturedAt: file.lastModified || undefined,
-      capturedAtSource: file.lastModified ? 'filesystem' : undefined,
+      timestamp: file.lastModified || undefined,
     }
   }
 
@@ -1397,10 +1288,7 @@ async function mediaFromFile(
   return {
     ...base,
     ...imageMetadata,
-    capturedAt: imageMetadata.capturedAt ?? file.lastModified ?? undefined,
-    capturedAtSource:
-      imageMetadata.capturedAtSource ??
-      (file.lastModified ? 'filesystem' : undefined),
+    timestamp: imageMetadata.timestamp ?? file.lastModified ?? undefined,
     thumbnailKey,
   }
 }
@@ -1412,7 +1300,6 @@ function geoPointLocationId(sourceId: string, contentHash: string): string {
 function geoPointItemFromParsedPoint(
   sourceId: string,
   sourceLabel: string,
-  sourceAddedAt: number,
   mimeType: string,
   point: ParsedGeoPoint,
   timing?: GeoPointItemTiming,
@@ -1421,7 +1308,7 @@ function geoPointItemFromParsedPoint(
   const contentHash = geoPointContentHash(
     point.latitude,
     point.longitude,
-    point.capturedAt,
+    point.timestamp,
   )
   if (timing) {
     timing.contentHashMs += performance.now() - contentHashStartedAt
@@ -1434,16 +1321,12 @@ function geoPointItemFromParsedPoint(
   }
 
   const objectStartedAt = performance.now()
-  const lastSeenAt = Date.now()
   const displayName = `${sourceLabel} #${point.index}`
   const location: MediaLocation = {
     id: locationId,
     sourceId,
     sourceLabel,
-    sourceAddedAt,
-    relativePath: sourceLabel,
-    displayName,
-    lastSeenAt,
+    pointIndex: point.index,
   }
 
   const item: MediaItem = {
@@ -1455,12 +1338,9 @@ function geoPointItemFromParsedPoint(
     kind: 'geo_point',
     mimeType,
     sizeBytes: 0,
-    capturedAt: point.capturedAt,
-    capturedAtSource: 'geo-file',
+    timestamp: point.timestamp,
     latitude: point.latitude,
     longitude: point.longitude,
-    geoSource: 'geo-file',
-    lastSeenAt,
     locations: [location],
   }
   if (timing) {
@@ -1473,7 +1353,6 @@ function geoPointItemFromParsedPoint(
 function geoPointItemsFromParsedPoints(
   sourceId: string,
   sourceLabel: string,
-  sourceAddedAt: number,
   mimeType: string,
   points: ParsedGeoPoint[],
   timing?: GeoPointItemTiming,
@@ -1482,7 +1361,6 @@ function geoPointItemsFromParsedPoints(
     geoPointItemFromParsedPoint(
       sourceId,
       sourceLabel,
-      sourceAddedAt,
       mimeType,
       point,
       timing,
@@ -1587,7 +1465,6 @@ async function importFolderIntoCatalog(
         const item = await mediaFromFile(
           source.id,
           sourceLabel,
-          source.addedAt,
           relativePath,
           entry as FileSystemFileHandle,
         )
@@ -1958,6 +1835,13 @@ async function importGpxIntoCatalog(
     await yieldToEventLoop()
   }
 
+  const commitIfRequested = async (phase: ImportProgress['phase']) => {
+    if (!importCommitRequested) return
+    importCommitRequested = false
+    await flushBatch(phase)
+    await store.commitImport()
+  }
+
   await store.withImportTransaction(async () => {
     for (
       let offset = 0;
@@ -1971,7 +1855,6 @@ async function importGpxIntoCatalog(
       const itemChunk = geoPointItemsFromParsedPoints(
         source.id,
         sourceLabel,
-        source.addedAt,
         parsed.mimeType,
         parsed.points.slice(offset, offset + GEO_POINT_ITEM_BUILD_CHUNK_SIZE),
       )
@@ -1980,6 +1863,7 @@ async function importGpxIntoCatalog(
         batch.push(item)
         if (batch.length >= store.geoImportWriteBatchSize) {
           await flushBatch('storing')
+          await commitIfRequested('storing')
           if (isCancelled()) {
             cancelled = true
             break
@@ -2000,9 +1884,11 @@ async function importGpxIntoCatalog(
         totalBytes: file.size,
       })
       await yieldToEventLoop()
+      await commitIfRequested('storing')
     }
 
     await flushBatch('storing')
+    await commitIfRequested('storing')
   })
 
   return { acceptedMedia, skippedFiles: parsed.skippedPoints, cancelled }
@@ -2091,6 +1977,13 @@ async function importGoogleTakeoutIntoCatalog(
     }
   }
 
+  const commitIfRequested = async (phase: ImportProgress['phase']) => {
+    if (!importCommitRequested) return
+    importCommitRequested = false
+    await flushBatch(phase)
+    await store.commitImport()
+  }
+
   const consumePoints = async () => {
     const points = pendingPoints.splice(0)
 
@@ -2110,7 +2003,6 @@ async function importGoogleTakeoutIntoCatalog(
       const itemChunk = geoPointItemsFromParsedPoints(
         source.id,
         sourceLabel,
-        source.addedAt,
         'application/json',
         pointChunk,
         timing,
@@ -2136,6 +2028,7 @@ async function importGoogleTakeoutIntoCatalog(
         currentChunkPoints: pointChunk.length,
       })
       await yieldToEventLoop()
+      await commitIfRequested('scanning')
     }
   }
 
@@ -2191,6 +2084,7 @@ async function importGoogleTakeoutIntoCatalog(
         const text = decoder.decode(value, { stream: true })
         timing.decodeMs += performance.now() - decodeStartedAt
         await consumeText(text)
+        await commitIfRequested('scanning')
         if (cancelled) break
       }
 
@@ -2200,6 +2094,7 @@ async function importGoogleTakeoutIntoCatalog(
         timing.decodeMs += performance.now() - finalDecodeStartedAt
         if (finalChunk) {
           await consumeText(finalChunk)
+          await commitIfRequested('scanning')
         }
 
         const final = parser.finish()
@@ -2208,6 +2103,7 @@ async function importGoogleTakeoutIntoCatalog(
         await consumePoints()
       }
       await flushBatch('storing')
+      await commitIfRequested('storing')
     },
     { traceId: timing.traceId, sourceLabel },
   )
@@ -2372,9 +2268,9 @@ async function listMedia(query: CatalogQuery): Promise<MediaItem[]> {
   timeWhere(query, where, bind, 'a.')
 
   const order =
-    query.sort === 'captured_at_asc'
-      ? 'CASE WHEN a.captured_at IS NULL THEN 1 ELSE 0 END, a.captured_at ASC, a.content_hash ASC'
-      : 'CASE WHEN a.captured_at IS NULL THEN 1 ELSE 0 END, a.captured_at DESC, a.content_hash ASC'
+    query.sort === 'timestamp_asc'
+      ? 'CASE WHEN a.timestamp IS NULL THEN 1 ELSE 0 END, a.timestamp ASC, a.content_hash ASC'
+      : 'CASE WHEN a.timestamp IS NULL THEN 1 ELSE 0 END, a.timestamp DESC, a.content_hash ASC'
   const limit = Math.max(1, Math.min(query.limit ?? 500, 10_000))
   const offset = Math.max(0, query.offset ?? 0)
   bind.push(limit, offset)
@@ -2429,7 +2325,7 @@ async function getGeoPoints(range: {
 
   const rows = requireDb().selectObjects(
     `
-      SELECT a.content_hash, a.latitude, a.longitude, a.captured_at
+      SELECT a.content_hash, a.latitude, a.longitude, a.timestamp
         , a.kind
       FROM media_assets a
       WHERE ${where.join(' AND ')}
@@ -2446,7 +2342,7 @@ async function getGeoPoints(range: {
         : undefined,
     lat: toNumber(row.latitude) ?? 0,
     lon: toNumber(row.longitude) ?? 0,
-    capturedAt: toNumber(row.captured_at),
+    timestamp: toNumber(row.timestamp),
   }))
 }
 
@@ -2554,13 +2450,17 @@ async function listSources(): Promise<MediaSource[]> {
         SELECT
           source_id AS id,
           source_label AS label,
-          MAX(source_added_at) AS added_at
+          root_path
         FROM media_locations
-        GROUP BY source_id, source_label
-        ORDER BY added_at DESC
+        GROUP BY source_id, source_label, root_path
+        ORDER BY source_label ASC
       `,
     )
-    .map(sourceFromRow)
+    .map((row) => ({
+      id: String(row.id),
+      label: String(row.label),
+      rootPath: toString(row.root_path),
+    }))
 }
 
 async function removeSources(sourceIds: string[]): Promise<void> {
@@ -2644,8 +2544,7 @@ function rollbackSqliteImportTransaction(
 
 function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
   const ensureMode = () => ensureDb(mode)
-  const webStorageMode: WebCatalogStorageMode =
-    mode === 'memory' ? 'sqlite-memory' : 'sqlite'
+  const webStorageMode: WebCatalogStorageMode = 'sqlite'
   let importTransactionState: SqliteImportTransactionState | undefined
 
   return {
@@ -2653,7 +2552,7 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
     init: ensureMode,
     async upsertSource(source) {
       await ensureMode()
-      void source
+      upsertSourceIntoSqlite(requireDb(), source)
     },
     async upsertMedia(items) {
       await ensureMode()
@@ -2699,12 +2598,6 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
       const sqliteTiming = upsertMediaIntoSqlite(activeDb, items)
       if (transactionState) {
         transactionState.writtenItems += items.length
-        if (
-          transactionState.writtenItems >=
-          SQLITE_IMPORT_TRANSACTION_ITEM_LIMIT
-        ) {
-          commitSqliteImportTransaction(activeDb, transactionState)
-        }
       }
       const writeMs = performance.now() - writeStartedAt
       const totalMs = performance.now() - startedAt
@@ -2724,6 +2617,11 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
           sqlite: sqliteTiming,
         },
       }
+    },
+    async commitImport() {
+      await ensureMode()
+      if (!importTransactionState) return
+      commitSqliteImportTransaction(requireDb(), importTransactionState)
     },
     async withImportTransaction(run, options) {
       if (importTransactionState) {
@@ -2752,7 +2650,6 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
             ensureDbMs: roundedMs(ensureDbMs),
             runMs: roundedMs(totalMs - ensureDbMs),
             committedChunks: transactionState.committedChunks,
-            transactionItemLimit: SQLITE_IMPORT_TRANSACTION_ITEM_LIMIT,
           })
         }
         return result
@@ -2763,7 +2660,6 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
             sourceLabel: options.sourceLabel,
             elapsedMs: roundedMs(performance.now() - startedAt),
             committedChunks: transactionState.committedChunks,
-            transactionItemLimit: SQLITE_IMPORT_TRANSACTION_ITEM_LIMIT,
           })
         }
         throw error
@@ -2803,7 +2699,6 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
 }
 
 const sqliteCatalogStore = createSqliteCatalogStore('opfs')
-const sqliteMemoryCatalogStore = createSqliteCatalogStore('memory')
 
 const indexedDbCatalogStore: CatalogStore = {
   geoImportWriteBatchSize: GEO_IMPORT_INDEXEDDB_WRITE_BATCH_SIZE,
@@ -2832,6 +2727,7 @@ const indexedDbCatalogStore: CatalogStore = {
       },
     }
   },
+  async commitImport() {},
   async withImportTransaction(run, options) {
     const startedAt = performance.now()
     try {
@@ -2864,13 +2760,11 @@ const indexedDbCatalogStore: CatalogStore = {
 
 function storageModeForRequest(request: WorkerRequest): WebCatalogStorageMode {
   if (request.storageMode === 'indexeddb') return 'indexeddb'
-  if (request.storageMode === 'sqlite-memory') return 'sqlite-memory'
   return 'sqlite'
 }
 
 function catalogStoreForMode(mode: WebCatalogStorageMode): CatalogStore {
   if (mode === 'indexeddb') return indexedDbCatalogStore
-  if (mode === 'sqlite-memory') return sqliteMemoryCatalogStore
   return sqliteCatalogStore
 }
 
@@ -2901,6 +2795,9 @@ async function handleRequest(
         postProgress as (progress: ImportProgress) => void,
         () => cancelledRequests.has(request.id),
       )
+    case 'commitImport':
+      importCommitRequested = true
+      return undefined
     case 'listMedia':
       return store.listMedia(request.payload as CatalogQuery)
     case 'getMediaByIds':

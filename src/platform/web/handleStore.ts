@@ -3,14 +3,12 @@ import { openDB } from 'idb'
 type SourceHandleRecord = {
   id: string
   label: string
-  addedAt: number
   handle: FileSystemDirectoryHandle
 }
 
 type GeoFileHandleRecord = {
   id: string
   label: string
-  addedAt: number
   handle: FileSystemFileHandle
 }
 

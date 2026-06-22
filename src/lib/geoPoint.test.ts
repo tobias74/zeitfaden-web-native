@@ -10,13 +10,13 @@ import {
 
 describe('geo point helpers', () => {
   it('normalizes identity with 9 coordinate decimals and epoch milliseconds', () => {
-    const capturedAt = Date.parse('2026-06-21T10:15:30.123Z')
+    const timestamp = Date.parse('2026-06-21T10:15:30.123Z')
 
-    expect(geoPointIdentityInput(48.1234567894, 11.9876543214, capturedAt)).toBe(
+    expect(geoPointIdentityInput(48.1234567894, 11.9876543214, timestamp)).toBe(
       'geo_point:v1:48.123456789:11.987654321:1782036930123',
     )
 
-    expect(geoPointContentHash(48.1234567894, 11.9876543214, capturedAt)).toBe(
+    expect(geoPointContentHash(48.1234567894, 11.9876543214, timestamp)).toBe(
       'geo_point:v1:48.123456789:11.987654321:1782036930123',
     )
   })
@@ -40,19 +40,19 @@ describe('geo point helpers', () => {
         index: 1,
         latitude: 48.1,
         longitude: 11.5,
-        capturedAt: Date.parse('2026-06-21T10:00:00Z'),
+        timestamp: Date.parse('2026-06-21T10:00:00Z'),
       },
       {
         index: 4,
         latitude: 48.3,
         longitude: 11.7,
-        capturedAt: Date.parse('2026-06-21T10:02:00Z'),
+        timestamp: Date.parse('2026-06-21T10:02:00Z'),
       },
       {
         index: 5,
         latitude: 48.4,
         longitude: 11.8,
-        capturedAt: Date.parse('2026-06-21T10:03:00Z'),
+        timestamp: Date.parse('2026-06-21T10:03:00Z'),
       },
     ])
   })
@@ -106,25 +106,25 @@ describe('geo point helpers', () => {
         index: 1,
         latitude: 48.1370673,
         longitude: 11.5775995,
-        capturedAt: Date.parse('2012-10-28T14:21:22.010Z'),
+        timestamp: Date.parse('2012-10-28T14:21:22.010Z'),
       },
       {
         index: 2,
         latitude: 48.1374628,
         longitude: 11.5781587,
-        capturedAt: Date.parse('2012-10-28T14:22:24.784Z'),
+        timestamp: Date.parse('2012-10-28T14:22:24.784Z'),
       },
       {
         index: 4,
         latitude: 48.1374628,
         longitude: 11.5781587,
-        capturedAt: 1_351_434_205_077,
+        timestamp: 1_351_434_205_077,
       },
       {
         index: 5,
         latitude: 48.1374629,
         longitude: 11.5781588,
-        capturedAt: 1_351_434_206_077,
+        timestamp: 1_351_434_206_077,
       },
     ])
   })

@@ -255,7 +255,7 @@ export function useSearchState(options: UseSearchStateOptions): {
   const clearSearch = useCallback(() => {
     setStartDateState('')
     setEndDateState('')
-    setSortState('captured_at_desc')
+    setSortState('timestamp_desc')
     setKindFilterState('all')
     setGeoBoundsState(undefined)
     setBoundsDrawing(false)
@@ -268,7 +268,7 @@ export function useSearchState(options: UseSearchStateOptions): {
   )
   const distanceSortActive = sort === 'distance'
   const catalogSort: CatalogSort =
-    sort === 'distance' ? 'captured_at_desc' : sort
+    sort === 'distance' ? 'timestamp_desc' : sort
   const resultOffset = resultPage * resultPageSize
 
   const catalogQuery = useMemo<CatalogQuery>(

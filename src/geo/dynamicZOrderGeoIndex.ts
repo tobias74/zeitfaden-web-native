@@ -20,8 +20,8 @@ type Cell = {
   latMax: number
   lonMin: number
   lonMax: number
-  minCapturedAt?: number
-  maxCapturedAt?: number
+  minTimestamp?: number
+  maxTimestamp?: number
   points: Map<string, GeoIndexPoint>
 }
 
@@ -66,7 +66,7 @@ function matchesSearchQuery(
   query: GeoSearchQuery,
 ): boolean {
   return (
-    matchesTimeRange(point.capturedAt, query) &&
+    matchesTimeRange(point.timestamp, query) &&
     matchesKind(point, query) &&
     matchesGeoBounds(point, query)
   )
@@ -228,7 +228,7 @@ export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
 
     const candidates: CellCandidate[] = []
     for (const cell of this.cells.values()) {
-      if (!overlapsTimeRange(cell.minCapturedAt, cell.maxCapturedAt, query)) {
+      if (!overlapsTimeRange(cell.minTimestamp, cell.maxTimestamp, query)) {
         metrics.prunedByTime += 1
         continue
       }
@@ -393,26 +393,26 @@ export class DynamicZOrderGeoIndex implements GeoTemporalIndex {
   }
 
   private recomputeCellTimeRange(cell: Cell): void {
-    cell.minCapturedAt = undefined
-    cell.maxCapturedAt = undefined
+    cell.minTimestamp = undefined
+    cell.maxTimestamp = undefined
     for (const point of cell.points.values()) {
       this.updateCellTimeRangeWithPoint(cell, point)
     }
   }
 
   private updateCellTimeRangeWithPoint(cell: Cell, point: GeoIndexPoint): void {
-    if (typeof point.capturedAt !== 'number') return
+    if (typeof point.timestamp !== 'number') return
     if (
-      typeof cell.minCapturedAt !== 'number' ||
-      point.capturedAt < cell.minCapturedAt
+      typeof cell.minTimestamp !== 'number' ||
+      point.timestamp < cell.minTimestamp
     ) {
-      cell.minCapturedAt = point.capturedAt
+      cell.minTimestamp = point.timestamp
     }
     if (
-      typeof cell.maxCapturedAt !== 'number' ||
-      point.capturedAt > cell.maxCapturedAt
+      typeof cell.maxTimestamp !== 'number' ||
+      point.timestamp > cell.maxTimestamp
     ) {
-      cell.maxCapturedAt = point.capturedAt
+      cell.maxTimestamp = point.timestamp
     }
   }
 

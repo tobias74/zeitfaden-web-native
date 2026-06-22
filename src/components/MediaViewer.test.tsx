@@ -14,14 +14,12 @@ const mediaItem: MediaItem = {
   kind: 'image',
   mimeType: 'image/jpeg',
   sizeBytes: 123,
-  lastSeenAt: 1,
   locations: [
     {
       id: 'location-1',
       sourceId: 'source-1',
+      sourceLabel: 'Source 1',
       relativePath: 'folder/image.jpg',
-      displayName: 'image.jpg',
-      lastSeenAt: 1,
     },
   ],
 }
@@ -97,17 +95,15 @@ describe('MediaViewer', () => {
       mimeType: 'application/gpx+xml',
       latitude: 48.1,
       longitude: 11.5,
-      capturedAt: Date.parse('2026-06-21T10:00:00Z'),
-      capturedAtSource: 'geo-file',
-      geoSource: 'geo-file',
+      timestamp: Date.parse('2026-06-21T10:00:00Z'),
       thumbnailKey: undefined,
       locations: [
         {
           id: 'geo-location-1',
           sourceId: 'source-1',
+          sourceLabel: 'track.gpx',
           relativePath: 'track.gpx',
-          displayName: 'track.gpx #1',
-          lastSeenAt: 1,
+          pointIndex: 1,
         },
       ],
     }

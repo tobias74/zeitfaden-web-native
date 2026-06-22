@@ -85,6 +85,10 @@ export class CatalogClient {
     }, signal)
   }
 
+  commitImport(): Promise<void> {
+    return this.request('commitImport')
+  }
+
   listMedia(query: CatalogQuery): Promise<MediaItem[]> {
     return this.request('listMedia', query)
   }

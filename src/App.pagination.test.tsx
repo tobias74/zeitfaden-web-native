@@ -29,15 +29,13 @@ function item(id: number): MediaItem {
     kind: 'image',
     mimeType: 'image/jpeg',
     sizeBytes: 1,
-    capturedAt: 1_000_000 - id,
-    lastSeenAt: 1,
+    timestamp: 1_000_000 - id,
     locations: [
       {
         id: `location-${id}`,
         sourceId: 'source-1',
+        sourceLabel: 'Source 1',
         relativePath: `item-${id}.jpg`,
-        displayName: `item-${id}.jpg`,
-        lastSeenAt: 1,
       },
     ],
   }
@@ -51,7 +49,7 @@ function createPlatform(): PlatformBackend {
   listMediaCalls = []
   const catalog: CatalogBackend = {
     init: vi.fn(async (): Promise<CatalogInfo> => ({
-      storageMode: 'memory',
+      storageMode: 'opfs',
       sqliteVersion: 'test',
       filename: ':memory:',
     })),
@@ -98,6 +96,7 @@ function createPlatform(): PlatformBackend {
     importer: {
       importFolder: vi.fn(),
       importGeoFile: vi.fn(),
+      commitImport: vi.fn(),
       dispose: vi.fn(),
     },
     thumbnails: {

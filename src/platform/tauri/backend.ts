@@ -143,6 +143,10 @@ class TauriImportBackend implements ImportBackend {
     }
   }
 
+  commitImport(): Promise<void> {
+    return invoke('commit_import')
+  }
+
   dispose(): void {}
 }
 
