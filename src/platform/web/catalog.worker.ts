@@ -3444,6 +3444,10 @@ function sqliteExplainPlan(
   )
 }
 
+function optionalSqliteBind(bind: unknown[]): unknown[] | undefined {
+  return bind.length > 0 ? bind : undefined
+}
+
 async function sqliteSearchRows(
   query: CatalogQuery,
   options?: { explainSql?: boolean },
@@ -3756,8 +3760,12 @@ function geoS2PointMatchesSpec(row: GeoS2PointRow, spec: SearchSpec): boolean {
   return true
 }
 
-function geoS2PointSql(spec: SearchSpec): { sql: string; bind: unknown[] } {
-  const where = ['p.cell_id = ?']
+function geoS2PointSql(
+  spec: SearchSpec,
+  options: { includeCellFilter?: boolean; countOnly?: boolean } = {},
+): { sql: string; bind: unknown[] } {
+  const includeCellFilter = options.includeCellFilter ?? true
+  const where = includeCellFilter ? ['p.cell_id = ?'] : []
   const bind: unknown[] = []
   if (typeof spec.startTime === 'number') {
     where.push('p.timestamp >= ?')
@@ -3789,11 +3797,23 @@ function geoS2PointSql(spec: SearchSpec): { sql: string; bind: unknown[] } {
     bind.push(spec.sourceId)
   }
 
+  const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''
+  if (options.countOnly) {
+    return {
+      sql: `
+        SELECT COUNT(*)
+        FROM geo_s2_points p
+        ${whereSql}
+      `,
+      bind,
+    }
+  }
+
   return {
     sql: `
       SELECT p.content_hash, p.timestamp, p.kind, p.latitude, p.longitude
       FROM geo_s2_points p
-      WHERE ${where.join(' AND ')}
+      ${whereSql}
       ORDER BY p.cell_id ASC, p.timestamp ASC, p.kind ASC, p.content_hash ASC
     `,
     bind,
@@ -3835,6 +3855,17 @@ async function sqliteS2DistanceSearch(
   const cellCount =
     toNumber(activeDb.selectValue('SELECT COUNT(*) FROM geo_s2_cells')) ?? 0
   const sqlPlan = geoS2ExplainPlan(activeDb, spec)
+  const totalCandidateStatement = geoS2PointSql(spec, {
+    includeCellFilter: false,
+    countOnly: true,
+  })
+  const totalCandidateCount =
+    toNumber(
+      activeDb.selectValue(
+        totalCandidateStatement.sql,
+        optionalSqliteBind(totalCandidateStatement.bind),
+      ),
+    ) ?? 0
   const queue = new S2CellQueue()
   queue.pushMany(s2RootCells(spec.order.point.lat, spec.order.point.lon))
   const candidates: S2DistanceCandidate[] = []
@@ -3845,7 +3876,66 @@ async function sqliteS2DistanceSearch(
   let candidatesInspected = 0
   let prunedByGeo = 0
   let prunedByTime = 0
-  let sqliteQueryCount = 2 + (sqlPlan ? 1 : 0)
+  let sqliteQueryCount = 3 + (sqlPlan ? 1 : 0)
+
+  if (totalCandidateCount <= retainedLimit) {
+    const allPointStatement = geoS2PointSql(spec, {
+      includeCellFilter: false,
+    })
+    sqliteQueryCount += 1
+    pagesRead += 1
+    const pointRows = activeDb.selectObjects(
+      allPointStatement.sql,
+      optionalSqliteBind(allPointStatement.bind),
+    ) as GeoS2PointRow[]
+
+    for (const row of pointRows) {
+      candidatesInspected += 1
+      if (!geoS2PointMatchesSpec(row, spec)) continue
+      const latitude = toNumber(row.latitude)
+      const longitude = toNumber(row.longitude)
+      if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+        continue
+      }
+      distanceComputations += 1
+      candidates.push({
+        mediaId: String(row.content_hash),
+        distanceMeters: haversineMeters(
+          latitude,
+          longitude,
+          spec.order.point.lat,
+          spec.order.point.lon,
+        ),
+      })
+    }
+
+    trimDistanceCandidates(candidates, retainedLimit)
+    const results = candidates.slice(offset, offset + limit)
+    const queryTimeMs = performance.now() - startedAt
+
+    return {
+      results,
+      limitReached: candidates.length > offset + limit,
+      sqlPlan,
+      stats: {
+        ...defaultSearchStats(
+          S2_CELL_BTREE_ENGINE_ID,
+          S2_CELL_BTREE_ENGINE_LABEL,
+        ),
+        pointCount,
+        cellCount,
+        indexStorage: 'disk',
+        lastQueryTimeMs: queryTimeMs,
+        distanceComputations,
+        nodesVisited,
+        pagesRead,
+        candidatesInspected,
+        prunedByGeo,
+        prunedByTime,
+        sqliteQueryCount,
+      },
+    }
+  }
 
   while (queue.length > 0) {
     const nextCell = queue.peek()

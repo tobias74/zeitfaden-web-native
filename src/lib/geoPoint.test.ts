@@ -57,6 +57,29 @@ describe('geo point helpers', () => {
     ])
   })
 
+  it('parses GPX without DOMParser so it can run in workers', () => {
+    vi.stubGlobal('DOMParser', undefined)
+
+    try {
+      const result = parseGpxPoints(`
+        <gpx>
+          <wpt lat="48.4" lon="11.8"><time>2026-06-21T10:03:00Z</time></wpt>
+        </gpx>
+      `)
+
+      expect(result.points).toEqual([
+        {
+          index: 1,
+          latitude: 48.4,
+          longitude: 11.8,
+          timestamp: Date.parse('2026-06-21T10:03:00Z'),
+        },
+      ])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('parses Google Takeout location JSON entries', () => {
     const result = parseGoogleTakeoutLocationPoints(
       JSON.stringify({

@@ -15,12 +15,14 @@ export type GeoFileFormat = 'gpx' | 'google-takeout-json'
 
 const GEO_POINT_IDENTITY_VERSION = 'geo_point:v1'
 const GPX_POINT_TAGS = new Set(['trkpt', 'rtept', 'wpt'])
+const XML_PREFIX = String.raw`(?:[A-Za-z_][\w.-]*:)?`
+const GPX_POINT_TAG_NAME = String.raw`${XML_PREFIX}(?:trkpt|rtept|wpt)`
 const UNSUPPORTED_GEO_FILE_FORMAT =
   'The selected file is not a supported geo import format. Supported formats are GPX and Google Takeout Location History JSON.'
 const GEO_IMPORT_DEBUG_PREFIX = '[geo-import]'
 
-function localName(element: Element): string {
-  return element.localName || element.tagName
+function xmlLocalName(name: string): string {
+  return (name.split(':').pop() ?? name).toLowerCase()
 }
 
 function finiteCoordinate(value: string | null): number | undefined {
@@ -37,14 +39,21 @@ function validLongitude(value: number | undefined): value is number {
   return typeof value === 'number' && value >= -180 && value <= 180
 }
 
-function pointTime(element: Element): number | undefined {
-  for (const child of Array.from(element.children)) {
-    if (localName(child) !== 'time') continue
-    const parsed = Date.parse(child.textContent?.trim() ?? '')
-    return Number.isFinite(parsed) ? parsed : undefined
-  }
+function xmlAttribute(attributes: string, name: 'lat' | 'lon'): string | null {
+  const match = new RegExp(
+    String.raw`\b${name}\s*=\s*(?:"([^"]*)"|'([^']*)')`,
+    'i',
+  ).exec(attributes)
+  return match?.[1] ?? match?.[2] ?? null
+}
 
-  return undefined
+function pointTime(pointBody: string): number | undefined {
+  const match = new RegExp(
+    String.raw`<\s*${XML_PREFIX}time\b[^>]*>([\s\S]*?)<\s*/\s*${XML_PREFIX}time\s*>`,
+    'i',
+  ).exec(pointBody)
+  const parsed = Date.parse(match?.[1]?.trim() ?? '')
+  return Number.isFinite(parsed) ? parsed : undefined
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -132,16 +141,10 @@ function jsonDebugDetails(parsed: unknown): Record<string, unknown> {
   }
 }
 
-function parsedXmlDocument(xmlText: string): Document | undefined {
-  const document = new DOMParser().parseFromString(xmlText, 'application/xml')
-  const parserError = Array.from(document.getElementsByTagName('*')).find(
-    (element) => localName(element) === 'parsererror',
+function isGpxText(xmlText: string): boolean {
+  return new RegExp(String.raw`<\s*${XML_PREFIX}gpx(?:\s|>)`, 'i').test(
+    xmlText,
   )
-  return parserError ? undefined : document
-}
-
-function isGpxDocument(document: Document): boolean {
-  return localName(document.documentElement) === 'gpx'
 }
 
 export function geoPointIdentityInput(
@@ -166,22 +169,27 @@ export function geoPointContentHash(
 }
 
 export function parseGpxPoints(xmlText: string): ParsedGeoFile {
-  const document = parsedXmlDocument(xmlText)
-  if (!document) {
+  if (!isGpxText(xmlText)) {
     throw new Error('The selected GPX file could not be parsed as XML.')
   }
 
   const points: ParsedGeoPoint[] = []
   let skippedPoints = 0
   let index = 0
+  const pointTagPattern = new RegExp(
+    String.raw`<\s*(${GPX_POINT_TAG_NAME})\b([^>]*?)(?:/\s*>|>([\s\S]*?)<\s*/\s*\1\s*>)`,
+    'gi',
+  )
+  let match: RegExpExecArray | null
 
-  for (const element of Array.from(document.getElementsByTagName('*'))) {
-    if (!GPX_POINT_TAGS.has(localName(element))) continue
+  while ((match = pointTagPattern.exec(xmlText))) {
+    const [, tagName, attributes = '', body = ''] = match
+    if (!GPX_POINT_TAGS.has(xmlLocalName(tagName))) continue
 
     index += 1
-    const latitude = finiteCoordinate(element.getAttribute('lat'))
-    const longitude = finiteCoordinate(element.getAttribute('lon'))
-    const timestamp = pointTime(element)
+    const latitude = finiteCoordinate(xmlAttribute(attributes, 'lat'))
+    const longitude = finiteCoordinate(xmlAttribute(attributes, 'lon'))
+    const timestamp = pointTime(body)
 
     if (
       !validLatitude(latitude) ||
@@ -319,8 +327,7 @@ export function detectGeoFileFormat(
     )
   }
 
-  const document = parsedXmlDocument(fileText)
-  if (document && isGpxDocument(document)) return 'gpx'
+  if (isGpxText(fileText)) return 'gpx'
 
   logGeoImportDebug(fileName, 'unsupported non-JSON/non-GPX content', {
     firstCharacters: fileText.trimStart().slice(0, 32),
