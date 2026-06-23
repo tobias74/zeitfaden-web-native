@@ -216,7 +216,7 @@ export class DiskSegmentedTreeIndex {
   readonly capabilities = {
     exact: true,
     persistent: true,
-    incrementalInsert: true,
+    incrementalInsert: false,
     incrementalDelete: false,
     supportsTimePruning: true,
   }
@@ -375,37 +375,6 @@ export class DiskSegmentedTreeIndex {
       indexSizeBytes: segments.reduce((total, segment) => total + segment.byteLength, 0),
     })
     return pointCount
-  }
-
-  async insertMany(points: GeoIndexPoint[], catalogEpoch: number): Promise<void> {
-    if (!this.manifest || points.length === 0) return
-    const segment = await this.buildSegment(
-      `delta-${Date.now().toString(36)}-${this.manifest.segments.length}`,
-      points,
-      true,
-    )
-    if (!segment) return
-    const data = encodeSegment(this.id, segment)
-    await this.store.writeSegment(this.id, segment.id, data.slice(0))
-    this.manifest = {
-      ...this.manifest,
-      catalogEpoch,
-      pointCount: this.manifest.pointCount + segment.pointCount,
-      segmentCount: this.manifest.segmentCount + 1,
-      segments: [
-        ...this.manifest.segments,
-        {
-          id: segment.id,
-          isDelta: true,
-          pointCount: segment.pointCount,
-          maxLeafSize: segment.maxLeafSize,
-          byteLength: data.byteLength,
-          root: rootForSegment(segment),
-        },
-      ],
-    }
-    await this.store.writeManifest(this.id, this.manifest)
-    this.lastStats = this.emptyStats()
   }
 
   async search(query: GeoSearchQuery): Promise<GeoSearchResult[]> {

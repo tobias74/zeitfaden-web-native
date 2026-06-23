@@ -3156,7 +3156,6 @@ fn upsert_media_rows(conn: &mut Connection, items: &[MediaItem]) -> AppResult<us
         &location_rows,
         LOCATION_BIND_COLUMNS,
     )?;
-    bump_catalog_epoch(conn)?;
     Ok(items.len())
 }
 
@@ -3182,7 +3181,11 @@ fn upsert_source(app: AppHandle, source: MediaSource) -> AppResult<()> {
 #[tauri::command]
 fn upsert_media(app: AppHandle, items: Vec<MediaItem>) -> AppResult<usize> {
     let mut conn = connect(&app)?;
-    upsert_media_rows(&mut conn, &items)
+    let written = upsert_media_rows(&mut conn, &items)?;
+    if written > 0 {
+        bump_catalog_epoch(&conn)?;
+    }
+    Ok(written)
 }
 
 #[tauri::command]
@@ -4171,6 +4174,7 @@ fn flush_and_commit_geo_import_if_requested(
         return Ok(());
     }
     flush_media_batch(conn, batch)?;
+    bump_catalog_epoch(conn)?;
     conn.execute_batch("COMMIT; BEGIN IMMEDIATE")
         .map_err(|error| error.to_string())
 }
@@ -4593,6 +4597,9 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
         ),
     );
     flush_media_batch(&mut conn, &mut batch)?;
+    if accepted_media > 0 {
+        bump_catalog_epoch(&conn)?;
+    }
 
     Ok(ImportSummary {
         source,
@@ -4666,6 +4673,9 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
         };
         match result {
             Ok(summary) => {
+                if summary.0 > 0 {
+                    bump_catalog_epoch(&conn)?;
+                }
                 commit_geo_import_transaction(&conn)?;
                 summary
             }

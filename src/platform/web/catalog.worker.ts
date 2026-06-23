@@ -179,10 +179,6 @@ type MediaBatchWriteTiming = {
   ensureDbMs: number
   requireDbMs: number
   writeMs: number
-  catalogEpochMs: number
-  incrementalIndexMs: number
-  incrementalIndexApplied: boolean
-  incrementalIndexSkippedReason?: string
   accountedMs: number
   unaccountedMs: number
   sqlite?: SqliteMediaWriteTiming
@@ -191,11 +187,6 @@ type MediaBatchWriteTiming = {
 type MediaBatchWriteResult = {
   written: number
   timing: MediaBatchWriteTiming
-}
-
-type ImportTransactionOptions = {
-  traceId?: string
-  sourceLabel?: string
 }
 
 type CatalogStore = {
@@ -215,7 +206,6 @@ type CatalogStore = {
   commitImport(): Promise<void>
   withImportTransaction<T>(
     run: () => Promise<T>,
-    options?: ImportTransactionOptions,
   ): Promise<T>
   listMedia(query: CatalogQuery): Promise<MediaItem[]>
   searchMedia(spec: SearchSpec): Promise<SearchPage>
@@ -227,7 +217,6 @@ type CatalogStore = {
   ): Promise<number>
   diskSegmentedTreeStore(): DiskSegmentedTreeStore
   catalogEpoch(): Promise<number>
-  bumpCatalogEpoch(): Promise<number>
   loadPersistedSegmentedBallTreeIndex(
     catalogEpoch: number,
   ): Promise<{ pointCount: number; segmentCount: number } | undefined>
@@ -268,10 +257,8 @@ const PROGRESS_HEARTBEAT_MS = 1000
 const GEO_POINT_ITEM_BUILD_CHUNK_SIZE = 250
 const GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE = 250
 const GEO_IMPORT_INDEXEDDB_WRITE_BATCH_SIZE = 2000
-const SLOW_IMPORT_BATCH_LOG_MS = 1000
 const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb-persisted-index-v1'
 const INDEXED_DB_VERSION = 1
-const IMPORT_TRACE_ENABLED = false
 const CATALOG_EPOCH_KEY = 'catalogEpoch'
 const SEGMENTED_BALL_TREE_CACHE_KEY = 'segmented-ball-tree:v1'
 
@@ -297,7 +284,6 @@ type ImportGeoFilePayload = {
   source: MediaSource
   duplicateSourceIds: string[]
   file: File
-  traceId?: string
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -587,11 +573,6 @@ function bumpSqliteCatalogEpochInDb(activeDb: SqliteDb): number {
   return nextEpoch
 }
 
-async function sqliteBumpCatalogEpoch(): Promise<number> {
-  await ensureDb()
-  return bumpSqliteCatalogEpochInDb(requireDb())
-}
-
 async function idbCatalogEpoch(): Promise<number> {
   const database = await requireIndexedDb()
   const transaction = database.transaction('metadata', 'readonly')
@@ -816,64 +797,6 @@ function activeDiskSegmentedIndex(
   )
 }
 
-function geoIndexPointFromMediaItem(item: MediaItem): GeoIndexPoint | undefined {
-  if (
-    typeof item.latitude !== 'number' ||
-    typeof item.longitude !== 'number' ||
-    !Number.isFinite(item.latitude) ||
-    !Number.isFinite(item.longitude)
-  ) {
-    return undefined
-  }
-
-  return {
-    mediaId: item.id,
-    kind: item.kind,
-    lat: item.latitude,
-    lon: item.longitude,
-    timestamp: item.timestamp,
-  }
-}
-
-async function applyIncrementalSearchIndexUpdate(
-  store: CatalogStore,
-  items: MediaItem[],
-  catalogEpoch: number,
-): Promise<boolean> {
-  if (!preparedSearchIndex) return false
-  if (preparedSearchIndex.storageMode !== store.storageMode) {
-    preparedSearchIndex = undefined
-    return false
-  }
-  const diskIndex = activeDiskSegmentedIndex(store, preparedSearchIndex.indexId)
-  const registryIndex = geoIndexRegistry.get(preparedSearchIndex.indexId)
-  const index = diskIndex ?? registryIndex
-  if (!index.capabilities.incrementalInsert) {
-    preparedSearchIndex = undefined
-    return false
-  }
-
-  const points = items.flatMap((item) => {
-    const point = geoIndexPointFromMediaItem(item)
-    return point ? [point] : []
-  })
-  if (points.length === 0) return false
-
-  if (diskIndex) {
-    await diskIndex.insertMany(points, catalogEpoch)
-  } else {
-    await registryIndex.insertMany(points)
-  }
-
-  preparedSearchIndex = {
-    storageMode: store.storageMode,
-    indexId: index.id,
-    catalogEpoch,
-    cacheDirty: preparedSearchIndex.cacheDirty || index.capabilities.persistent,
-  }
-  return true
-}
-
 function invalidatePreparedSearchIndex(): void {
   preparedSearchIndex = undefined
 }
@@ -1092,8 +1015,8 @@ async function idbUpsertMedia(items: MediaItem[]): Promise<number> {
   }
 
   await done
-  const catalogEpoch = await idbBumpCatalogEpoch()
-  await applyIncrementalSearchIndexUpdate(indexedDbCatalogStore, items, catalogEpoch)
+  await idbBumpCatalogEpoch()
+  invalidatePreparedSearchIndex()
   return items.length
 }
 
@@ -1878,25 +1801,15 @@ function geoPointItemFromParsedPoint(
   sourceLabel: string,
   mimeType: string,
   point: ParsedGeoPoint,
-  timing?: GeoPointItemTiming,
 ): MediaItem {
-  const contentHashStartedAt = performance.now()
   const contentHash = geoPointContentHash(
     point.latitude,
     point.longitude,
     point.timestamp,
   )
-  if (timing) {
-    timing.contentHashMs += performance.now() - contentHashStartedAt
-  }
 
-  const locationHashStartedAt = performance.now()
   const locationId = geoPointLocationId(sourceId, contentHash)
-  if (timing) {
-    timing.locationHashMs += performance.now() - locationHashStartedAt
-  }
 
-  const objectStartedAt = performance.now()
   const displayName = `${sourceLabel} #${point.index}`
   const location: MediaLocation = {
     id: locationId,
@@ -1919,9 +1832,6 @@ function geoPointItemFromParsedPoint(
     longitude: point.longitude,
     locations: [location],
   }
-  if (timing) {
-    timing.objectBuildMs += performance.now() - objectStartedAt
-  }
 
   return item
 }
@@ -1931,7 +1841,6 @@ function geoPointItemsFromParsedPoints(
   sourceLabel: string,
   mimeType: string,
   points: ParsedGeoPoint[],
-  timing?: GeoPointItemTiming,
 ): MediaItem[] {
   return points.map((point) =>
     geoPointItemFromParsedPoint(
@@ -1939,7 +1848,6 @@ function geoPointItemsFromParsedPoints(
       sourceLabel,
       mimeType,
       point,
-      timing,
     ),
   )
 }
@@ -2105,7 +2013,6 @@ async function importFolderIntoCatalog(
       await walk(handle, '')
       await flushBatch('storing')
     },
-    { sourceLabel },
   )
 
   return summary()
@@ -2171,204 +2078,6 @@ function throwKnownUnsupportedJsonPrefix(prefix: string): void {
       'GeoJSON files are not supported yet. Supported formats are GPX and Google Takeout Location History JSON.',
     )
   }
-}
-
-function debugParseRate(count: number, durationMs: number): number {
-  if (durationMs <= 0) return 0
-  return count / (durationMs / 1000)
-}
-
-type GeoPointItemTiming = {
-  contentHashMs: number
-  locationHashMs: number
-  objectBuildMs: number
-}
-
-type GeoImportTimingMetrics = GeoPointItemTiming & {
-  traceId: string
-  sourceLabel: string
-  startedAt: number
-  lastLogAt: number
-  batchSequence: number
-  bytesRead: number
-  parsedPoints: number
-  skippedPoints: number
-  itemsBuilt: number
-  dbWritten: number
-  readMs: number
-  decodeMs: number
-  parserFeedMs: number
-  queueMs: number
-  batchQueueMs: number
-  dbWriteMs: number
-  dbWriteBatches: number
-}
-
-function roundedMs(value: number): number {
-  return Math.round(value * 10) / 10
-}
-
-let importTraceCounter = 1
-
-function createImportTraceId(sourceLabel: string): string {
-  const sanitized = sourceLabel.replace(/[^a-z0-9]+/gi, '-').slice(0, 32)
-  return `import-${Date.now().toString(36)}-${importTraceCounter++}-${sanitized}`
-}
-
-function logImportTrace(
-  traceId: string,
-  phase: string,
-  data: Record<string, unknown>,
-): void {
-  if (!IMPORT_TRACE_ENABLED) return
-  console.log('[import-trace]', {
-    traceId,
-    phase,
-    ...data,
-  })
-}
-
-function roundedChunkTimings(
-  chunks: SqliteUpsertChunkTiming[],
-): SqliteUpsertChunkTiming[] {
-  return chunks.map((chunk) => ({
-    ...chunk,
-    placeholderMs: roundedMs(chunk.placeholderMs),
-    sqlBuildMs: roundedMs(chunk.sqlBuildMs),
-    bindFlattenMs: roundedMs(chunk.bindFlattenMs),
-    execMs: roundedMs(chunk.execMs),
-  }))
-}
-
-function roundedSqliteUpsertTiming(
-  timing: SqliteUpsertTiming,
-): Record<string, unknown> {
-  return {
-    label: timing.label,
-    rows: timing.rows,
-    columnCount: timing.columnCount,
-    chunks: timing.chunks,
-    bindValues: timing.bindValues,
-    sqlChars: timing.sqlChars,
-    placeholderMs: roundedMs(timing.placeholderMs),
-    sqlBuildMs: roundedMs(timing.sqlBuildMs),
-    bindFlattenMs: roundedMs(timing.bindFlattenMs),
-    execMs: roundedMs(timing.execMs),
-    totalMs: roundedMs(timing.totalMs),
-    chunkTimings: roundedChunkTimings(timing.chunkTimings),
-  }
-}
-
-function roundedMediaBatchWriteTiming(
-  timing: MediaBatchWriteTiming,
-): Record<string, unknown> {
-  return {
-    storageMode: timing.storageMode,
-    items: timing.items,
-    transactionActive: timing.transactionActive,
-    totalMs: roundedMs(timing.totalMs),
-    ensureDbMs: roundedMs(timing.ensureDbMs),
-    requireDbMs: roundedMs(timing.requireDbMs),
-    writeMs: roundedMs(timing.writeMs),
-    catalogEpochMs: roundedMs(timing.catalogEpochMs),
-    incrementalIndexMs: roundedMs(timing.incrementalIndexMs),
-    incrementalIndexApplied: timing.incrementalIndexApplied,
-    incrementalIndexSkippedReason: timing.incrementalIndexSkippedReason,
-    accountedMs: roundedMs(timing.accountedMs),
-    unaccountedMs: roundedMs(timing.unaccountedMs),
-    sqlite: timing.sqlite
-      ? {
-          items: timing.sqlite.items,
-          locations: timing.sqlite.locations,
-          totalMs: roundedMs(timing.sqlite.totalMs),
-          assetRowsMs: roundedMs(timing.sqlite.assetRowsMs),
-          locationRowsMs: roundedMs(timing.sqlite.locationRowsMs),
-          accountedMs: roundedMs(timing.sqlite.accountedMs),
-          unaccountedMs: roundedMs(timing.sqlite.unaccountedMs),
-          asset: roundedSqliteUpsertTiming(timing.sqlite.asset),
-          location: roundedSqliteUpsertTiming(timing.sqlite.location),
-        }
-      : undefined,
-  }
-}
-
-function createGeoImportTiming(
-  sourceLabel: string,
-  traceId: string,
-): GeoImportTimingMetrics {
-  const now = performance.now()
-  return {
-    traceId,
-    sourceLabel,
-    startedAt: now,
-    lastLogAt: now,
-    batchSequence: 0,
-    bytesRead: 0,
-    parsedPoints: 0,
-    skippedPoints: 0,
-    itemsBuilt: 0,
-    dbWritten: 0,
-    readMs: 0,
-    decodeMs: 0,
-    parserFeedMs: 0,
-    contentHashMs: 0,
-    locationHashMs: 0,
-    objectBuildMs: 0,
-    queueMs: 0,
-    batchQueueMs: 0,
-    dbWriteMs: 0,
-    dbWriteBatches: 0,
-  }
-}
-
-function geoImportTimingSnapshot(
-  timing: GeoImportTimingMetrics,
-): Record<string, unknown> {
-  const elapsedMs = performance.now() - timing.startedAt
-  return {
-    traceId: timing.traceId,
-    sourceLabel: timing.sourceLabel,
-    elapsedMs: roundedMs(elapsedMs),
-    bytesRead: timing.bytesRead,
-    parsedPoints: timing.parsedPoints,
-    skippedPoints: timing.skippedPoints,
-    itemsBuilt: timing.itemsBuilt,
-    dbWritten: timing.dbWritten,
-    dbWriteBatches: timing.dbWriteBatches,
-    readMs: roundedMs(timing.readMs),
-    decodeMs: roundedMs(timing.decodeMs),
-    parserFeedMs: roundedMs(timing.parserFeedMs),
-    contentHashMs: roundedMs(timing.contentHashMs),
-    locationHashMs: roundedMs(timing.locationHashMs),
-    objectBuildMs: roundedMs(timing.objectBuildMs),
-    queueMs: roundedMs(timing.queueMs),
-    batchQueueMs: roundedMs(timing.batchQueueMs),
-    dbWriteMs: roundedMs(timing.dbWriteMs),
-    pointsPerSecond: Math.round(debugParseRate(timing.parsedPoints, elapsedMs)),
-    writesPerSecond: Math.round(debugParseRate(timing.dbWritten, elapsedMs)),
-  }
-}
-
-function logGeoImportTiming(
-  timing: GeoImportTimingMetrics,
-  phase: string,
-  extra: Record<string, unknown> = {},
-): void {
-  logImportTrace(timing.traceId, phase, {
-    ...geoImportTimingSnapshot(timing),
-    ...extra,
-  })
-}
-
-function maybeLogGeoImportTiming(
-  timing: GeoImportTimingMetrics,
-  phase: string,
-  extra: Record<string, unknown> = {},
-): void {
-  const now = performance.now()
-  if (now - timing.lastLogAt < PROGRESS_HEARTBEAT_MS) return
-  timing.lastLogAt = now
-  logGeoImportTiming(timing, phase, extra)
 }
 
 async function importGpxIntoCatalog(
@@ -2479,11 +2188,9 @@ async function importGoogleTakeoutIntoCatalog(
   source: MediaSource,
   store: CatalogStore,
   postProgress: (progress: ImportProgress) => void,
-  traceId: string,
   isCancelled: CancellationSignal,
 ): Promise<{ acceptedMedia: number; skippedFiles: number; cancelled: boolean }> {
   const sourceLabel = source.label
-  const timing = createGeoImportTiming(sourceLabel, traceId)
   const parser = new GoogleTakeoutLocationStreamParser()
   const reader = file.stream().getReader()
   const decoder = new TextDecoder()
@@ -2494,11 +2201,6 @@ async function importGoogleTakeoutIntoCatalog(
   let skippedFiles = 0
   let lastProgressAt = 0
   let cancelled = false
-
-  logGeoImportTiming(timing, 'takeout import start', {
-    sizeBytes: file.size,
-    writeBatchSize: store.geoImportWriteBatchSize,
-  })
 
   const emitProgress = (phase: ImportProgress['phase']) => {
     postProgress({
@@ -2524,32 +2226,9 @@ async function importGoogleTakeoutIntoCatalog(
   const flushBatch = async (phase: ImportProgress['phase']) => {
     if (batch.length === 0) return
     const flushedItems = batch.length
-    timing.batchSequence += 1
-    const writeStartedAt = performance.now()
-    const writeResult = await store.writeMediaBatch(batch)
-    const writeMs = performance.now() - writeStartedAt
-    timing.dbWriteMs += writeMs
-    timing.dbWriteBatches += 1
-    timing.dbWritten += flushedItems
+    await store.writeMediaBatch(batch)
     acceptedMedia += flushedItems
     batch.length = 0
-    if (IMPORT_TRACE_ENABLED) {
-      const storageTiming = writeResult.timing
-      const storageTotalMs = storageTiming.totalMs
-      logGeoImportTiming(timing, 'database batch written', {
-        batchId: `${timing.traceId}:batch-${timing.batchSequence}`,
-        batchItems: flushedItems,
-        batchWriteMs: roundedMs(writeMs),
-        storageWritten: writeResult.written,
-        storageWrite: roundedMediaBatchWriteTiming(storageTiming),
-        batchAccounting: {
-          outerWriteMs: roundedMs(writeMs),
-          storageTotalMs: roundedMs(storageTotalMs),
-          outerMinusStorageMs: roundedMs(writeMs - storageTotalMs),
-        },
-        importPhase: phase,
-      })
-    }
     emitProgress(phase)
     await yieldToEventLoop()
     if (isCancelled()) {
@@ -2585,28 +2264,18 @@ async function importGoogleTakeoutIntoCatalog(
         sourceLabel,
         'application/json',
         pointChunk,
-        timing,
       )
-      timing.itemsBuilt += itemChunk.length
 
-      let batchQueueStartedAt = performance.now()
       for (const item of itemChunk) {
         batch.push(item)
         if (batch.length >= store.geoImportWriteBatchSize) {
-          timing.batchQueueMs += performance.now() - batchQueueStartedAt
           await flushBatch('scanning')
           if (cancelled) break
-          batchQueueStartedAt = performance.now()
         }
       }
       if (cancelled) break
-      timing.batchQueueMs += performance.now() - batchQueueStartedAt
 
       maybeEmitProgress()
-      maybeLogGeoImportTiming(timing, 'building items', {
-        pendingPoints: pendingPoints.length,
-        currentChunkPoints: pointChunk.length,
-      })
       await yieldToEventLoop()
       await commitIfRequested('scanning')
     }
@@ -2619,24 +2288,14 @@ async function importGoogleTakeoutIntoCatalog(
         cancelled = true
         break
       }
-      const feedStartedAt = performance.now()
       const result = parser.feed(chunk, {
         maxDurationMs: GEO_IMPORT_PARSE_SLICE_MS,
       })
-      timing.parserFeedMs += performance.now() - feedStartedAt
       chunk = ''
-      timing.parsedPoints += result.points.length
-      timing.skippedPoints += result.skippedPoints
       skippedFiles += result.skippedPoints
-      const queueStartedAt = performance.now()
       pendingPoints.push(...result.points)
-      timing.queueMs += performance.now() - queueStartedAt
       await consumePoints()
       maybeEmitProgress()
-      maybeLogGeoImportTiming(timing, 'parsing takeout', {
-        paused: result.paused,
-        resultPoints: result.points.length,
-      })
 
       if (cancelled || !result.paused) break
       await yieldToEventLoop()
@@ -2653,25 +2312,18 @@ async function importGoogleTakeoutIntoCatalog(
           await reader.cancel()
           break
         }
-        const readStartedAt = performance.now()
         const { done, value } = await reader.read()
-        timing.readMs += performance.now() - readStartedAt
         if (done) break
 
         bytesRead += value.byteLength
-        timing.bytesRead = bytesRead
-        const decodeStartedAt = performance.now()
         const text = decoder.decode(value, { stream: true })
-        timing.decodeMs += performance.now() - decodeStartedAt
         await consumeText(text)
         await commitIfRequested('scanning')
         if (cancelled) break
       }
 
       if (!cancelled) {
-        const finalDecodeStartedAt = performance.now()
         const finalChunk = decoder.decode()
-        timing.decodeMs += performance.now() - finalDecodeStartedAt
         if (finalChunk) {
           await consumeText(finalChunk)
           await commitIfRequested('scanning')
@@ -2679,20 +2331,13 @@ async function importGoogleTakeoutIntoCatalog(
 
         const final = parser.finish()
         skippedFiles = final.skippedPoints
-        timing.skippedPoints = final.skippedPoints
         await consumePoints()
       }
       await flushBatch('storing')
       await commitIfRequested('storing')
     },
-    { traceId: timing.traceId, sourceLabel },
   )
   emitProgress('storing')
-  logGeoImportTiming(timing, 'takeout import complete', {
-    acceptedMedia,
-    skippedFiles,
-    cancelled,
-  })
 
   return { acceptedMedia, skippedFiles, cancelled }
 }
@@ -2705,8 +2350,6 @@ async function importGeoFileIntoCatalog(
 ): Promise<ImportSummary> {
   const { source, duplicateSourceIds, file } = payload
   const sourceLabel = source.label
-  const startedAt = performance.now()
-  const traceId = payload.traceId ?? createImportTraceId(sourceLabel)
 
   const cancelledSummary = (): ImportSummary => ({
     source,
@@ -2717,13 +2360,6 @@ async function importGeoFileIntoCatalog(
     skippedFiles: 0,
     errors: [],
     cancelled: true,
-  })
-
-  logImportTrace(traceId, 'geo import envelope start', {
-    sourceLabel,
-    sizeBytes: file.size,
-    duplicateSourceIds: duplicateSourceIds.length,
-    writeBatchSize: store.geoImportWriteBatchSize,
   })
 
   postProgress({
@@ -2740,59 +2376,25 @@ async function importGeoFileIntoCatalog(
 
   if (isCancelled()) return cancelledSummary()
 
-  const prepareStartedAt = performance.now()
   await store.prepareImportSource(source, duplicateSourceIds)
-  logImportTrace(traceId, 'source prepared', {
-    sourceLabel,
-    phaseMs: roundedMs(performance.now() - prepareStartedAt),
-    elapsedMs: roundedMs(performance.now() - startedAt),
-  })
   if (isCancelled()) return cancelledSummary()
 
-  const prefixStartedAt = performance.now()
   const prefix = await file.slice(0, GEO_IMPORT_PREFIX_BYTES).text()
-  const prefixMs = performance.now() - prefixStartedAt
-  logImportTrace(traceId, 'format prefix read', {
-    sourceLabel,
-    phaseMs: roundedMs(prefixMs),
-    prefixBytes: Math.min(file.size, GEO_IMPORT_PREFIX_BYTES),
-    jsonLike: jsonLikePrefix(prefix),
-    elapsedMs: roundedMs(performance.now() - startedAt),
-  })
   if (isCancelled()) return cancelledSummary()
   const result = jsonLikePrefix(prefix)
     ? await (async () => {
         throwKnownUnsupportedJsonPrefix(prefix)
-        logImportTrace(traceId, 'format selected', {
-          sourceLabel,
-          format: 'google-takeout-json',
-          elapsedMs: roundedMs(performance.now() - startedAt),
-        })
         return importGoogleTakeoutIntoCatalog(
           file,
           source,
           store,
           postProgress,
-          traceId,
           isCancelled,
         )
       })()
     : await (async () => {
-        logImportTrace(traceId, 'format selected', {
-          sourceLabel,
-          format: 'gpx',
-          elapsedMs: roundedMs(performance.now() - startedAt),
-        })
         return importGpxIntoCatalog(file, source, store, postProgress, isCancelled)
       })()
-
-  logImportTrace(traceId, 'geo import envelope complete', {
-    sourceLabel,
-    acceptedMedia: result.acceptedMedia,
-    skippedFiles: result.skippedFiles,
-    cancelled: result.cancelled,
-    elapsedMs: roundedMs(performance.now() - startedAt),
-  })
 
   return {
     source,
@@ -3744,6 +3346,9 @@ function commitSqliteImportTransaction(
   state: SqliteImportTransactionState,
 ): void {
   if (!state.active) return
+  if (state.writtenItems > 0) {
+    bumpSqliteCatalogEpochInDb(activeDb)
+  }
   activeDb.exec('COMMIT')
   state.active = false
   state.writtenItems = 0
@@ -3777,8 +3382,8 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
       await ensureMode()
       upsertMediaIntoSqlite(requireDb(), items)
       if (items.length > 0) {
-        const catalogEpoch = bumpSqliteCatalogEpochInDb(requireDb())
-        await applyIncrementalSearchIndexUpdate(store, items, catalogEpoch)
+        bumpSqliteCatalogEpochInDb(requireDb())
+        invalidatePreparedSearchIndex()
       }
       return items.length
     },
@@ -3808,9 +3413,6 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
             ensureDbMs,
             requireDbMs: 0,
             writeMs: 0,
-            catalogEpochMs: 0,
-            incrementalIndexMs: 0,
-            incrementalIndexApplied: false,
             accountedMs: ensureDbMs,
             unaccountedMs: totalMs - ensureDbMs,
           },
@@ -3827,44 +3429,15 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
         transactionActive = true
       }
       const sqliteTiming = upsertMediaIntoSqlite(activeDb, items)
-      const catalogEpochStartedAt = performance.now()
-      const catalogEpoch = bumpSqliteCatalogEpochInDb(activeDb)
-      const catalogEpochMs = performance.now() - catalogEpochStartedAt
-      let incrementalIndexMs = 0
-      let incrementalIndexApplied = false
-      let incrementalIndexSkippedReason: string | undefined
-      if (transactionActive) {
-        incrementalIndexSkippedReason = 'bulk-import-transaction'
-      } else {
-        const incrementalIndexStartedAt = performance.now()
-        incrementalIndexApplied = await applyIncrementalSearchIndexUpdate(
-          store,
-          items,
-          catalogEpoch,
-        )
-        incrementalIndexMs = performance.now() - incrementalIndexStartedAt
-      }
       if (transactionState) {
         transactionState.writtenItems += items.length
+      } else {
+        bumpSqliteCatalogEpochInDb(activeDb)
+        invalidatePreparedSearchIndex()
       }
       const writeMs = performance.now() - writeStartedAt
       const totalMs = performance.now() - startedAt
       const accountedMs = ensureDbMs + requireDbMs + writeMs
-      if (transactionActive && writeMs >= SLOW_IMPORT_BATCH_LOG_MS) {
-        console.warn('[import-trace]', {
-          traceId: 'sqlite-import',
-          phase: 'slow media batch write',
-          items: items.length,
-          writeMs: roundedMs(writeMs),
-          sqliteTotalMs: roundedMs(sqliteTiming.totalMs),
-          sqliteAssetExecMs: roundedMs(sqliteTiming.asset.execMs),
-          sqliteLocationExecMs: roundedMs(sqliteTiming.location.execMs),
-          catalogEpochMs: roundedMs(catalogEpochMs),
-          incrementalIndexMs: roundedMs(incrementalIndexMs),
-          incrementalIndexApplied,
-          incrementalIndexSkippedReason,
-        })
-      }
       return {
         written: items.length,
         timing: {
@@ -3875,10 +3448,6 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
           ensureDbMs,
           requireDbMs,
           writeMs,
-          catalogEpochMs,
-          incrementalIndexMs,
-          incrementalIndexApplied,
-          incrementalIndexSkippedReason,
           accountedMs,
           unaccountedMs: totalMs - accountedMs,
           sqlite: sqliteTiming,
@@ -3890,15 +3459,12 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
       if (!importTransactionState) return
       commitSqliteImportTransaction(requireDb(), importTransactionState)
     },
-    async withImportTransaction(run, options) {
+    async withImportTransaction(run) {
       if (importTransactionState) {
         throw new Error('Nested SQLite import transactions are not supported.')
       }
 
-      const startedAt = performance.now()
-      const ensureStartedAt = performance.now()
       await ensureMode()
-      const ensureDbMs = performance.now() - ensureStartedAt
       if (preparedSearchIndex?.storageMode === store.storageMode) {
         traceStartup('[geo-index:worker]', 'prepared search index invalidated for bulk import', {
           storageMode: store.storageMode,
@@ -3916,26 +3482,9 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
       try {
         const result = await run()
         commitSqliteImportTransaction(requireDb(), transactionState)
-        if (options?.traceId) {
-          const totalMs = performance.now() - startedAt
-          logImportTrace(options.traceId, 'sqlite import run complete', {
-            sourceLabel: options.sourceLabel,
-            totalMs: roundedMs(totalMs),
-            ensureDbMs: roundedMs(ensureDbMs),
-            runMs: roundedMs(totalMs - ensureDbMs),
-            committedChunks: transactionState.committedChunks,
-          })
-        }
         return result
       } catch (error) {
         rollbackSqliteImportTransaction(requireDb(), transactionState)
-        if (options?.traceId) {
-          logImportTrace(options.traceId, 'sqlite import run failed', {
-            sourceLabel: options.sourceLabel,
-            elapsedMs: roundedMs(performance.now() - startedAt),
-            committedChunks: transactionState.committedChunks,
-          })
-        }
         throw error
       } finally {
         importTransactionState = undefined
@@ -3973,10 +3522,6 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
     async catalogEpoch() {
       await ensureMode()
       return sqliteCatalogEpoch()
-    },
-    async bumpCatalogEpoch() {
-      await ensureMode()
-      return sqliteBumpCatalogEpoch()
     },
     async loadPersistedSegmentedBallTreeIndex(catalogEpoch) {
       await ensureMode()
@@ -4037,35 +3582,14 @@ const indexedDbCatalogStore: CatalogStore = {
         ensureDbMs: 0,
         requireDbMs: 0,
         writeMs,
-        catalogEpochMs: 0,
-        incrementalIndexMs: 0,
-        incrementalIndexApplied: false,
         accountedMs: writeMs,
         unaccountedMs: totalMs - writeMs,
       },
     }
   },
   async commitImport() {},
-  async withImportTransaction(run, options) {
-    const startedAt = performance.now()
-    try {
-      const result = await run()
-      if (options?.traceId) {
-        logImportTrace(options.traceId, 'indexeddb import transaction complete', {
-          sourceLabel: options.sourceLabel,
-          totalMs: roundedMs(performance.now() - startedAt),
-        })
-      }
-      return result
-    } catch (error) {
-      if (options?.traceId) {
-        logImportTrace(options.traceId, 'indexeddb import transaction failed', {
-          sourceLabel: options.sourceLabel,
-          elapsedMs: roundedMs(performance.now() - startedAt),
-        })
-      }
-      throw error
-    }
+  async withImportTransaction(run) {
+    return run()
   },
   listMedia: idbListMedia,
   searchMedia(spec) {
@@ -4082,7 +3606,6 @@ const indexedDbCatalogStore: CatalogStore = {
   forEachGeoPointBatch: idbForEachGeoPointBatch,
   diskSegmentedTreeStore: createIdbDiskSegmentedTreeStore,
   catalogEpoch: idbCatalogEpoch,
-  bumpCatalogEpoch: idbBumpCatalogEpoch,
   loadPersistedSegmentedBallTreeIndex: loadIdbSegmentedBallTreeIndex,
   savePersistedSegmentedBallTreeIndex: saveIdbSegmentedBallTreeIndex,
   buildSearchIndexes(indexId, forceRebuild, postProgress) {

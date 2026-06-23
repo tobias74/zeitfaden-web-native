@@ -20,6 +20,7 @@ const GPX_POINT_TAG_NAME = String.raw`${XML_PREFIX}(?:trkpt|rtept|wpt)`
 const UNSUPPORTED_GEO_FILE_FORMAT =
   'The selected file is not a supported geo import format. Supported formats are GPX and Google Takeout Location History JSON.'
 const GEO_IMPORT_DEBUG_PREFIX = '[geo-import]'
+const GEO_IMPORT_DEBUG_STORAGE_KEY = 'geo-media-index-lab:geo-import-debug'
 
 function xmlLocalName(name: string): string {
   return (name.split(':').pop() ?? name).toLowerCase()
@@ -97,6 +98,16 @@ function logGeoImportDebug(
   reason: string,
   details: Record<string, unknown>,
 ): void {
+  try {
+    if (
+      typeof localStorage === 'undefined' ||
+      localStorage.getItem(GEO_IMPORT_DEBUG_STORAGE_KEY) !== '1'
+    ) {
+      return
+    }
+  } catch {
+    return
+  }
   console.log(GEO_IMPORT_DEBUG_PREFIX, {
     fileName,
     reason,

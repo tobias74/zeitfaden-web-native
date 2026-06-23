@@ -223,7 +223,6 @@ class WebImportBackend implements ImportBackend {
         source: sourceFromRecord(sourceRecord),
         duplicateSourceIds: sourceRecord.duplicateSourceIds,
         file,
-        traceId: options.traceId,
       },
       onProgress,
       options.signal,

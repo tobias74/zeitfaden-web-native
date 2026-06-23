@@ -118,35 +118,14 @@ export function useImports({
     setActiveImportKind('geo')
     const controller = new AbortController()
     activeImportControllerRef.current = controller
-    const startedAt = performance.now()
-    const traceId = `app-${Date.now().toString(36)}-${crypto.randomUUID()}`
-    console.log('[import-trace]', {
-      traceId,
-      scope: 'app',
-      phase: 'geo import action start',
-    })
     try {
       const summary = await platform.importer.importGeoFile(
         (progress) => {
           setImportProgress(progress)
         },
-        { traceId, signal: controller.signal },
+        { signal: controller.signal },
       )
-      console.log('[import-trace]', {
-        traceId,
-        scope: 'app',
-        phase: 'worker geo import complete',
-        elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
-        acceptedMedia: summary.acceptedMedia,
-        skippedFiles: summary.skippedFiles,
-      })
       finishImport(summary)
-      console.log('[import-trace]', {
-        traceId,
-        scope: 'app',
-        phase: 'geo import action complete',
-        elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
-      })
     } catch (caught) {
       if (!isAbortError(caught)) {
         onError(caught instanceof Error ? caught.message : String(caught))
