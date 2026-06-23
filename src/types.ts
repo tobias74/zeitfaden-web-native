@@ -50,7 +50,6 @@ export type CatalogSort = 'timestamp_asc' | 'timestamp_desc'
 
 export type CatalogQuery = TimeRange & {
   kind?: KindFilter
-  sourceId?: string
   hasGeo?: boolean
   geoBounds?: GeoBounds
   sort: CatalogSort
@@ -102,7 +101,6 @@ export type SearchDiagnostics = {
 
 export type SearchSpec = TimeRange & {
   kind?: KindFilter
-  sourceId?: string
   hasGeo?: boolean
   geoBounds?: GeoBounds
   order: SearchOrder
@@ -237,7 +235,6 @@ export type SearchIndexCapabilities = {
   supportsGeoBounds: boolean
   supportsTimeRange: boolean
   supportsKind: boolean
-  supportsSource: boolean
 }
 
 export type SearchIndexBuildSummary = {

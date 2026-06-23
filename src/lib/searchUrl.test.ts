@@ -11,8 +11,6 @@ const defaults: SearchUrlDefaults = {
 const allowedIndexes = [
   'brute-force',
   's2-cell-btree',
-  'dynamic-z-order-cells',
-  'segmented-kd-tree',
   'segmented-ball-tree',
 ]
 const allowedPageSizes = [50, 100, 250, 500]
@@ -20,7 +18,7 @@ const allowedPageSizes = [50, 100, 250, 500]
 describe('search URL state', () => {
   it('parses a complete distance search URL', () => {
     const state = parseSearchUrlState(
-      '?from=2026-06-20T10%3A30&to=2026-06-21T12%3A45&sort=distance&kind=image&page=3&pageSize=250&engine=dynamic-z-order-cells&lat=48.1&lon=11.5&minLat=46&maxLat=49&minLon=7&maxLon=12',
+      '?from=2026-06-20T10%3A30&to=2026-06-21T12%3A45&sort=distance&kind=image&page=3&pageSize=250&engine=segmented-ball-tree&lat=48.1&lon=11.5&minLat=46&maxLat=49&minLon=7&maxLon=12',
       defaults,
       allowedIndexes,
       allowedPageSizes,
@@ -33,7 +31,7 @@ describe('search URL state', () => {
       kindFilter: 'image',
       resultPage: 2,
       resultPageSize: 250,
-      selectedIndexId: 'dynamic-z-order-cells',
+      selectedIndexId: 'segmented-ball-tree',
       queryPoint: { lat: 48.1, lon: 11.5 },
       geoBounds: {
         minLat: 46,
@@ -97,7 +95,7 @@ describe('search URL state', () => {
       kindFilter: 'all',
       resultPage: 0,
       resultPageSize: 100,
-      selectedIndexId: 'dynamic-z-order-cells',
+      selectedIndexId: 'segmented-ball-tree',
       queryPoint: { lat: 48.1, lon: 11.5 },
     }
 

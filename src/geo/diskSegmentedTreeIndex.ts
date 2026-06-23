@@ -1,4 +1,5 @@
 import { haversineMeters } from '../lib/distance'
+import { traceStartup } from '../lib/startupTrace'
 import { overlapsTimeRange } from '../lib/time'
 import type {
   GeoBounds,
@@ -20,24 +21,13 @@ import {
   decodeSegmentedBallTreeSnapshot,
   encodeSegmentedBallTreeSnapshot,
 } from './segmentedBallTreePersistence'
-import {
-  SegmentedKdTreeGeoIndex,
-  type SegmentedKdTreeNode,
-  type SegmentedKdTreeSnapshot,
-  type SegmentedKdTreeSnapshotSegment,
-} from './segmentedKdTreeGeoIndex'
-import {
-  decodeSegmentedKdTreeSnapshot,
-  encodeSegmentedKdTreeSnapshot,
-} from './segmentedKdTreePersistence'
 
-export type DiskSegmentedEngineId =
-  | 'segmented-kd-tree'
-  | 'segmented-ball-tree'
+export type DiskSegmentedEngineId = 'segmented-ball-tree'
 
-export type DiskSegmentRoot =
-  | ({ treeKind: 'kd' } & SegmentedKdTreeNode)
-  | ({ treeKind: 'ball' } & SegmentedBallTreeNode)
+const LOG_PREFIX = '[geo-index:disk-segmented]'
+const ENGINE_VERSION = 2
+
+export type DiskSegmentRoot = { treeKind: 'ball' } & SegmentedBallTreeNode
 
 export type DiskSegmentedTreeManifest = {
   engineId: DiskSegmentedEngineId
@@ -80,7 +70,7 @@ export type DiskSegmentedTreeStore = {
 }
 
 type SegmentCacheEntry = {
-  segment: SegmentedKdTreeSnapshotSegment | SegmentedBallTreeSnapshotSegment
+  segment: SegmentedBallTreeSnapshotSegment
   byteLength: number
 }
 
@@ -105,12 +95,7 @@ const DEFAULT_SEGMENT_POINT_LIMIT = 100_000
 const DEFAULT_DELTA_FLUSH_POINT_LIMIT = 50_000
 const DEFAULT_LEAF_SIZE = 64
 const MAX_CACHED_SEGMENTS = 4
-const EARTH_RADIUS_METERS = 6_371_008.8
 const DISTANCE_TIE_EPSILON_METERS = 1e-6
-
-function toRadians(degrees: number): number {
-  return (degrees * Math.PI) / 180
-}
 
 function normalizeLon(lon: number): number {
   const normalized = ((((lon + 180) % 360) + 360) % 360) - 180
@@ -139,49 +124,10 @@ function nodeOverlapsGeoBounds(node: DiskSegmentRoot, bounds: GeoBounds): boolea
   )
 }
 
-function angularLonDistanceToInterval(
-  lon: number,
-  lonMin: number,
-  lonMax: number,
-): number {
-  if (lon >= lonMin && lon <= lonMax) return 0
-  const direct = Math.min(Math.abs(lon - lonMin), Math.abs(lon - lonMax))
-  return Math.min(direct, 360 - direct)
-}
-
-function kdLowerBoundMeters(
-  node: SegmentedKdTreeNode,
-  query: GeoSearchQuery,
-): number {
-  const queryLon = normalizeLon(query.lon)
-  const latDelta =
-    query.lat < node.latMin
-      ? node.latMin - query.lat
-      : query.lat > node.latMax
-        ? query.lat - node.latMax
-        : 0
-  const lonDelta = angularLonDistanceToInterval(
-    queryLon,
-    node.lonMin,
-    node.lonMax,
-  )
-  const maxAbsLat = Math.min(
-    90,
-    Math.max(Math.abs(query.lat), Math.abs(node.latMin), Math.abs(node.latMax)),
-  )
-  const latMeters = EARTH_RADIUS_METERS * toRadians(latDelta)
-  const lonMeters =
-    EARTH_RADIUS_METERS *
-    toRadians(lonDelta) *
-    Math.max(0, Math.cos(toRadians(maxAbsLat)))
-  return Math.max(latMeters, lonMeters)
-}
-
 function segmentLowerBoundMeters(
   root: DiskSegmentRoot,
   query: GeoSearchQuery,
 ): number {
-  if (root.treeKind === 'kd') return kdLowerBoundMeters(root, query)
   return Math.max(
     0,
     haversineMeters(root.centerLat, root.centerLon, query.lat, query.lon) -
@@ -229,51 +175,39 @@ function trimResultsInPlace(results: GeoSearchResult[], limit: number): void {
 
 function snapshotForSegment(
   engineId: DiskSegmentedEngineId,
-  segment: SegmentedKdTreeSnapshotSegment | SegmentedBallTreeSnapshotSegment,
-): SegmentedKdTreeSnapshot | SegmentedBallTreeSnapshot {
-  const common = {
+  segment: SegmentedBallTreeSnapshotSegment,
+): SegmentedBallTreeSnapshot {
+  return {
     version: 1 as const,
     leafSize: DEFAULT_LEAF_SIZE,
     segmentPointLimit: DEFAULT_SEGMENT_POINT_LIMIT,
     deltaFlushPointLimit: DEFAULT_DELTA_FLUSH_POINT_LIMIT,
     pointCount: segment.pointCount,
     segmentCount: 1,
-    segments: [segment as never],
+    segments: [segment],
     pendingPoints: [],
+    engineId,
   }
-  return engineId === 'segmented-kd-tree'
-    ? { ...common, engineId } as SegmentedKdTreeSnapshot
-    : { ...common, engineId } as SegmentedBallTreeSnapshot
 }
 
 function encodeSegment(
   engineId: DiskSegmentedEngineId,
-  segment: SegmentedKdTreeSnapshotSegment | SegmentedBallTreeSnapshotSegment,
+  segment: SegmentedBallTreeSnapshotSegment,
 ): ArrayBuffer {
   const snapshot = snapshotForSegment(engineId, segment)
-  return engineId === 'segmented-kd-tree'
-    ? encodeSegmentedKdTreeSnapshot(snapshot as SegmentedKdTreeSnapshot)
-    : encodeSegmentedBallTreeSnapshot(snapshot as SegmentedBallTreeSnapshot)
+  return encodeSegmentedBallTreeSnapshot(snapshot)
 }
 
-function decodeSegment(
-  engineId: DiskSegmentedEngineId,
-  data: ArrayBuffer,
-): SegmentedKdTreeSnapshotSegment | SegmentedBallTreeSnapshotSegment {
-  return engineId === 'segmented-kd-tree'
-    ? decodeSegmentedKdTreeSnapshot(data).segments[0]
-    : decodeSegmentedBallTreeSnapshot(data).segments[0]
+function decodeSegment(data: ArrayBuffer): SegmentedBallTreeSnapshotSegment {
+  return decodeSegmentedBallTreeSnapshot(data).segments[0]
 }
 
 function rootForSegment(
-  engineId: DiskSegmentedEngineId,
-  segment: SegmentedKdTreeSnapshotSegment | SegmentedBallTreeSnapshotSegment,
+  segment: SegmentedBallTreeSnapshotSegment,
 ): DiskSegmentRoot {
   const root = segment.nodes[0]
   if (!root) throw new Error('Segmented disk index segment has no root node.')
-  return engineId === 'segmented-kd-tree'
-    ? { ...(root as SegmentedKdTreeNode), treeKind: 'kd' }
-    : { ...(root as SegmentedBallTreeNode), treeKind: 'ball' }
+  return { ...(root as SegmentedBallTreeNode), treeKind: 'ball' }
 }
 
 export class DiskSegmentedTreeIndex {
@@ -290,6 +224,7 @@ export class DiskSegmentedTreeIndex {
   private readonly store: DiskSegmentedTreeStore
   private manifest: DiskSegmentedTreeManifest | undefined
   private readonly cache = new Map<string, SegmentCacheEntry>()
+  private readonly pendingLoads = new Map<string, Promise<SegmentCacheEntry>>()
   private lastStats: GeoIndexStats = this.emptyStats()
 
   constructor(
@@ -297,26 +232,61 @@ export class DiskSegmentedTreeIndex {
     store: DiskSegmentedTreeStore,
   ) {
     this.id = engineId
-    this.label =
-      engineId === 'segmented-kd-tree'
-        ? 'Segmented KD-tree'
-        : 'Segmented ball tree'
+    this.label = 'Segmented ball tree'
     this.store = store
   }
 
   async prepare(catalogEpoch: number): Promise<boolean> {
     const manifest = await this.store.readManifest(this.id)
-    if (
-      !manifest ||
-      manifest.engineId !== this.id ||
-      manifest.engineVersion !== 2 ||
-      manifest.catalogEpoch !== catalogEpoch
-    ) {
+    if (!manifest) {
+      traceStartup(LOG_PREFIX, 'prepare miss: no manifest', {
+        engineId: this.id,
+        catalogEpoch,
+      })
       return false
     }
+    const mismatchReasons = [
+      manifest.engineId === this.id
+        ? undefined
+        : `engineId ${manifest.engineId} !== ${this.id}`,
+      manifest.engineVersion === ENGINE_VERSION
+        ? undefined
+        : `engineVersion ${manifest.engineVersion} !== ${ENGINE_VERSION}`,
+      manifest.catalogEpoch === catalogEpoch
+        ? undefined
+        : `catalogEpoch ${manifest.catalogEpoch} !== ${catalogEpoch}`,
+    ].filter((reason): reason is string => Boolean(reason))
+    if (mismatchReasons.length > 0) {
+      traceStartup(LOG_PREFIX, 'prepare miss: manifest mismatch', {
+        engineId: this.id,
+        catalogEpoch,
+        manifest: {
+          engineId: manifest.engineId,
+          engineVersion: manifest.engineVersion,
+          catalogEpoch: manifest.catalogEpoch,
+          pointCount: manifest.pointCount,
+          segmentCount: manifest.segmentCount,
+          createdAt: manifest.createdAt,
+        },
+        mismatchReasons,
+      })
+      return false
+    }
+
     this.manifest = manifest
     this.cache.clear()
+    this.pendingLoads.clear()
     this.lastStats = this.emptyStats()
+    traceStartup(LOG_PREFIX, 'prepare hit: manifest restored', {
+      engineId: this.id,
+      catalogEpoch,
+      pointCount: manifest.pointCount,
+      segmentCount: manifest.segmentCount,
+      indexSizeBytes: manifest.segments.reduce(
+        (total, segment) => total + segment.byteLength,
+        0,
+      ),
+    })
     return true
   }
 
@@ -326,8 +296,13 @@ export class DiskSegmentedTreeIndex {
     onProgress?: (processedPoints: number, totalPoints?: number) => void,
   ): Promise<number> {
     const startedAt = performance.now()
+    traceStartup(LOG_PREFIX, 'build start: clearing persisted index', {
+      engineId: this.id,
+      catalogEpoch,
+    })
     await this.store.clear(this.id)
     this.cache.clear()
+    this.pendingLoads.clear()
     const segments: DiskSegmentRef[] = []
     let pointCount = 0
     let segmentIndex = 0
@@ -350,10 +325,17 @@ export class DiskSegmentedTreeIndex {
         pointCount: segment.pointCount,
         maxLeafSize: segment.maxLeafSize,
         byteLength: data.byteLength,
-        root: rootForSegment(this.id, segment),
+        root: rootForSegment(segment),
       })
       pointCount += segment.pointCount
       segmentIndex += 1
+      traceStartup(LOG_PREFIX, 'build segment written', {
+        engineId: this.id,
+        segmentId: segment.id,
+        pointCount: segment.pointCount,
+        byteLength: data.byteLength,
+        processedPoints: processedPoints ?? pointCount,
+      })
       onProgress?.(processedPoints ?? pointCount)
     }
 
@@ -369,7 +351,7 @@ export class DiskSegmentedTreeIndex {
 
     this.manifest = {
       engineId: this.id,
-      engineVersion: 2,
+      engineVersion: ENGINE_VERSION,
       catalogEpoch,
       leafSize: DEFAULT_LEAF_SIZE,
       segmentPointLimit: DEFAULT_SEGMENT_POINT_LIMIT,
@@ -384,6 +366,14 @@ export class DiskSegmentedTreeIndex {
       ...this.emptyStats(),
       buildTimeMs: performance.now() - startedAt,
     }
+    traceStartup(LOG_PREFIX, 'build complete: manifest written', {
+      engineId: this.id,
+      catalogEpoch,
+      pointCount,
+      segmentCount: segments.length,
+      buildTimeMs: this.lastStats.buildTimeMs,
+      indexSizeBytes: segments.reduce((total, segment) => total + segment.byteLength, 0),
+    })
     return pointCount
   }
 
@@ -410,7 +400,7 @@ export class DiskSegmentedTreeIndex {
           pointCount: segment.pointCount,
           maxLeafSize: segment.maxLeafSize,
           byteLength: data.byteLength,
-          root: rootForSegment(this.id, segment),
+          root: rootForSegment(segment),
         },
       ],
     }
@@ -563,14 +553,8 @@ export class DiskSegmentedTreeIndex {
     id: string,
     points: GeoIndexPoint[],
     isDelta: boolean,
-  ): Promise<SegmentedKdTreeSnapshotSegment | SegmentedBallTreeSnapshotSegment | undefined> {
+  ): Promise<SegmentedBallTreeSnapshotSegment | undefined> {
     if (points.length === 0) return undefined
-    if (this.id === 'segmented-kd-tree') {
-      const index = new SegmentedKdTreeGeoIndex()
-      await index.build(points)
-      const segment = index.snapshot().segments[0]
-      return segment ? { ...segment, id, isDelta } : undefined
-    }
     const index = new SegmentedBallTreeGeoIndex()
     await index.build(points)
     const segment = index.snapshot().segments[0]
@@ -580,31 +564,74 @@ export class DiskSegmentedTreeIndex {
   private async loadSegment(
     ref: DiskSegmentRef,
     metrics: DiskQueryMetrics,
-  ): Promise<SegmentedKdTreeSnapshotSegment | SegmentedBallTreeSnapshotSegment> {
+  ): Promise<SegmentedBallTreeSnapshotSegment> {
     const cached = this.cache.get(ref.id)
     if (cached) {
       metrics.pageCacheHits += 1
       this.cache.delete(ref.id)
       this.cache.set(ref.id, cached)
+      traceStartup(LOG_PREFIX, 'segment cache hit', {
+        engineId: this.id,
+        segmentId: ref.id,
+        byteLength: cached.byteLength,
+        cacheSize: this.cache.size,
+      })
       return cached.segment
     }
+    const pending = this.pendingLoads.get(ref.id)
+    if (pending) {
+      traceStartup(LOG_PREFIX, 'segment load joined', {
+        engineId: this.id,
+        segmentId: ref.id,
+        cacheSize: this.cache.size,
+      })
+      const loaded = await pending
+      this.cache.delete(ref.id)
+      this.cache.set(ref.id, loaded)
+      return loaded.segment
+    }
     metrics.pageCacheMisses += 1
+    traceStartup(LOG_PREFIX, 'segment cache miss: reading from store', {
+      engineId: this.id,
+      segmentId: ref.id,
+      expectedByteLength: ref.byteLength,
+    })
+    const pendingLoad = this.loadAndCacheSegment(ref)
+    this.pendingLoads.set(ref.id, pendingLoad)
+    try {
+      const loaded = await pendingLoad
+      metrics.diskReadBytes += loaded.byteLength
+      metrics.diskReadCount += 1
+      return loaded.segment
+    } finally {
+      this.pendingLoads.delete(ref.id)
+    }
+  }
+
+  private async loadAndCacheSegment(
+    ref: DiskSegmentRef,
+  ): Promise<SegmentCacheEntry> {
     const data = await this.store.readSegment(this.id, ref.id)
     if (!data) throw new Error(`Missing disk index segment ${ref.id}.`)
-    metrics.diskReadBytes += data.byteLength
-    metrics.diskReadCount += 1
-    const segment = decodeSegment(this.id, data)
-    this.cache.set(ref.id, { segment, byteLength: data.byteLength })
+    const segment = decodeSegment(data)
+    const loaded = { segment, byteLength: data.byteLength }
+    this.cache.set(ref.id, loaded)
     while (this.cache.size > MAX_CACHED_SEGMENTS) {
       const firstKey = this.cache.keys().next().value as string | undefined
       if (!firstKey) break
       this.cache.delete(firstKey)
     }
-    return segment
+    traceStartup(LOG_PREFIX, 'segment loaded', {
+      engineId: this.id,
+      segmentId: ref.id,
+      byteLength: data.byteLength,
+      cacheSize: this.cache.size,
+    })
+    return loaded
   }
 
   private async searchSegment(
-    segment: SegmentedKdTreeSnapshotSegment | SegmentedBallTreeSnapshotSegment,
+    segment: SegmentedBallTreeSnapshotSegment,
     query: GeoSearchQuery,
     retainedLimit: number,
   ): Promise<{ results: GeoSearchResult[]; stats: () => Promise<GeoIndexStats> }> {
@@ -613,14 +640,8 @@ export class DiskSegmentedTreeIndex {
       offset: 0,
       k: retainedLimit,
     }
-    if (this.id === 'segmented-kd-tree') {
-      const index = new SegmentedKdTreeGeoIndex()
-      index.restore(snapshotForSegment(this.id, segment) as SegmentedKdTreeSnapshot)
-      const results = await index.search(segmentQuery)
-      return { results, stats: () => index.stats() }
-    }
     const index = new SegmentedBallTreeGeoIndex()
-    index.restore(snapshotForSegment(this.id, segment) as SegmentedBallTreeSnapshot)
+    index.restore(snapshotForSegment(this.id, segment))
     const results = await index.search(segmentQuery)
     return { results, stats: () => index.stats() }
   }

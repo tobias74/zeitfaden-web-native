@@ -13,6 +13,9 @@ dist-ssr
 src-tauri/target
 *.local
 
+# Generated test fixtures
+tmp/geo-fixtures/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

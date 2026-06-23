@@ -66,6 +66,7 @@ import {
   storedWebCatalogStorageMode,
   type WebCatalogStorageMode,
 } from './platform/web/storageMode'
+import { traceStartup } from './lib/startupTrace'
 import type {
   EnrichedSearchResult,
   GeoBounds,
@@ -95,12 +96,10 @@ const RESULT_PAGE_SIZE_KEY = 'geo-media-index-lab:result-page-size'
 const RESULT_PAGE_SIZE_OPTIONS = [50, 100, 250, 500] as const
 const DEFAULT_RESULT_PAGE_SIZE = 100
 const MAP_POINT_LIMIT = 500
-const DEFAULT_DISTANCE_ENGINE_ID = 'dynamic-z-order-cells'
+const DEFAULT_DISTANCE_ENGINE_ID = 'segmented-ball-tree'
 const DISTANCE_ENGINE_IDS = [
   'brute-force',
   's2-cell-btree',
-  'dynamic-z-order-cells',
-  'segmented-kd-tree',
   'segmented-ball-tree',
 ] as const
 const DEFAULT_QUERY_POINT = {
@@ -381,10 +380,21 @@ function ResultSkeletons({
 }
 
 function App() {
+  traceStartup('[startup]', 'App render start')
   const [webCatalogStorageMode, setWebCatalogStorageMode] =
     useState<WebCatalogStorageMode>(() => storedWebCatalogStorageMode())
   const platform = useMemo(
-    () => createPlatformBackend(webCatalogStorageMode),
+    () => {
+      traceStartup('[startup]', 'creating platform backend', {
+        webCatalogStorageMode,
+      })
+      const created = createPlatformBackend(webCatalogStorageMode)
+      traceStartup('[startup]', 'platform backend created', {
+        platformKind: created.kind,
+        webCatalogStorageMode,
+      })
+      return created
+    },
     [webCatalogStorageMode],
   )
   const catalog = platform.catalog
@@ -507,7 +517,6 @@ function App() {
     catalogInfo,
     catalogReady,
     catalogRevision,
-    sources,
     markCatalogChanged,
     resetCatalogState,
   } = useCatalogLifecycle({
@@ -730,8 +739,12 @@ function App() {
   }, [])
 
   useEffect(() => {
+    traceStartup('[startup]', 'App mounted', {
+      platformKind: platform.kind,
+      webCatalogStorageMode,
+    })
     return () => platform.dispose()
-  }, [platform])
+  }, [platform, webCatalogStorageMode])
 
   useEffect(() => {
     function closeMenusOnEscape(event: globalThis.KeyboardEvent) {
@@ -1439,12 +1452,6 @@ function App() {
                     {s2CellBtreeAvailable && (
                       <option value="s2-cell-btree">{t('s2CellBtree')}</option>
                     )}
-                    <option value="dynamic-z-order-cells">
-                      {t('dynamicZOrderCells')}
-                    </option>
-                    <option value="segmented-kd-tree">
-                      {t('segmentedKdTree')}
-                    </option>
                     <option value="segmented-ball-tree">
                       {t('segmentedBallTree')}
                     </option>
@@ -1633,8 +1640,7 @@ function App() {
                   </div>
                 )}
               </dl>
-              {(selectedIndexId === 'segmented-kd-tree' ||
-                selectedIndexId === 'segmented-ball-tree') && (
+              {selectedIndexId === 'segmented-ball-tree' && (
                 <button
                   type="button"
                   className="secondary"
@@ -1699,8 +1705,7 @@ function App() {
                 {visibleResults ? t('nearestResults') : t('catalogResults')}
               </h2>
               <p className="subtle">
-                {visibleRange} {t('visible')} ·{' '}
-                {sources.length.toLocaleString(locale)} {t('sources')}
+                {visibleRange} {t('visible')}
               </p>
             </div>
             <div className="library-actions">

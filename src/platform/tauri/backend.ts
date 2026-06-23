@@ -58,14 +58,6 @@ class TauriCatalogBackend implements CatalogBackend {
     return invoke('get_geo_points', { range })
   }
 
-  listSources(): Promise<MediaSource[]> {
-    return invoke('list_sources')
-  }
-
-  removeSources(sourceIds: string[]): Promise<void> {
-    return invoke('remove_sources', { sourceIds })
-  }
-
   countMedia(): Promise<number> {
     return invoke('count_media')
   }
@@ -74,7 +66,7 @@ class TauriCatalogBackend implements CatalogBackend {
     onProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<GeoIndexBuildSummary> {
     const summary = await this.buildSearchIndexes(
-      'dynamic-z-order-cells',
+      'segmented-ball-tree',
       onProgress,
     )
     return {

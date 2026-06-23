@@ -19,6 +19,19 @@ npm run lint
 npm test
 ```
 
+Generate large GPX and Google Takeout `Records.json` files for import testing:
+
+```bash
+npm run generate:geo -- --format both --points 100000 --out tmp/geo-fixtures
+```
+
+Generated files under `tmp/geo-fixtures` are ignored by git.
+
+Useful options include `--seed` for repeatable random points, `--bounds
+minLat,minLon,maxLat,maxLon` for a fixed area, `--center lat,lon` with
+`--radius-km`, and `--start` plus `--interval-ms` for timestamp spacing. Run
+`npm run generate:geo -- --help` for the full CLI reference.
+
 ## Tauri Desktop
 
 This repo also contains a Tauri v2 native shell in `src-tauri`. The web

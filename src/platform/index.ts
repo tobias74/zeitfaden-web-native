@@ -2,6 +2,7 @@ import { createTauriPlatformBackend } from './tauri/backend'
 import type { PlatformBackend } from './types'
 import { createWebPlatformBackend } from './web/backend'
 import type { WebCatalogStorageMode } from './web/storageMode'
+import { traceStartup } from '../lib/startupTrace'
 
 export function hasTauriRuntime(candidate: unknown): boolean {
   return (
@@ -21,7 +22,10 @@ function isTauriRuntime(): boolean {
 export function createPlatformBackend(
   webStorageMode?: WebCatalogStorageMode,
 ): PlatformBackend {
-  return isTauriRuntime()
-    ? createTauriPlatformBackend()
-    : createWebPlatformBackend(webStorageMode)
+  const tauri = isTauriRuntime()
+  traceStartup('[startup:platform]', 'createPlatformBackend selected runtime', {
+    tauri,
+    webStorageMode,
+  })
+  return tauri ? createTauriPlatformBackend() : createWebPlatformBackend(webStorageMode)
 }

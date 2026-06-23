@@ -87,10 +87,6 @@ async function expectDiskIndexMatchesBruteForce(engineId: DiskSegmentedEngineId)
 }
 
 describe('disk segmented tree indexes', () => {
-  it('restores KD-tree manifest without loading segments and searches exactly', async () => {
-    await expectDiskIndexMatchesBruteForce('segmented-kd-tree')
-  })
-
   it('restores ball-tree manifest without loading segments and searches exactly', async () => {
     await expectDiskIndexMatchesBruteForce('segmented-ball-tree')
   })

@@ -1,6 +1,5 @@
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm'
 import * as exifr from 'exifr'
-import { DynamicZOrderGeoIndex } from '../../geo/dynamicZOrderGeoIndex'
 import {
   DiskSegmentedTreeIndex,
   type DiskSegmentedBatchProducer,
@@ -9,15 +8,6 @@ import {
   type DiskSegmentedTreeStore,
 } from '../../geo/diskSegmentedTreeIndex'
 import { SegmentedBallTreeGeoIndex } from '../../geo/segmentedBallTreeGeoIndex'
-import { SegmentedKdTreeGeoIndex } from '../../geo/segmentedKdTreeGeoIndex'
-import {
-  createDynamicZOrderManifest,
-  decodeDynamicZOrderSnapshot,
-  encodeDynamicZOrderSnapshot,
-  sha256Hex,
-  validateDynamicZOrderManifest,
-  type DynamicZOrderIndexManifest,
-} from '../../geo/dynamicZOrderPersistence'
 import {
   createSegmentedBallTreeManifest,
   decodeSegmentedBallTreeSnapshot,
@@ -25,13 +15,6 @@ import {
   type SegmentedBallTreeManifest,
   validateSegmentedBallTreeManifest,
 } from '../../geo/segmentedBallTreePersistence'
-import {
-  createSegmentedKdTreeManifest,
-  decodeSegmentedKdTreeSnapshot,
-  encodeSegmentedKdTreeSnapshot,
-  type SegmentedKdTreeManifest,
-  validateSegmentedKdTreeManifest,
-} from '../../geo/segmentedKdTreePersistence'
 import {
   s2CellIdHexForLatLon,
 } from '../../geo/s2Cells'
@@ -44,7 +27,9 @@ import {
 } from '../../lib/geoPoint'
 import { GoogleTakeoutLocationStreamParser } from '../../lib/googleTakeoutStream'
 import { detectMediaKind, pathDisplayName } from '../../lib/media'
+import { sha256Hex } from '../../lib/sha256'
 import { createSqlExplainPlan } from '../../lib/sqlExplain'
+import { traceStartup } from '../../lib/startupTrace'
 import { SearchIndexRegistry as SearchIndexEngineRegistry } from '../../search/registry'
 import type {
   CatalogQuery,
@@ -71,6 +56,8 @@ import type {
   ImportSummary,
 } from '../types'
 import type { WebCatalogStorageMode } from './storageMode'
+
+traceStartup('[startup:worker]', 'catalog worker module evaluated')
 
 type WorkerRequest = {
   id: number
@@ -144,8 +131,6 @@ type IdbMetadata = {
 type IdbIndexCache = {
   id: string
   manifest?:
-    | DynamicZOrderIndexManifest
-    | SegmentedKdTreeManifest
     | SegmentedBallTreeManifest
     | DiskSegmentedTreeManifest
   data?: ArrayBuffer
@@ -247,14 +232,6 @@ type CatalogStore = {
   diskSegmentedTreeStore(): DiskSegmentedTreeStore
   catalogEpoch(): Promise<number>
   bumpCatalogEpoch(): Promise<number>
-  loadPersistedDynamicIndex(
-    catalogEpoch: number,
-  ): Promise<{ pointCount: number; cellCount: number } | undefined>
-  savePersistedDynamicIndex(catalogEpoch: number): Promise<void>
-  loadPersistedSegmentedKdTreeIndex(
-    catalogEpoch: number,
-  ): Promise<{ pointCount: number; segmentCount: number } | undefined>
-  savePersistedSegmentedKdTreeIndex(catalogEpoch: number): Promise<void>
   loadPersistedSegmentedBallTreeIndex(
     catalogEpoch: number,
   ): Promise<{ pointCount: number; segmentCount: number } | undefined>
@@ -265,8 +242,6 @@ type CatalogStore = {
     postProgress: (progress: GeoIndexBuildProgress) => void,
   ): Promise<GeoIndexBuildSummary & { engineCount: number }>
   getSearchIndexStats(): Promise<SearchIndexStats[]>
-  listSources(): Promise<MediaSource[]>
-  removeSources(sourceIds: string[]): Promise<void>
   countMedia(): Promise<number>
   clear(): Promise<void>
 }
@@ -304,8 +279,6 @@ const IMPORT_TRACE_ENABLED = false
 const CATALOG_EPOCH_KEY = 'catalogEpoch'
 const S2_CELL_BTREE_ENGINE_ID = 's2-cell-btree'
 const S2_CELL_BTREE_ENGINE_LABEL = 'S2 cell B-tree'
-const DYNAMIC_INDEX_CACHE_KEY = 'dynamic-z-order-cells:v1'
-const SEGMENTED_KD_TREE_CACHE_KEY = 'segmented-kd-tree:v1'
 const SEGMENTED_BALL_TREE_CACHE_KEY = 'segmented-ball-tree:v1'
 
 const ctx = self as unknown as {
@@ -676,24 +649,6 @@ async function idbBumpCatalogEpoch(): Promise<number> {
   return nextEpoch
 }
 
-async function dynamicIndexOpfsDirectory(): Promise<FileSystemDirectoryHandle> {
-  const root = await navigator.storage.getDirectory()
-  const indexes = await root.getDirectoryHandle('indexes', { create: true })
-  const engine = await indexes.getDirectoryHandle('dynamic-z-order-cells', {
-    create: true,
-  })
-  return engine.getDirectoryHandle('v1', { create: true })
-}
-
-async function segmentedKdTreeOpfsDirectory(): Promise<FileSystemDirectoryHandle> {
-  const root = await navigator.storage.getDirectory()
-  const indexes = await root.getDirectoryHandle('indexes', { create: true })
-  const engine = await indexes.getDirectoryHandle('segmented-kd-tree', {
-    create: true,
-  })
-  return engine.getDirectoryHandle('v1', { create: true })
-}
-
 async function segmentedBallTreeOpfsDirectory(): Promise<FileSystemDirectoryHandle> {
   const root = await navigator.storage.getDirectory()
   const indexes = await root.getDirectoryHandle('indexes', { create: true })
@@ -850,22 +805,6 @@ function createIdbDiskSegmentedTreeStore(): DiskSegmentedTreeStore {
   }
 }
 
-function dynamicZOrderIndex(): DynamicZOrderGeoIndex {
-  const index = geoIndexRegistry.get('dynamic-z-order-cells')
-  if (!(index instanceof DynamicZOrderGeoIndex)) {
-    throw new Error('Dynamic Z-order index is not available.')
-  }
-  return index
-}
-
-function segmentedKdTreeIndex(): SegmentedKdTreeGeoIndex {
-  const index = geoIndexRegistry.get('segmented-kd-tree')
-  if (!(index instanceof SegmentedKdTreeGeoIndex)) {
-    throw new Error('Segmented KD-tree index is not available.')
-  }
-  return index
-}
-
 function segmentedBallTreeIndex(): SegmentedBallTreeGeoIndex {
   const index = geoIndexRegistry.get('segmented-ball-tree')
   if (!(index instanceof SegmentedBallTreeGeoIndex)) {
@@ -877,7 +816,7 @@ function segmentedBallTreeIndex(): SegmentedBallTreeGeoIndex {
 function isDiskSegmentedEngineId(
   indexId: string,
 ): indexId is DiskSegmentedEngineId {
-  return indexId === 'segmented-kd-tree' || indexId === 'segmented-ball-tree'
+  return indexId === 'segmented-ball-tree'
 }
 
 function diskSegmentedRuntimeKey(
@@ -981,69 +920,15 @@ function invalidatePreparedSearchIndex(): void {
 
 async function clearDiskSegmentedIndexCaches(store: CatalogStore): Promise<void> {
   const diskStore = store.diskSegmentedTreeStore()
-  await Promise.all(
-    (['segmented-kd-tree', 'segmented-ball-tree'] as const).map(
-      async (indexId) => {
-        await diskStore.clear(indexId)
-        diskSegmentedIndexInstances.delete(
-          diskSegmentedRuntimeKey(store.storageMode, indexId),
-        )
-      },
-    ),
+  await diskStore.clear('segmented-ball-tree')
+  diskSegmentedIndexInstances.delete(
+    diskSegmentedRuntimeKey(store.storageMode, 'segmented-ball-tree'),
   )
   if (
     preparedSearchIndex?.storageMode === store.storageMode &&
     isDiskSegmentedEngineId(preparedSearchIndex.indexId)
   ) {
     preparedSearchIndex = undefined
-  }
-}
-
-async function restoreDynamicIndexFromData(
-  manifest: DynamicZOrderIndexManifest,
-  data: ArrayBuffer,
-  catalogEpoch: number,
-): Promise<{ pointCount: number; cellCount: number }> {
-  validateDynamicZOrderManifest(manifest, catalogEpoch)
-  const checksum = await sha256Hex(data)
-  if (checksum !== manifest.dataChecksum) {
-    throw new Error('Dynamic Z-order index checksum does not match manifest.')
-  }
-  const snapshot = decodeDynamicZOrderSnapshot(data)
-  if (
-    snapshot.pointCount !== manifest.pointCount ||
-    snapshot.cellCount !== manifest.cellCount
-  ) {
-    throw new Error('Dynamic Z-order index manifest count mismatch.')
-  }
-  dynamicZOrderIndex().restore(snapshot)
-  return {
-    pointCount: snapshot.pointCount,
-    cellCount: snapshot.cellCount,
-  }
-}
-
-async function restoreSegmentedKdTreeIndexFromData(
-  manifest: SegmentedKdTreeManifest,
-  data: ArrayBuffer,
-  catalogEpoch: number,
-): Promise<{ pointCount: number; segmentCount: number }> {
-  validateSegmentedKdTreeManifest(manifest, catalogEpoch)
-  const checksum = await sha256Hex(data)
-  if (checksum !== manifest.dataChecksum) {
-    throw new Error('Segmented KD-tree index checksum does not match manifest.')
-  }
-  const snapshot = decodeSegmentedKdTreeSnapshot(data)
-  if (
-    snapshot.pointCount !== manifest.pointCount ||
-    snapshot.segmentCount !== manifest.segmentCount
-  ) {
-    throw new Error('Segmented KD-tree index manifest count mismatch.')
-  }
-  segmentedKdTreeIndex().restore(snapshot)
-  return {
-    pointCount: snapshot.pointCount,
-    segmentCount: snapshot.segmentCount,
   }
 }
 
@@ -1071,48 +956,6 @@ async function restoreSegmentedBallTreeIndexFromData(
   }
 }
 
-async function loadOpfsDynamicIndex(
-  catalogEpoch: number,
-): Promise<{ pointCount: number; cellCount: number } | undefined> {
-  try {
-    const directory = await dynamicIndexOpfsDirectory()
-    const [manifestFile, dataFile] = await Promise.all([
-      readOpfsFile(directory, 'manifest.json'),
-      readOpfsFile(directory, 'index.bin'),
-    ])
-    if (!manifestFile || !dataFile) return undefined
-
-    return await restoreDynamicIndexFromData(
-      JSON.parse(await manifestFile.text()) as DynamicZOrderIndexManifest,
-      await dataFile.arrayBuffer(),
-      catalogEpoch,
-    )
-  } catch {
-    return undefined
-  }
-}
-
-async function loadOpfsSegmentedKdTreeIndex(
-  catalogEpoch: number,
-): Promise<{ pointCount: number; segmentCount: number } | undefined> {
-  try {
-    const directory = await segmentedKdTreeOpfsDirectory()
-    const [manifestFile, dataFile] = await Promise.all([
-      readOpfsFile(directory, 'manifest.json'),
-      readOpfsFile(directory, 'index.bin'),
-    ])
-    if (!manifestFile || !dataFile) return undefined
-
-    return await restoreSegmentedKdTreeIndexFromData(
-      JSON.parse(await manifestFile.text()) as SegmentedKdTreeManifest,
-      await dataFile.arrayBuffer(),
-      catalogEpoch,
-    )
-  } catch {
-    return undefined
-  }
-}
-
 async function loadOpfsSegmentedBallTreeIndex(
   catalogEpoch: number,
 ): Promise<{ pointCount: number; segmentCount: number } | undefined> {
@@ -1134,41 +977,6 @@ async function loadOpfsSegmentedBallTreeIndex(
   }
 }
 
-async function saveOpfsDynamicIndex(catalogEpoch: number): Promise<void> {
-  const index = dynamicZOrderIndex()
-  const snapshot = index.snapshot()
-  const data = encodeDynamicZOrderSnapshot(snapshot)
-  const manifest = createDynamicZOrderManifest(
-    snapshot,
-    catalogEpoch,
-    await sha256Hex(data),
-  )
-  const directory = await dynamicIndexOpfsDirectory()
-  await writeOpfsFile(directory, 'index.bin', data)
-  await writeOpfsFile(
-    directory,
-    'manifest.json',
-    JSON.stringify(manifest),
-  )
-}
-
-async function saveOpfsSegmentedKdTreeIndex(catalogEpoch: number): Promise<void> {
-  const snapshot = segmentedKdTreeIndex().snapshot()
-  const data = encodeSegmentedKdTreeSnapshot(snapshot)
-  const manifest = createSegmentedKdTreeManifest(
-    snapshot,
-    catalogEpoch,
-    await sha256Hex(data),
-  )
-  const directory = await segmentedKdTreeOpfsDirectory()
-  await writeOpfsFile(directory, 'index.bin', data)
-  await writeOpfsFile(
-    directory,
-    'manifest.json',
-    JSON.stringify(manifest),
-  )
-}
-
 async function saveOpfsSegmentedBallTreeIndex(
   catalogEpoch: number,
 ): Promise<void> {
@@ -1186,50 +994,6 @@ async function saveOpfsSegmentedBallTreeIndex(
     'manifest.json',
     JSON.stringify(manifest),
   )
-}
-
-async function loadIdbDynamicIndex(
-  catalogEpoch: number,
-): Promise<{ pointCount: number; cellCount: number } | undefined> {
-  try {
-    const database = await requireIndexedDb()
-    const transaction = database.transaction('indexCache', 'readonly')
-    const done = idbTransactionDone(transaction)
-    const row = await idbRequest<IdbIndexCache | undefined>(
-      transaction.objectStore('indexCache').get(DYNAMIC_INDEX_CACHE_KEY),
-    )
-    await done
-    if (!row?.manifest || !row.data) return undefined
-    return await restoreDynamicIndexFromData(
-      row.manifest as DynamicZOrderIndexManifest,
-      row.data,
-      catalogEpoch,
-    )
-  } catch {
-    return undefined
-  }
-}
-
-async function loadIdbSegmentedKdTreeIndex(
-  catalogEpoch: number,
-): Promise<{ pointCount: number; segmentCount: number } | undefined> {
-  try {
-    const database = await requireIndexedDb()
-    const transaction = database.transaction('indexCache', 'readonly')
-    const done = idbTransactionDone(transaction)
-    const row = await idbRequest<IdbIndexCache | undefined>(
-      transaction.objectStore('indexCache').get(SEGMENTED_KD_TREE_CACHE_KEY),
-    )
-    await done
-    if (!row?.manifest || !row.data) return undefined
-    return await restoreSegmentedKdTreeIndexFromData(
-      row.manifest as SegmentedKdTreeManifest,
-      row.data,
-      catalogEpoch,
-    )
-  } catch {
-    return undefined
-  }
 }
 
 async function loadIdbSegmentedBallTreeIndex(
@@ -1252,44 +1016,6 @@ async function loadIdbSegmentedBallTreeIndex(
   } catch {
     return undefined
   }
-}
-
-async function saveIdbDynamicIndex(catalogEpoch: number): Promise<void> {
-  const snapshot = dynamicZOrderIndex().snapshot()
-  const data = encodeDynamicZOrderSnapshot(snapshot)
-  const manifest = createDynamicZOrderManifest(
-    snapshot,
-    catalogEpoch,
-    await sha256Hex(data),
-  )
-  const database = await requireIndexedDb()
-  const transaction = database.transaction('indexCache', 'readwrite')
-  const done = idbTransactionDone(transaction)
-  transaction.objectStore('indexCache').put({
-    id: DYNAMIC_INDEX_CACHE_KEY,
-    manifest,
-    data,
-  } satisfies IdbIndexCache)
-  await done
-}
-
-async function saveIdbSegmentedKdTreeIndex(catalogEpoch: number): Promise<void> {
-  const snapshot = segmentedKdTreeIndex().snapshot()
-  const data = encodeSegmentedKdTreeSnapshot(snapshot)
-  const manifest = createSegmentedKdTreeManifest(
-    snapshot,
-    catalogEpoch,
-    await sha256Hex(data),
-  )
-  const database = await requireIndexedDb()
-  const transaction = database.transaction('indexCache', 'readwrite')
-  const done = idbTransactionDone(transaction)
-  transaction.objectStore('indexCache').put({
-    id: SEGMENTED_KD_TREE_CACHE_KEY,
-    manifest,
-    data,
-  } satisfies IdbIndexCache)
-  await done
 }
 
 async function saveIdbSegmentedBallTreeIndex(catalogEpoch: number): Promise<void> {
@@ -1328,7 +1054,6 @@ function idbAssetFromItem(item: MediaItem): IdbAsset {
 function mediaFromIdbAsset(
   asset: IdbAsset,
   locations: MediaLocation[],
-  preferredSourceId?: string,
 ): MediaItem {
   const row = {
     content_hash: asset.contentHash,
@@ -1341,7 +1066,7 @@ function mediaFromIdbAsset(
     longitude: asset.longitude,
     thumbnail_key: asset.thumbnailKey,
   }
-  return mediaFromAssetRow(row, locations, preferredSourceId)
+  return mediaFromAssetRow(row, locations)
 }
 
 function mediaLocationFromIdbLocation(location: IdbLocation): MediaLocation {
@@ -1371,7 +1096,6 @@ async function idbLocationsForHash(
 async function idbMediaItemsFromAssets(
   database: IDBDatabase,
   assets: IdbAsset[],
-  preferredSourceId?: string,
 ): Promise<MediaItem[]> {
   if (assets.length === 0) return []
 
@@ -1380,11 +1104,7 @@ async function idbMediaItemsFromAssets(
   )
 
   return assets.map((asset, index) =>
-    mediaFromIdbAsset(
-      asset,
-      locationLists[index] ?? [],
-      preferredSourceId,
-    ),
+    mediaFromIdbAsset(asset, locationLists[index] ?? []),
   )
 }
 
@@ -1479,14 +1199,12 @@ async function idbPrepareImportSource(
 function idbAssetMatchesQuery(
   asset: IdbAsset,
   query: CatalogQuery,
-  sourceHashes?: Set<string>,
 ): boolean {
   if (query.kind === 'media') {
     if (asset.kind !== 'image' && asset.kind !== 'video') return false
   } else if (query.kind && query.kind !== 'all' && asset.kind !== query.kind) {
     return false
   }
-  if (sourceHashes && !sourceHashes.has(asset.contentHash)) return false
   if (query.hasGeo === true && (asset.latitude === undefined || asset.longitude === undefined)) {
     return false
   }
@@ -1518,28 +1236,6 @@ function idbAssetMatchesQuery(
   return true
 }
 
-async function idbSourceContentHashes(
-  database: IDBDatabase,
-  sourceId: string | undefined,
-): Promise<Set<string> | undefined> {
-  if (!sourceId) return undefined
-
-  const transaction = database.transaction('locations', 'readonly')
-  const done = idbTransactionDone(transaction)
-  const hashes = new Set<string>()
-  await iterateIdbCursor(
-    transaction.objectStore('locations').openCursor(),
-    (cursor) => {
-      const location = cursor.value as IdbLocation
-      if (location.sourceId === sourceId) {
-        hashes.add(location.contentHash)
-      }
-    },
-  )
-  await done
-  return hashes
-}
-
 function compareIdbAssetsBytimestamp(
   sort: CatalogQuery['sort'],
   a: IdbAsset,
@@ -1561,7 +1257,6 @@ function compareIdbAssetsBytimestamp(
 
 async function idbListMedia(query: CatalogQuery): Promise<MediaItem[]> {
   const database = await requireIndexedDb()
-  const sourceHashes = await idbSourceContentHashes(database, query.sourceId)
   const limit = Math.max(1, Math.min(query.limit ?? 500, 10_000))
   const offset = Math.max(0, query.offset ?? 0)
   const matches: IdbAsset[] = []
@@ -1572,7 +1267,7 @@ async function idbListMedia(query: CatalogQuery): Promise<MediaItem[]> {
     transaction.objectStore('assets').openCursor(),
     (cursor) => {
       const asset = cursor.value as IdbAsset
-      if (!idbAssetMatchesQuery(asset, query, sourceHashes)) return
+      if (!idbAssetMatchesQuery(asset, query)) return
       matches.push(asset)
     },
   )
@@ -1580,7 +1275,7 @@ async function idbListMedia(query: CatalogQuery): Promise<MediaItem[]> {
 
   matches.sort((a, b) => compareIdbAssetsBytimestamp(query.sort, a, b))
   const results = matches.slice(offset, offset + limit)
-  return idbMediaItemsFromAssets(database, results, query.sourceId)
+  return idbMediaItemsFromAssets(database, results)
 }
 
 async function idbSearchRows(query: CatalogQuery): Promise<MediaSearchRows> {
@@ -1684,30 +1379,6 @@ async function idbForEachGeoPointBatch(
   return processedPoints
 }
 
-async function idbListSources(): Promise<MediaSource[]> {
-  const database = await requireIndexedDb()
-  const transaction = database.transaction('locations', 'readonly')
-  const done = idbTransactionDone(transaction)
-  const sourcesById = new Map<string, MediaSource>()
-  await iterateIdbCursor(
-    transaction.objectStore('locations').openCursor(),
-    (cursor) => {
-      const location = cursor.value as IdbLocation
-      if (!sourcesById.has(location.sourceId)) {
-        sourcesById.set(location.sourceId, {
-          id: location.sourceId,
-          label: location.sourceLabel,
-          rootPath: location.rootPath,
-        })
-      }
-    },
-  )
-  await done
-  return Array.from(sourcesById.values()).sort((a, b) =>
-    a.label.localeCompare(b.label),
-  )
-}
-
 async function idbCountMedia(): Promise<number> {
   const database = await requireIndexedDb()
   let count = 0
@@ -1768,7 +1439,6 @@ function relativePathForLocation(
 function mediaFromAssetRow(
   row: Record<string, unknown>,
   locations: MediaLocation[],
-  preferredSourceId?: string,
 ): MediaItem {
   const contentHash = String(row.content_hash)
   const kind =
@@ -1776,14 +1446,6 @@ function mediaFromAssetRow(
       ? row.kind
       : 'image'
   const sortedLocations = [...locations].sort((a, b) => {
-    if (preferredSourceId) {
-      if (a.sourceId === preferredSourceId && b.sourceId !== preferredSourceId) {
-        return -1
-      }
-      if (b.sourceId === preferredSourceId && a.sourceId !== preferredSourceId) {
-        return 1
-      }
-    }
     return (
       (a.relativePath ?? '').localeCompare(b.relativePath ?? '') ||
       a.id.localeCompare(b.id)
@@ -2194,7 +1856,6 @@ function timeWhere(
 function mediaItemsFromAssetRows(
   activeDb: SqliteDb,
   rows: Record<string, unknown>[],
-  preferredSourceId?: string,
 ): MediaItem[] {
   if (rows.length === 0) return []
 
@@ -2220,11 +1881,7 @@ function mediaItemsFromAssetRows(
   }
 
   return rows.map((row) =>
-    mediaFromAssetRow(
-      row,
-      locationsByHash.get(String(row.content_hash)) ?? [],
-      preferredSourceId,
-    ),
+    mediaFromAssetRow(row, locationsByHash.get(String(row.content_hash)) ?? []),
   )
 }
 
@@ -3374,14 +3031,6 @@ function sqliteListMediaStatement(query: CatalogQuery): {
     where.push('a.kind = ?')
     bind.push(query.kind)
   }
-  if (query.sourceId) {
-    where.push(`EXISTS (
-      SELECT 1 FROM media_locations ls
-      WHERE ls.content_hash = a.content_hash
-        AND ls.source_id = ?
-    )`)
-    bind.push(query.sourceId)
-  }
   if (typeof query.hasGeo === 'boolean') {
     where.push(
       query.hasGeo
@@ -3457,7 +3106,7 @@ async function sqliteSearchRows(
   const rows = activeDb.selectObjects(statement.sql, statement.bind)
 
   return {
-    items: mediaItemsFromAssetRows(activeDb, rows, query.sourceId),
+    items: mediaItemsFromAssetRows(activeDb, rows),
     sqlPlan,
   }
 }
@@ -3518,7 +3167,6 @@ function searchSpecToCatalogQuery(
     startTime: spec.startTime,
     endTime: spec.endTime,
     kind: spec.kind,
-    sourceId: spec.sourceId,
     hasGeo: spec.hasGeo,
     geoBounds: spec.geoBounds,
     sort: spec.order.kind === 'timestamp' ? spec.order.sort : 'timestamp_desc',
@@ -3740,16 +3388,6 @@ function geoS2PointSql(
     where.push('p.longitude BETWEEN ? AND ?')
     bind.push(spec.geoBounds.minLon, spec.geoBounds.maxLon)
   }
-  if (spec.sourceId) {
-    where.push(
-      `EXISTS (
-        SELECT 1 FROM media_locations l
-        WHERE l.content_hash = p.content_hash AND l.source_id = ?
-      )`,
-    )
-    bind.push(spec.sourceId)
-  }
-
   const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''
   if (options.countOnly) {
     return {
@@ -4001,10 +3639,9 @@ function createS2CellBtreeSearchEngine(
       supportsGeoBounds: true,
       supportsTimeRange: true,
       supportsKind: true,
-      supportsSource: false,
     },
     canHandle(spec) {
-      return spec.order.kind === 'distance' && !spec.sourceId
+      return spec.order.kind === 'distance'
     },
     async search(spec) {
       const startedAt = performance.now()
@@ -4086,7 +3723,6 @@ function createSqlSearchEngine(
       supportsGeoBounds,
       supportsTimeRange: true,
       supportsKind: true,
-      supportsSource: true,
     },
     canHandle(spec) {
       return spec.order.kind === 'timestamp' && Boolean(spec.geoBounds) === supportsGeoBounds
@@ -4142,10 +3778,9 @@ function createDistanceSearchEngine(
       supportsGeoBounds: true,
       supportsTimeRange: true,
       supportsKind: true,
-      supportsSource: false,
     },
     canHandle(spec) {
-      return spec.order.kind === 'distance' && !spec.sourceId
+      return spec.order.kind === 'distance'
     },
     async search(spec) {
       if (spec.order.kind !== 'distance') {
@@ -4579,16 +4214,37 @@ async function buildSearchIndexes(
   const startedAt = performance.now()
   const totalIndexes = 1
   if (indexId === S2_CELL_BTREE_ENGINE_ID) {
+    traceStartup('[geo-index:worker]', 'delegating to SQLite S2 index build', {
+      indexId,
+      forceRebuild,
+      storageMode: store.storageMode,
+    })
     return buildSqliteS2SearchIndex(store, forceRebuild, postProgress)
   }
-  const diskIndex = isDiskSegmentedEngineId(indexId)
-    ? diskSegmentedIndex(store, indexId)
+  const selectedIndexId =
+    indexId === 'brute-force'
+      ? 'brute-force'
+      : isDiskSegmentedEngineId(indexId)
+        ? indexId
+        : 'segmented-ball-tree'
+  const diskIndex = isDiskSegmentedEngineId(selectedIndexId)
+    ? diskSegmentedIndex(store, selectedIndexId)
     : undefined
   const registryIndex =
-    indexId === 'brute-force'
+    selectedIndexId === 'brute-force'
       ? geoIndexRegistry.get('brute-force')
-      : dynamicZOrderIndex()
+      : geoIndexRegistry.get('segmented-ball-tree')
   const index = diskIndex ?? registryIndex
+
+  traceStartup('[geo-index:worker]', 'buildSearchIndexes start', {
+    requestedIndexId: indexId,
+    selectedIndexId,
+    effectiveIndexId: index.id,
+    forceRebuild,
+    storageMode: store.storageMode,
+    hasDiskIndex: Boolean(diskIndex),
+    preparedSearchIndex,
+  })
 
   postProgress({
     phase: 'loading',
@@ -4600,25 +4256,23 @@ async function buildSearchIndexes(
   })
 
   const catalogEpoch = await store.catalogEpoch()
+  traceStartup('[geo-index:worker]', 'catalog epoch loaded', {
+    selectedIndexId,
+    catalogEpoch,
+    preparedSearchIndex,
+  })
   if (
     !forceRebuild &&
     preparedSearchIndex?.storageMode === store.storageMode &&
     preparedSearchIndex?.indexId === index.id &&
     preparedSearchIndex.catalogEpoch === catalogEpoch
   ) {
+    traceStartup('[geo-index:worker]', 'using already-prepared worker index', {
+      indexId: index.id,
+      storageMode: store.storageMode,
+      catalogEpoch,
+    })
     const stats = await index.stats()
-    if (
-      index.id === 'dynamic-z-order-cells' &&
-      index.capabilities.persistent &&
-      preparedSearchIndex.cacheDirty
-    ) {
-      try {
-        await store.savePersistedDynamicIndex(catalogEpoch)
-        preparedSearchIndex = { ...preparedSearchIndex, cacheDirty: false }
-      } catch {
-        // The index cache is disposable. Search remains correct with the in-memory index.
-      }
-    }
     postProgress({
       phase: 'ready',
       pointCount: stats.pointCount,
@@ -4637,9 +4291,40 @@ async function buildSearchIndexes(
     }
   }
 
+  if (forceRebuild) {
+    traceStartup('[geo-index:worker]', 'skipping restore because forceRebuild=true', {
+      indexId: index.id,
+      storageMode: store.storageMode,
+      catalogEpoch,
+    })
+  } else if (preparedSearchIndex) {
+    traceStartup('[geo-index:worker]', 'already-prepared worker index did not match', {
+      indexId: index.id,
+      storageMode: store.storageMode,
+      catalogEpoch,
+      preparedSearchIndex,
+    })
+  } else {
+    traceStartup('[geo-index:worker]', 'no already-prepared worker index available', {
+      indexId: index.id,
+      storageMode: store.storageMode,
+      catalogEpoch,
+    })
+  }
+
   if (!forceRebuild && diskIndex) {
+    traceStartup('[geo-index:worker]', 'attempting persisted disk index restore', {
+      indexId: index.id,
+      storageMode: store.storageMode,
+      catalogEpoch,
+    })
     const restored = await diskIndex.prepare(catalogEpoch)
     if (restored) {
+      traceStartup('[geo-index:worker]', 'persisted disk index restored', {
+        indexId: index.id,
+        storageMode: store.storageMode,
+        catalogEpoch,
+      })
       const stats = await index.stats()
       preparedSearchIndex = {
         storageMode: store.storageMode,
@@ -4664,35 +4349,19 @@ async function buildSearchIndexes(
         engineCount: searchEngineCountForStore(store),
       }
     }
-  } else if (!forceRebuild && index.id === 'dynamic-z-order-cells') {
-    const restored = await store.loadPersistedDynamicIndex(catalogEpoch)
-    if (restored) {
-      preparedSearchIndex = {
-        storageMode: store.storageMode,
-        indexId: index.id,
-        catalogEpoch,
-        cacheDirty: false,
-      }
-      postProgress({
-        phase: 'ready',
-        pointCount: restored.pointCount,
-        builtIndexes: totalIndexes,
-        totalIndexes,
-        currentIndexId: index.id,
-        currentIndexLabel: index.label,
-        currentIndexProcessedPoints: restored.pointCount,
-        currentIndexTotalPoints: restored.pointCount,
-      })
-
-      return {
-        pointCount: restored.pointCount,
-        buildTimeMs: performance.now() - startedAt,
-        engineCount: searchEngineCountForStore(store),
-      }
-    }
+    traceStartup('[geo-index:worker]', 'persisted disk index restore failed; rebuilding', {
+      indexId: index.id,
+      storageMode: store.storageMode,
+      catalogEpoch,
+    })
   }
 
   if (diskIndex) {
+    traceStartup('[geo-index:worker]', 'disk index build branch entered', {
+      indexId: index.id,
+      storageMode: store.storageMode,
+      catalogEpoch,
+    })
     postProgress({
       phase: 'building',
       pointCount: 0,
@@ -4722,6 +4391,14 @@ async function buildSearchIndexes(
       },
     )
 
+    traceStartup('[geo-index:worker]', 'disk index build complete', {
+      indexId: index.id,
+      storageMode: store.storageMode,
+      catalogEpoch,
+      pointCount,
+      buildTimeMs: performance.now() - startedAt,
+    })
+
     preparedSearchIndex = {
       storageMode: store.storageMode,
       indexId: index.id,
@@ -4747,6 +4424,11 @@ async function buildSearchIndexes(
     }
   }
 
+  traceStartup('[geo-index:worker]', 'in-memory index build branch entered', {
+    indexId: index.id,
+    storageMode: store.storageMode,
+    catalogEpoch,
+  })
   const points = await store.getGeoPoints({})
 
   postProgress({
@@ -4783,21 +4465,17 @@ async function buildSearchIndexes(
     cacheDirty: index.capabilities.persistent,
   }
 
-  if (index.capabilities.persistent) {
-    try {
-      if (index.id === 'dynamic-z-order-cells') {
-        await store.savePersistedDynamicIndex(catalogEpoch)
-      }
-      preparedSearchIndex = { ...preparedSearchIndex, cacheDirty: false }
-    } catch {
-      // The index cache is disposable. Search remains correct with the in-memory index.
-    }
-  }
-
   const summary = {
     pointCount: points.length,
     buildTimeMs: performance.now() - startedAt,
   }
+  traceStartup('[geo-index:worker]', 'in-memory index build complete', {
+    indexId: index.id,
+    storageMode: store.storageMode,
+    catalogEpoch,
+    pointCount: points.length,
+    buildTimeMs: summary.buildTimeMs,
+  })
 
   postProgress({
     phase: 'ready',
@@ -4884,35 +4562,6 @@ async function validateGeoIndex(store: CatalogStore, payload: {
   return geoIndexRegistry
     .get(payload.indexId)
     .validateAgainstBruteForce(payload.query)
-}
-
-async function listSources(): Promise<MediaSource[]> {
-  await ensureDb()
-  return requireDb()
-    .selectObjects(
-      `
-        SELECT
-          source_id AS id,
-          source_label AS label,
-          root_path
-        FROM media_locations
-        GROUP BY source_id, source_label, root_path
-        ORDER BY source_label ASC
-      `,
-    )
-    .map((row) => ({
-      id: String(row.id),
-      label: String(row.label),
-      rootPath: toString(row.root_path),
-    }))
-}
-
-async function removeSources(sourceIds: string[]): Promise<void> {
-  await ensureDb()
-  if (sourceIds.length === 0) return
-
-  const activeDb = requireDb()
-  removeSourcesFromSqlite(activeDb, sourceIds)
 }
 
 async function countMedia(): Promise<number> {
@@ -5153,22 +4802,6 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
       await ensureMode()
       return sqliteBumpCatalogEpoch()
     },
-    async loadPersistedDynamicIndex(catalogEpoch) {
-      await ensureMode()
-      return loadOpfsDynamicIndex(catalogEpoch)
-    },
-    async savePersistedDynamicIndex(catalogEpoch) {
-      await ensureMode()
-      return saveOpfsDynamicIndex(catalogEpoch)
-    },
-    async loadPersistedSegmentedKdTreeIndex(catalogEpoch) {
-      await ensureMode()
-      return loadOpfsSegmentedKdTreeIndex(catalogEpoch)
-    },
-    async savePersistedSegmentedKdTreeIndex(catalogEpoch) {
-      await ensureMode()
-      return saveOpfsSegmentedKdTreeIndex(catalogEpoch)
-    },
     async loadPersistedSegmentedBallTreeIndex(catalogEpoch) {
       await ensureMode()
       return loadOpfsSegmentedBallTreeIndex(catalogEpoch)
@@ -5183,15 +4816,6 @@ function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
     },
     async getSearchIndexStats() {
       return getSearchIndexStats(store)
-    },
-    async listSources() {
-      await ensureMode()
-      return listSources()
-    },
-    async removeSources(sourceIds) {
-      await ensureMode()
-      await removeSources(sourceIds)
-      if (sourceIds.length > 0) await clearDiskSegmentedIndexCaches(store)
     },
     async countMedia() {
       await ensureMode()
@@ -5280,10 +4904,6 @@ const indexedDbCatalogStore: CatalogStore = {
   diskSegmentedTreeStore: createIdbDiskSegmentedTreeStore,
   catalogEpoch: idbCatalogEpoch,
   bumpCatalogEpoch: idbBumpCatalogEpoch,
-  loadPersistedDynamicIndex: loadIdbDynamicIndex,
-  savePersistedDynamicIndex: saveIdbDynamicIndex,
-  loadPersistedSegmentedKdTreeIndex: loadIdbSegmentedKdTreeIndex,
-  savePersistedSegmentedKdTreeIndex: saveIdbSegmentedKdTreeIndex,
   loadPersistedSegmentedBallTreeIndex: loadIdbSegmentedBallTreeIndex,
   savePersistedSegmentedBallTreeIndex: saveIdbSegmentedBallTreeIndex,
   buildSearchIndexes(indexId, forceRebuild, postProgress) {
@@ -5296,11 +4916,6 @@ const indexedDbCatalogStore: CatalogStore = {
   },
   getSearchIndexStats() {
     return getSearchIndexStats(indexedDbCatalogStore)
-  },
-  listSources: idbListSources,
-  async removeSources(sourceIds) {
-    await idbRemoveSources(sourceIds)
-    if (sourceIds.length > 0) await clearDiskSegmentedIndexCaches(indexedDbCatalogStore)
   },
   countMedia: idbCountMedia,
   async clear() {
@@ -5357,10 +4972,6 @@ async function handleRequest(
       return store.getMediaByIds(request.payload as string[])
     case 'getGeoPoints':
       return store.getGeoPoints((request.payload ?? {}) as TimeRange)
-    case 'listSources':
-      return store.listSources()
-    case 'removeSources':
-      return store.removeSources(request.payload as string[])
     case 'countMedia':
       return store.countMedia()
     case 'buildGeoIndexes':
@@ -5368,7 +4979,7 @@ async function handleRequest(
     case 'buildSearchIndexes':
       return store.buildSearchIndexes(
         (request.payload as { indexId?: string } | undefined)?.indexId ??
-          'dynamic-z-order-cells',
+          'segmented-ball-tree',
         Boolean(
           (request.payload as { forceRebuild?: boolean } | undefined)
             ?.forceRebuild,
@@ -5397,18 +5008,46 @@ async function handleRequest(
 }
 
 ctx.addEventListener('message', async (event: MessageEvent<WorkerRequest>) => {
+  const receivedAt = performance.now()
   if (event.data.type === 'cancel') {
+    traceStartup('[startup:worker]', 'cancel request received', {
+      id: event.data.id,
+      elapsedSinceReceiveMs: performance.now() - receivedAt,
+    })
     cancelledRequests.add(event.data.id)
     return
   }
 
+  traceStartup('[startup:worker]', 'request received', {
+    id: event.data.id,
+    type: event.data.type,
+    storageMode: event.data.storageMode,
+    hasPayload: event.data.payload !== undefined,
+  })
   try {
     const postProgress = (progress: GeoIndexBuildProgress | ImportProgress) => {
+      traceStartup('[startup:worker]', 'posting progress', {
+        id: event.data.id,
+        type: event.data.type,
+        elapsedMs: performance.now() - receivedAt,
+        progress,
+      })
       ctx.postMessage({ id: event.data.id, type: 'progress', progress })
     }
     const result = await handleRequest(event.data, postProgress)
+    traceStartup('[startup:worker]', 'request complete', {
+      id: event.data.id,
+      type: event.data.type,
+      elapsedMs: performance.now() - receivedAt,
+    })
     ctx.postMessage({ id: event.data.id, ok: true, result })
   } catch (error) {
+    traceStartup('[startup:worker]', 'request failed', {
+      id: event.data.id,
+      type: event.data.type,
+      elapsedMs: performance.now() - receivedAt,
+      error: error instanceof Error ? error.message : String(error),
+    })
     ctx.postMessage({
       id: event.data.id,
       ok: false,

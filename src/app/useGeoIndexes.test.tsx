@@ -44,15 +44,13 @@ function createCatalog(): CatalogBackend {
       stats,
       {
         ...stats,
-        engineId: 'dynamic-z-order-cells',
-        engineLabel: 'Dynamic Z-order cells',
+        engineId: 'segmented-ball-tree',
+        engineLabel: 'Segmented ball tree',
       },
     ]),
     listMedia: vi.fn(),
     getMediaByIds: vi.fn(),
     getGeoPoints: vi.fn(),
-    listSources: vi.fn(),
-    removeSources: vi.fn(),
     countMedia: vi.fn(),
     buildGeoIndexes: vi.fn(async () => ({
       pointCount: 123,
@@ -107,6 +105,7 @@ describe('useGeoIndexes', () => {
     await waitFor(() => {
       expect(catalog.buildSearchIndexes).toHaveBeenCalledTimes(1)
     })
+    expect(catalog.getSearchIndexStats).not.toHaveBeenCalled()
     expect(catalog.buildSearchIndexes).toHaveBeenLastCalledWith(
       'brute-force',
       expect.any(Function),
@@ -117,7 +116,7 @@ describe('useGeoIndexes', () => {
         catalog={catalog}
         onError={onError}
         revision={0}
-        selectedIndexId="dynamic-z-order-cells"
+        selectedIndexId="segmented-ball-tree"
       />,
     )
 
@@ -125,7 +124,7 @@ describe('useGeoIndexes', () => {
       expect(catalog.buildSearchIndexes).toHaveBeenCalledTimes(2)
     })
     expect(catalog.buildSearchIndexes).toHaveBeenLastCalledWith(
-      'dynamic-z-order-cells',
+      'segmented-ball-tree',
       expect.any(Function),
     )
 
@@ -134,7 +133,7 @@ describe('useGeoIndexes', () => {
         catalog={catalog}
         onError={onError}
         revision={1}
-        selectedIndexId="dynamic-z-order-cells"
+        selectedIndexId="segmented-ball-tree"
       />,
     )
 
@@ -142,7 +141,7 @@ describe('useGeoIndexes', () => {
       expect(catalog.buildSearchIndexes).toHaveBeenCalledTimes(3)
     })
     expect(catalog.buildSearchIndexes).toHaveBeenLastCalledWith(
-      'dynamic-z-order-cells',
+      'segmented-ball-tree',
       expect.any(Function),
     )
   })

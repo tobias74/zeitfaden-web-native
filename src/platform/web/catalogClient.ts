@@ -21,6 +21,7 @@ import type {
   SearchIndexBuildSummary,
 } from '../types'
 import type { WebCatalogStorageMode } from './storageMode'
+import { traceStartup } from '../../lib/startupTrace'
 
 type ImportFolderPayload = {
   source: MediaSource
@@ -45,6 +46,8 @@ type PendingRequest<T> = {
   reject: (reason?: unknown) => void
   onProgress?: (progress: unknown) => void
   cleanup?: () => void
+  startedAt: number
+  type: string
 }
 
 export class CatalogClient {
@@ -55,6 +58,9 @@ export class CatalogClient {
 
   constructor(storageMode: WebCatalogStorageMode) {
     this.storageMode = storageMode
+    traceStartup('[startup:catalog-client]', 'CatalogClient constructed', {
+      storageMode,
+    })
   }
 
   init(): Promise<CatalogInfo> {
@@ -135,14 +141,6 @@ export class CatalogClient {
     return this.request('getGeoPoints', range)
   }
 
-  listSources(): Promise<MediaSource[]> {
-    return this.request('listSources')
-  }
-
-  removeSources(sourceIds: string[]): Promise<void> {
-    return this.request('removeSources', sourceIds)
-  }
-
   countMedia(): Promise<number> {
     return this.request('countMedia')
   }
@@ -184,12 +182,23 @@ export class CatalogClient {
   }
 
   private ensureWorker(): Worker {
-    if (this.worker) return this.worker
+    if (this.worker) {
+      traceStartup('[startup:catalog-client]', 'reusing catalog worker', {
+        storageMode: this.storageMode,
+      })
+      return this.worker
+    }
 
+    traceStartup('[startup:catalog-client]', 'creating catalog worker', {
+      storageMode: this.storageMode,
+    })
     const worker = new Worker(new URL('./catalog.worker.ts', import.meta.url), {
       type: 'module',
     })
     this.worker = worker
+    traceStartup('[startup:catalog-client]', 'catalog worker constructed', {
+      storageMode: this.storageMode,
+    })
 
     worker.addEventListener('message', (event: MessageEvent) => {
       const response = event.data as WorkerResponse<unknown>
@@ -197,6 +206,12 @@ export class CatalogClient {
       if (!pending) return
 
       if ('type' in response && response.type === 'progress') {
+        traceStartup('[startup:catalog-client]', 'worker progress received', {
+          id: response.id,
+          type: pending.type,
+          elapsedMs: performance.now() - pending.startedAt,
+          progress: response.progress,
+        })
         pending.onProgress?.(response.progress)
         return
       }
@@ -204,13 +219,28 @@ export class CatalogClient {
       this.pending.delete(response.id)
       pending.cleanup?.()
       if ('ok' in response && response.ok) {
+        traceStartup('[startup:catalog-client]', 'worker response ok', {
+          id: response.id,
+          type: pending.type,
+          elapsedMs: performance.now() - pending.startedAt,
+        })
         pending.resolve(response.result)
       } else if ('ok' in response) {
+        traceStartup('[startup:catalog-client]', 'worker response failed', {
+          id: response.id,
+          type: pending.type,
+          elapsedMs: performance.now() - pending.startedAt,
+          error: response.error,
+        })
         pending.reject(new Error(response.error))
       }
     })
 
     worker.addEventListener('error', (event) => {
+      traceStartup('[startup:catalog-client]', 'catalog worker error', {
+        storageMode: this.storageMode,
+        message: event.message,
+      })
       event.preventDefault()
       this.worker = undefined
       worker.terminate()
@@ -218,6 +248,9 @@ export class CatalogClient {
     })
 
     worker.addEventListener('messageerror', () => {
+      traceStartup('[startup:catalog-client]', 'catalog worker messageerror', {
+        storageMode: this.storageMode,
+      })
       this.worker = undefined
       worker.terminate()
       this.rejectAll(new Error('Catalog worker sent an unreadable response'))
@@ -241,9 +274,21 @@ export class CatalogClient {
     signal?: AbortSignal,
   ): Promise<T> {
     const id = this.nextId++
+    const startedAt = performance.now()
+    traceStartup('[startup:catalog-client]', 'request queued', {
+      id,
+      type,
+      storageMode: this.storageMode,
+      hasPayload: payload !== undefined,
+    })
 
     return new Promise<T>((resolve, reject) => {
       const cancelRequest = () => {
+        traceStartup('[startup:catalog-client]', 'request cancellation posted', {
+          id,
+          type,
+          elapsedMs: performance.now() - startedAt,
+        })
         this.worker?.postMessage({ id, type: 'cancel' })
       }
       const cleanup = signal
@@ -255,9 +300,17 @@ export class CatalogClient {
         reject,
         onProgress,
         cleanup,
+        startedAt,
+        type,
       })
       try {
         const worker = this.ensureWorker()
+        traceStartup('[startup:catalog-client]', 'posting request to worker', {
+          id,
+          type,
+          storageMode: this.storageMode,
+          elapsedMs: performance.now() - startedAt,
+        })
         worker.postMessage({
           id,
           type,
@@ -265,11 +318,22 @@ export class CatalogClient {
           storageMode: this.storageMode,
         })
         if (signal?.aborted) {
+          traceStartup('[startup:catalog-client]', 'signal already aborted', {
+            id,
+            type,
+            elapsedMs: performance.now() - startedAt,
+          })
           worker.postMessage({ id, type: 'cancel' })
         }
       } catch (error) {
         this.pending.delete(id)
         cleanup?.()
+        traceStartup('[startup:catalog-client]', 'request post failed', {
+          id,
+          type,
+          elapsedMs: performance.now() - startedAt,
+          error: error instanceof Error ? error.message : String(error),
+        })
         reject(error)
       }
     })

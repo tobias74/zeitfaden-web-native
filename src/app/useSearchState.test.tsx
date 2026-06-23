@@ -6,8 +6,6 @@ const options = {
   allowedIndexIds: [
     'brute-force',
     's2-cell-btree',
-    'dynamic-z-order-cells',
-    'segmented-kd-tree',
     'segmented-ball-tree',
   ],
   defaultSelectedIndexId: 'brute-force',

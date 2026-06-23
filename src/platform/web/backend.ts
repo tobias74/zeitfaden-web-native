@@ -21,6 +21,7 @@ import type {
   ThumbnailBackend,
 } from '../types'
 import type { MediaItem, MediaLocation, MediaSource } from '../../types'
+import { traceStartup } from '../../lib/startupTrace'
 
 type ImportSourceRecord = {
   id: string
@@ -326,7 +327,13 @@ class WebFileLocationBackend {
 export function createWebPlatformBackend(
   storageMode: WebCatalogStorageMode = storedWebCatalogStorageMode(),
 ): PlatformBackend {
+  traceStartup('[startup:platform]', 'createWebPlatformBackend start', {
+    storageMode,
+  })
   const catalog = new CatalogClient(storageMode)
+  traceStartup('[startup:platform]', 'createWebPlatformBackend complete', {
+    storageMode,
+  })
 
   return {
     kind: 'web',

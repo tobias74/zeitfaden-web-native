@@ -94,8 +94,6 @@ export interface CatalogBackend {
   listMedia(query: CatalogQuery): Promise<MediaItem[]>
   getMediaByIds(ids: string[]): Promise<MediaItem[]>
   getGeoPoints(range?: TimeRange): Promise<GeoIndexPoint[]>
-  listSources(): Promise<MediaSource[]>
-  removeSources(sourceIds: string[]): Promise<void>
   countMedia(): Promise<number>
   buildGeoIndexes(
     onProgress?: (progress: GeoIndexBuildProgress) => void,

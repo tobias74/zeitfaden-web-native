@@ -17,7 +17,6 @@ const baseCapabilities: SearchIndexCapabilities = {
   supportsGeoBounds: false,
   supportsTimeRange: true,
   supportsKind: true,
-  supportsSource: true,
 }
 
 function stats(engineId: string): SearchIndexStats {
@@ -111,7 +110,7 @@ describe('SearchIndexRegistry', () => {
       }),
     )
     const fallback = engine(
-      'dynamic-z-order-cells',
+      'segmented-ball-tree',
       (spec) => spec.order.kind === 'distance',
     )
     const registry = new SearchIndexRegistry([fallback, selected])
@@ -125,7 +124,7 @@ describe('SearchIndexRegistry', () => {
       purpose: 'results',
     })
 
-    expect(result.engineId).toBe('dynamic-z-order-cells')
+    expect(result.engineId).toBe('segmented-ball-tree')
     expect(selected.search).toHaveBeenCalledTimes(1)
     expect(fallback.search).toHaveBeenCalledTimes(1)
   })

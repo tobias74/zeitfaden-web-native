@@ -117,8 +117,6 @@ function createPlatform(): PlatformBackend {
     },
     getMediaByIds: vi.fn(),
     getGeoPoints: vi.fn(),
-    listSources: vi.fn(async () => []),
-    removeSources: vi.fn(),
     countMedia: vi.fn(),
     buildGeoIndexes: vi.fn(async () => ({
       pointCount: 0,

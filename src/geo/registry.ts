@@ -5,9 +5,7 @@ import type {
   ValidationReport,
 } from '../types'
 import { BruteForceGeoIndex } from './bruteForceIndex'
-import { DynamicZOrderGeoIndex } from './dynamicZOrderGeoIndex'
 import { SegmentedBallTreeGeoIndex } from './segmentedBallTreeGeoIndex'
-import { SegmentedKdTreeGeoIndex } from './segmentedKdTreeGeoIndex'
 
 export class GeoIndexRegistry {
   readonly indexes: GeoTemporalIndex[]
@@ -15,8 +13,6 @@ export class GeoIndexRegistry {
   constructor() {
     this.indexes = [
       new BruteForceGeoIndex(),
-      new DynamicZOrderGeoIndex(),
-      new SegmentedKdTreeGeoIndex(),
       new SegmentedBallTreeGeoIndex(),
     ]
   }
