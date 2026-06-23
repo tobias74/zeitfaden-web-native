@@ -90,12 +90,12 @@ function createPlatform(): PlatformBackend {
     buildSearchIndexes: vi.fn(async () => ({
       pointCount: 0,
       buildTimeMs: 0,
-      engineCount: 5,
+      engineCount: 4,
     })),
     rebuildSearchIndex: vi.fn(async () => ({
       pointCount: 0,
       buildTimeMs: 0,
-      engineCount: 5,
+      engineCount: 4,
     })),
     getSearchIndexStats: vi.fn(async () => [
       {

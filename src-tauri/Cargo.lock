@@ -3523,20 +3523,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
-name = "s2"
-version = "0.0.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23434007bcef0196e3f083834576ac004241f354001a22c61d2f2208c780e8df"
-dependencies = [
- "bigdecimal",
- "cgmath",
- "float_extras",
- "lazy_static",
- "libm",
- "serde",
-]
-
-[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5689,7 +5675,6 @@ dependencies = [
  "rfd",
  "roxmltree",
  "rusqlite",
- "s2",
  "serde",
  "serde_json",
  "sha2",

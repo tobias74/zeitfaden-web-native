@@ -99,7 +99,6 @@ const MAP_POINT_LIMIT = 500
 const DEFAULT_DISTANCE_ENGINE_ID = 'segmented-ball-tree'
 const DISTANCE_ENGINE_IDS = [
   'brute-force',
-  's2-cell-btree',
   'segmented-ball-tree',
 ] as const
 const DEFAULT_QUERY_POINT = {
@@ -540,15 +539,6 @@ function App() {
   })
   const [indexStatsOverride, setIndexStatsOverride] =
     useState<SearchIndexStats>()
-  const s2CellBtreeAvailable =
-    catalogInfo?.storageMode === 'native' ||
-    catalogInfo?.storageMode === 'opfs' ||
-    (!catalogInfo && webCatalogStorageMode === 'sqlite')
-  useEffect(() => {
-    if (selectedIndexId === 's2-cell-btree' && !s2CellBtreeAvailable) {
-      setSelectedIndexId(DEFAULT_DISTANCE_ENGINE_ID)
-    }
-  }, [s2CellBtreeAvailable, selectedIndexId, setSelectedIndexId])
   const searchDiagnostics = useMemo(
     () => ({
       explainSql: explainSqlQueries,
@@ -1449,9 +1439,6 @@ function App() {
                     value={selectedIndexId}
                     onChange={(event) => setSelectedIndexId(event.target.value)}
                   >
-                    {s2CellBtreeAvailable && (
-                      <option value="s2-cell-btree">{t('s2CellBtree')}</option>
-                    )}
                     <option value="segmented-ball-tree">
                       {t('segmentedBallTree')}
                     </option>

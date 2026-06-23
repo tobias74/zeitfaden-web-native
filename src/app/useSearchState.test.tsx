@@ -5,7 +5,6 @@ import { useSearchState } from './useSearchState'
 const options = {
   allowedIndexIds: [
     'brute-force',
-    's2-cell-btree',
     'segmented-ball-tree',
   ],
   defaultSelectedIndexId: 'brute-force',
