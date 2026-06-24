@@ -1,20 +1,10 @@
-import sqlite3InitModule from '@sqlite.org/sqlite-wasm'
 import * as exifr from 'exifr'
 import {
   DiskSegmentedTreeIndex,
-  type DiskSegmentedBatchProducer,
   type DiskSegmentedEngineId,
   type DiskSegmentedTreeManifest,
   type DiskSegmentedTreeStore,
 } from '../../geo/diskSegmentedTreeIndex'
-import { SegmentedBallTreeGeoIndex } from '../../geo/segmentedBallTreeGeoIndex'
-import {
-  createSegmentedBallTreeManifest,
-  decodeSegmentedBallTreeSnapshot,
-  encodeSegmentedBallTreeSnapshot,
-  type SegmentedBallTreeManifest,
-  validateSegmentedBallTreeManifest,
-} from '../../geo/segmentedBallTreePersistence'
 import { GeoIndexRegistry } from '../../geo/registry'
 import {
   geoPointContentHash,
@@ -24,15 +14,15 @@ import {
 import { GoogleTakeoutLocationStreamParser } from '../../lib/googleTakeoutStream'
 import { detectMediaKind, pathDisplayName } from '../../lib/media'
 import { sha256Hex } from '../../lib/sha256'
-import { createSqlExplainPlan } from '../../lib/sqlExplain'
 import { traceStartup } from '../../lib/startupTrace'
 import { SearchIndexRegistry as SearchIndexEngineRegistry } from '../../search/registry'
 import type {
   CatalogQuery,
   GeoIndexPoint,
-  GeoIndexStats,
+  GeoBounds,
   GeoSearchQuery,
   GeoSearchResult,
+  KindFilter,
   MediaItem,
   MediaLocation,
   MediaSource,
@@ -40,10 +30,7 @@ import type {
   SearchIndexStats,
   SearchPage,
   SearchSpec,
-  SearchStorageMode,
-  SqlExplainPlan,
   TimeRange,
-  ValidationReport,
 } from '../../types'
 import type {
   GeoIndexBuildProgress,
@@ -51,228 +38,19 @@ import type {
   ImportProgress,
   ImportSummary,
 } from '../types'
-import type { WebCatalogStorageMode } from './storageMode'
 
 traceStartup('[startup:worker]', 'catalog worker module evaluated')
 
 type WorkerRequest = {
   id: number
   type: string
-  storageMode?: WebCatalogStorageMode
   payload?: unknown
 }
 
 type InitResult = {
-  storageMode: 'opfs' | 'indexeddb'
-  sqliteVersion: string
+  storageMode: 'file'
   filename: string
 }
-
-type SqliteDb = {
-  filename: string
-  exec: (sqlOrOptions: unknown, options?: unknown) => unknown
-  prepare: (sql: string) => {
-    bind: (values: unknown[] | Record<string, unknown>) => {
-      stepReset: (clearBindings?: boolean) => void
-    }
-    finalize: () => void
-  }
-  selectObjects: (
-    sql: string,
-    bind?: unknown[],
-  ) => Record<string, unknown>[]
-  selectValue: (sql: string, bind?: unknown[]) => unknown
-}
-
-type SqliteSelectPlanRow = {
-  id?: unknown
-  parent?: unknown
-  detail?: unknown
-}
-
-type MediaSearchRows = {
-  items: MediaItem[]
-  sqlPlan?: SqlExplainPlan
-}
-
-type MediaSearchRowsFn = (
-  query: CatalogQuery,
-  options?: { explainSql?: boolean },
-) => Promise<MediaSearchRows>
-
-type SqliteModule = Awaited<ReturnType<typeof sqlite3InitModule>>
-type SqliteStorageMode = 'opfs'
-
-type IdbAsset = {
-  contentHash: string
-  kind: MediaItem['kind']
-  mimeType: string
-  sizeBytes: number
-  durationMs?: number
-  timestamp?: number
-  latitude?: number
-  longitude?: number
-  thumbnailKey?: string
-}
-
-type IdbLocation = MediaLocation & {
-  contentHash: string
-}
-
-type IdbMetadata = {
-  key: string
-  value: string
-}
-
-type IdbIndexCache = {
-  id: string
-  manifest?:
-    | SegmentedBallTreeManifest
-    | DiskSegmentedTreeManifest
-  data?: ArrayBuffer
-}
-
-type SqliteUpsertChunkTiming = {
-  offset: number
-  rows: number
-  columnCount: number
-  bindValues: number
-  sqlChars: number
-  placeholderMs: number
-  sqlBuildMs: number
-  bindFlattenMs: number
-  execMs: number
-}
-
-type SqliteUpsertTiming = {
-  label: string
-  rows: number
-  columnCount: number
-  chunks: number
-  bindValues: number
-  sqlChars: number
-  placeholderMs: number
-  sqlBuildMs: number
-  bindFlattenMs: number
-  execMs: number
-  totalMs: number
-  chunkTimings: SqliteUpsertChunkTiming[]
-}
-
-type SqliteMediaWriteTiming = {
-  items: number
-  locations: number
-  totalMs: number
-  assetRowsMs: number
-  locationRowsMs: number
-  asset: SqliteUpsertTiming
-  location: SqliteUpsertTiming
-  accountedMs: number
-  unaccountedMs: number
-}
-
-type MediaBatchWriteTiming = {
-  storageMode: WebCatalogStorageMode
-  items: number
-  transactionActive: boolean
-  totalMs: number
-  ensureDbMs: number
-  requireDbMs: number
-  writeMs: number
-  accountedMs: number
-  unaccountedMs: number
-  sqlite?: SqliteMediaWriteTiming
-}
-
-type MediaBatchWriteResult = {
-  written: number
-  timing: MediaBatchWriteTiming
-}
-
-type CatalogStore = {
-  storageMode: WebCatalogStorageMode
-  geoImportWriteBatchSize: number
-  init(): Promise<InitResult>
-  upsertSource(source: MediaSource): Promise<void>
-  upsertMedia(items: MediaItem[]): Promise<number>
-  prepareImportSource(
-    source: MediaSource,
-    duplicateSourceIds: string[],
-  ): Promise<void>
-  writeMediaBatch(
-    items: MediaItem[],
-    options?: { transactionActive?: boolean },
-  ): Promise<MediaBatchWriteResult>
-  commitImport(): Promise<void>
-  withImportTransaction<T>(
-    run: () => Promise<T>,
-  ): Promise<T>
-  listMedia(query: CatalogQuery): Promise<MediaItem[]>
-  searchMedia(spec: SearchSpec): Promise<SearchPage>
-  getMediaByIds(ids: string[]): Promise<MediaItem[]>
-  getGeoPoints(range: TimeRange): Promise<GeoIndexPoint[]>
-  forEachGeoPointBatch(
-    batchSize: number,
-    onBatch: (batch: GeoIndexPoint[], processedPoints: number) => Promise<void>,
-  ): Promise<number>
-  diskSegmentedTreeStore(): DiskSegmentedTreeStore
-  catalogEpoch(): Promise<number>
-  loadPersistedSegmentedBallTreeIndex(
-    catalogEpoch: number,
-  ): Promise<{ pointCount: number; segmentCount: number } | undefined>
-  savePersistedSegmentedBallTreeIndex(catalogEpoch: number): Promise<void>
-  buildSearchIndexes(
-    indexId: string,
-    forceRebuild: boolean,
-    postProgress: (progress: GeoIndexBuildProgress) => void,
-  ): Promise<GeoIndexBuildSummary & { engineCount: number }>
-  getSearchIndexStats(): Promise<SearchIndexStats[]>
-  countMedia(): Promise<number>
-  clear(): Promise<void>
-}
-
-let db: SqliteDb | undefined
-let initResult: InitResult | undefined
-let sqliteMode: SqliteStorageMode | undefined
-let indexedDb: IDBDatabase | undefined
-let indexedDbInitResult: InitResult | undefined
-const geoIndexRegistry = new GeoIndexRegistry()
-let preparedSearchIndex:
-  | {
-      storageMode: WebCatalogStorageMode
-      indexId: string
-      catalogEpoch: number
-      cacheDirty: boolean
-    }
-  | undefined
-const diskSegmentedIndexInstances = new Map<string, DiskSegmentedTreeIndex>()
-
-const IMPORT_BATCH_SIZE = 1000
-const SQLITE_BIND_CHUNK_LIMIT = 12000
-const ASSET_BIND_COLUMNS = 9
-const LOCATION_BIND_COLUMNS = 7
-const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
-const GEO_IMPORT_PARSE_SLICE_MS = 250
-const PROGRESS_HEARTBEAT_MS = 1000
-const GEO_POINT_ITEM_BUILD_CHUNK_SIZE = 250
-const GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE = 250
-const GEO_IMPORT_INDEXEDDB_WRITE_BATCH_SIZE = 2000
-const INDEXED_DB_NAME = 'zeitfaden-catalog-indexeddb-persisted-index-v1'
-const INDEXED_DB_VERSION = 1
-const CATALOG_EPOCH_KEY = 'catalogEpoch'
-const SEGMENTED_BALL_TREE_CACHE_KEY = 'segmented-ball-tree:v1'
-
-const ctx = self as unknown as {
-  postMessage: (message: unknown) => void
-  addEventListener: (
-    type: 'message',
-    listener: (event: MessageEvent<WorkerRequest>) => void,
-  ) => void
-}
-const cancelledRequests = new Set<number>()
-let importCommitRequested = false
-
-type CancellationSignal = () => boolean
 
 type ImportFolderPayload = {
   source: MediaSource
@@ -286,16 +64,154 @@ type ImportGeoFilePayload = {
   file: File
 }
 
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('')
+type CancellationSignal = () => boolean
+
+type CatalogManifest = {
+  schemaVersion: 1
+  catalogVersion: number
+  nextAssetId: number
+  assetStoreVersion: number
+  indexAppliedVersion: number
+  indexJob?: FileCatalogIndexJob
+  nextChunkId: number
+  occurrenceCount: number
+  assetCount: number
+  locationCount: number
+  materializedVersion: number
+  sources: Record<string, FileCatalogSource>
+  chunks: FileCatalogChunk[]
 }
 
-async function stableId(...parts: string[]): Promise<string> {
-  const encoded = new TextEncoder().encode(parts.join('\n'))
-  const digest = await crypto.subtle.digest('SHA-256', encoded)
-  return bytesToHex(new Uint8Array(digest))
+type FileCatalogIndexJob = {
+  status: 'pending' | 'indexing' | 'current' | 'failed'
+  pendingSince?: number
+  startedAt?: number
+  finishedAt?: number
+  failedMessage?: string
+}
+
+type FileCatalogSource = MediaSource & {
+  generation: number
+  active: boolean
+  importedAt: number
+}
+
+type FileCatalogChunk = {
+  id: string
+  sourceId: string
+  generation: number
+  count: number
+  createdAt: number
+  active: boolean
+}
+
+type FileOccurrence = {
+  item: MediaItem
+  sourceId: string
+  generation: number
+}
+
+type MaterializedCatalog = {
+  version: number
+  assets: MediaItem[]
+  byId: Map<string, MediaItem>
+  geoPoints: GeoIndexPoint[]
+}
+
+type MediaSearchRows = {
+  items: MediaItem[]
+  metrics?: Partial<SearchIndexStats>
+}
+
+type MediaSearchRowsFn = (
+  query: CatalogQuery,
+  indexId: FileCatalogIndexId,
+) => Promise<MediaSearchRows>
+type EnsureSearchIndexReadyFn = (indexId: string) => Promise<SearchIndexStats>
+
+type MediaBatchWriteResult = {
+  written: number
+}
+
+type CatalogStore = {
+  storageMode: 'file'
+  geoImportWriteBatchSize: number
+  init(): Promise<InitResult>
+  upsertSource(source: MediaSource): Promise<void>
+  upsertMedia(items: MediaItem[]): Promise<number>
+  prepareImportSource(source: MediaSource, duplicateSourceIds: string[]): Promise<void>
+  writeMediaBatch(items: MediaItem[]): Promise<MediaBatchWriteResult>
+  commitImport(): Promise<void>
+  withImportTransaction<T>(run: () => Promise<T>): Promise<T>
+  listMedia(query: CatalogQuery): Promise<MediaItem[]>
+  searchMedia(spec: SearchSpec): Promise<SearchPage>
+  getMediaByIds(ids: string[]): Promise<MediaItem[]>
+  getGeoPoints(range: TimeRange): Promise<GeoIndexPoint[]>
+  forEachGeoPointBatch(
+    batchSize: number,
+    onBatch: (batch: GeoIndexPoint[], processedPoints: number) => Promise<void>,
+  ): Promise<number>
+  diskSegmentedTreeStore(): DiskSegmentedTreeStore
+  catalogEpoch(): Promise<number>
+  buildSearchIndexes(
+    indexId: string,
+    forceRebuild: boolean,
+    postProgress: (progress: GeoIndexBuildProgress) => void,
+  ): Promise<GeoIndexBuildSummary & { engineCount: number }>
+  getSearchIndexStats(): Promise<SearchIndexStats[]>
+  countMedia(): Promise<number>
+  clear(): Promise<void>
+}
+
+const IMPORT_BATCH_SIZE = 40
+const GEO_IMPORT_PREFIX_BYTES = 512 * 1024
+const GEO_IMPORT_PARSE_SLICE_MS = 250
+const GEO_IMPORT_WRITE_BATCH_SIZE = 10_000
+const GEO_POINT_ITEM_BUILD_CHUNK_SIZE = 10_000
+const PROGRESS_HEARTBEAT_MS = 200
+const CATALOG_DIR = 'catalog-file-v1'
+const MANIFEST_FILE = 'manifest.json'
+const ASSETS_FILE = 'assets.bin'
+const ASSET_RECORD_INDEX_FILE = 'records.idx'
+const ASSET_ID_MAP_FILE = 'ids.idx'
+const ASSET_CHUNK_PREFIX = 'chunk-'
+const ASSET_CHUNK_EXTENSION = '.jsonl'
+const ASSET_BINARY_CHUNK_EXTENSION = '.bin'
+const ASSET_CHUNK_SIZE = 10_000
+const TIME_GEO_INDEX_FILE = 'time-geo.idx'
+const CELL_TIME_INDEX_FILE = 'cell-time.idx'
+const ASSET_TABLE_MAGIC = 0x41535431
+const ASSET_ID_MAP_MAGIC = 0x41494431
+const PACKED_INDEX_MAGIC = 0x50495831
+const BINARY_SCHEMA_VERSION = 1
+const ASSET_TABLE_HEADER_SIZE = 32
+const ASSET_RECORD_INDEX_ENTRY_SIZE = 16
+const ASSET_ID_MAP_HEADER_SIZE = 32
+const ASSET_ID_MAP_ENTRY_SIZE = 72
+const PACKED_INDEX_HEADER_SIZE = 96
+const TIME_GEO_RECORD_SIZE = 20
+const CELL_TIME_RECORD_SIZE = 28
+const PACKED_SCAN_RECORDS = 8192
+const INDEX_KIND_TIME_GEO = 1
+const INDEX_KIND_CELL_TIME = 2
+const CELL_SIZE_E7 = 1000
+const LAT_OFFSET_E7 = 900_000_000
+const LON_OFFSET_E7 = 1_800_000_000
+const LAT_CELL_COUNT = Math.ceil((180 * 10_000_000) / CELL_SIZE_E7)
+const LON_CELL_COUNT = Math.ceil((360 * 10_000_000) / CELL_SIZE_E7)
+const KIND_FLAG_IMAGE = 0
+const KIND_FLAG_VIDEO = 1
+const KIND_FLAG_GEO_POINT = 2
+const KIND_FLAG_HAS_GEO = 1 << 2
+const textEncoder = new TextEncoder()
+const textDecoder = new TextDecoder()
+
+const geoIndexRegistry = new GeoIndexRegistry()
+const diskSegmentedIndexInstances = new Map<string, DiskSegmentedTreeIndex>()
+const cancelledRequests = new Set<number>()
+
+async function yieldToEventLoop(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0))
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -303,332 +219,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function numeric(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
-}
-
-function dateMillis(value: unknown): number | undefined {
-  if (value instanceof Date) return value.getTime()
   if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'string') {
-    const parsed = Date.parse(value)
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
     return Number.isFinite(parsed) ? parsed : undefined
   }
   return undefined
 }
 
-function yieldToEventLoop(): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, 0)
-  })
-}
-
-async function openSqliteDb(sqlite3: SqliteModule): Promise<SqliteDb> {
-  const opfsVfs = sqlite3.capi.sqlite3_vfs_find('opfs')
-  const opfsDb = sqlite3.oo1.OpfsDb
-
-  if (!opfsVfs || !opfsDb) {
-    throw new Error(
-      'SQLite OPFS storage is unavailable. Use a modern browser served with Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp.',
-    )
+function dateMillis(value: unknown): number | undefined {
+  if (value instanceof Date) {
+    const time = value.getTime()
+    return Number.isFinite(time) ? time : undefined
   }
-
-  return new opfsDb('/catalog-v10.sqlite3') as unknown as SqliteDb
-}
-
-async function ensureDb(
-  mode: SqliteStorageMode = sqliteMode ?? 'opfs',
-): Promise<InitResult> {
-  if (db && initResult && sqliteMode === mode) return initResult
-
-  const sqlite3 = await sqlite3InitModule()
-  db = await openSqliteDb(sqlite3)
-  sqliteMode = mode
-  const activeDb = db
-
-  activeDb.exec(`
-    CREATE TABLE IF NOT EXISTS media_assets (
-      content_hash TEXT PRIMARY KEY,
-      kind TEXT NOT NULL,
-      mime_type TEXT NOT NULL,
-      size_bytes INTEGER NOT NULL,
-      duration_ms INTEGER,
-      timestamp INTEGER,
-      latitude REAL,
-      longitude REAL,
-      thumbnail_key TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS media_locations (
-      id TEXT PRIMARY KEY,
-      content_hash TEXT NOT NULL,
-      source_id TEXT NOT NULL,
-      source_label TEXT NOT NULL,
-      root_path TEXT,
-      relative_path TEXT,
-      point_index INTEGER
-    );
-
-    CREATE TABLE IF NOT EXISTS catalog_metadata (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_media_locations_content_hash
-      ON media_locations(content_hash);
-
-    CREATE INDEX IF NOT EXISTS idx_assets_timestamp_hash
-      ON media_assets(timestamp, content_hash);
-
-    CREATE INDEX IF NOT EXISTS idx_assets_kind_timestamp_hash
-      ON media_assets(kind, timestamp, content_hash);
-
-    CREATE INDEX IF NOT EXISTS idx_assets_lat_lon_timestamp_hash
-      ON media_assets(latitude, longitude, timestamp, content_hash);
-
-  `)
-
-  initResult = {
-    storageMode: mode,
-    sqliteVersion: sqlite3.version.libVersion,
-    filename: activeDb.filename,
+  if (typeof value === 'string' || typeof value === 'number') {
+    const parsed = Date.parse(String(value))
+    return Number.isFinite(parsed) ? parsed : undefined
   }
-
-  return initResult
-}
-
-function requireDb(): SqliteDb {
-  if (!db) throw new Error('Catalog database is not initialized')
-  return db
-}
-
-function toNumber(value: unknown): number | undefined {
-  if (typeof value === 'number') return value
-  if (typeof value === 'bigint') return Number(value)
   return undefined
 }
 
-function toString(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined
-}
-
-function idbRequest<T>(request: IDBRequest<T>): Promise<T> {
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result)
-    request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'))
-  })
-}
-
-function idbTransactionDone(transaction: IDBTransaction): Promise<void> {
-  return new Promise((resolve, reject) => {
-    transaction.oncomplete = () => resolve()
-    transaction.onerror = () =>
-      reject(transaction.error ?? new Error('IndexedDB transaction failed'))
-    transaction.onabort = () =>
-      reject(transaction.error ?? new Error('IndexedDB transaction aborted'))
-  })
-}
-
-function iterateIdbCursor(
-  request: IDBRequest<IDBCursorWithValue | null>,
-  visit: (cursor: IDBCursorWithValue) => boolean | void,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    request.onerror = () => reject(request.error ?? new Error('IndexedDB cursor failed'))
-    request.onsuccess = () => {
-      const cursor = request.result
-      if (!cursor) {
-        resolve()
-        return
-      }
-
-      try {
-        if (visit(cursor) === false) {
-          resolve()
-          return
-        }
-        cursor.continue()
-      } catch (error) {
-        reject(error)
-      }
-    }
-  })
-}
-
-function iterateIdbCursorAsync(
-  request: IDBRequest<IDBCursorWithValue | null>,
-  visit: (cursor: IDBCursorWithValue) => Promise<boolean | void>,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    request.onerror = () =>
-      reject(request.error ?? new Error('IndexedDB cursor failed'))
-    request.onsuccess = () => {
-      const cursor = request.result
-      if (!cursor) {
-        resolve()
-        return
-      }
-
-      void visit(cursor)
-        .then((shouldContinue) => {
-          if (shouldContinue === false) {
-            resolve()
-            return
-          }
-          cursor.continue()
-        })
-        .catch(reject)
-    }
-  })
-}
-
-async function ensureIndexedDb(): Promise<InitResult> {
-  if (indexedDb && indexedDbInitResult) return indexedDbInitResult
-  if (typeof indexedDB === 'undefined') {
-    throw new Error('IndexedDB is unavailable in this browser.')
-  }
-
-  indexedDb = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(INDEXED_DB_NAME, INDEXED_DB_VERSION)
-
-    request.onupgradeneeded = () => {
-      const database = request.result
-
-      if (!database.objectStoreNames.contains('assets')) {
-        database.createObjectStore('assets', {
-          keyPath: 'contentHash',
-        })
-      }
-
-      if (!database.objectStoreNames.contains('locations')) {
-        const locations = database.createObjectStore('locations', {
-          keyPath: 'id',
-        })
-        locations.createIndex('contentHash', 'contentHash')
-      }
-
-      if (!database.objectStoreNames.contains('metadata')) {
-        database.createObjectStore('metadata', {
-          keyPath: 'key',
-        })
-      }
-
-      if (!database.objectStoreNames.contains('indexCache')) {
-        database.createObjectStore('indexCache', {
-          keyPath: 'id',
-        })
-      }
-    }
-
-    request.onsuccess = () => resolve(request.result)
-    request.onerror = () =>
-      reject(request.error ?? new Error('IndexedDB catalog failed to open'))
-    request.onblocked = () =>
-      reject(new Error('IndexedDB catalog upgrade is blocked by another tab.'))
-  })
-
-  indexedDb.onversionchange = () => {
-    indexedDb?.close()
-    indexedDb = undefined
-    indexedDbInitResult = undefined
-  }
-
-  indexedDbInitResult = {
-    storageMode: 'indexeddb',
-    sqliteVersion: 'IndexedDB',
-    filename: INDEXED_DB_NAME,
-  }
-
-  return indexedDbInitResult
-}
-
-async function requireIndexedDb(): Promise<IDBDatabase> {
-  await ensureIndexedDb()
-  if (!indexedDb) throw new Error('IndexedDB catalog is not initialized')
-  return indexedDb
-}
-
-function sqliteCatalogEpochFromDb(activeDb: SqliteDb): number {
-  const value = activeDb.selectValue(
-    'SELECT value FROM catalog_metadata WHERE key = ?',
-    [CATALOG_EPOCH_KEY],
-  )
-  return Number(value ?? 0) || 0
-}
-
-async function sqliteCatalogEpoch(): Promise<number> {
-  await ensureDb()
-  return sqliteCatalogEpochFromDb(requireDb())
-}
-
-function bumpSqliteCatalogEpochInDb(activeDb: SqliteDb): number {
-  const nextEpoch = sqliteCatalogEpochFromDb(activeDb) + 1
-  activeDb.exec({
-    sql: `
-      INSERT INTO catalog_metadata (key, value)
-      VALUES (?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `,
-    bind: [CATALOG_EPOCH_KEY, String(nextEpoch)],
-  })
-  return nextEpoch
-}
-
-async function idbCatalogEpoch(): Promise<number> {
-  const database = await requireIndexedDb()
-  const transaction = database.transaction('metadata', 'readonly')
-  const done = idbTransactionDone(transaction)
-  const row = await idbRequest<IdbMetadata | undefined>(
-    transaction.objectStore('metadata').get(CATALOG_EPOCH_KEY),
-  )
-  await done
-  return Number(row?.value ?? 0) || 0
-}
-
-async function idbBumpCatalogEpoch(): Promise<number> {
-  const database = await requireIndexedDb()
-  const current = await idbCatalogEpoch()
-  const nextEpoch = current + 1
-  const transaction = database.transaction('metadata', 'readwrite')
-  const done = idbTransactionDone(transaction)
-  transaction.objectStore('metadata').put({
-    key: CATALOG_EPOCH_KEY,
-    value: String(nextEpoch),
-  } satisfies IdbMetadata)
-  await done
-  return nextEpoch
-}
-
-async function segmentedBallTreeOpfsDirectory(): Promise<FileSystemDirectoryHandle> {
+async function rootDirectory(): Promise<FileSystemDirectoryHandle> {
   const root = await navigator.storage.getDirectory()
-  const indexes = await root.getDirectoryHandle('indexes', { create: true })
-  const engine = await indexes.getDirectoryHandle('segmented-ball-tree', {
-    create: true,
-  })
-  return engine.getDirectoryHandle('v1', { create: true })
+  return root.getDirectoryHandle(CATALOG_DIR, { create: true })
 }
 
-async function diskSegmentedTreeOpfsDirectory(
-  engineId: DiskSegmentedEngineId,
+async function childDirectory(
+  parent: FileSystemDirectoryHandle,
+  name: string,
 ): Promise<FileSystemDirectoryHandle> {
-  const root = await navigator.storage.getDirectory()
-  const indexes = await root.getDirectoryHandle('indexes', { create: true })
-  const engine = await indexes.getDirectoryHandle(engineId, { create: true })
-  return engine.getDirectoryHandle('v2', { create: true })
+  return parent.getDirectoryHandle(name, { create: true })
 }
 
-async function clearOpfsDirectory(
-  directory: FileSystemDirectoryHandle,
-): Promise<void> {
-  const iterableDirectory = directory as FileSystemDirectoryHandle & {
-    entries?: () => AsyncIterable<[string, FileSystemHandle]>
-  }
-  if (!iterableDirectory.entries) return
-  for await (const [name] of iterableDirectory.entries()) {
-    await directory.removeEntry(name, { recursive: true })
-  }
-}
-
-async function readOpfsFile(
+async function readFile(
   directory: FileSystemDirectoryHandle,
   name: string,
 ): Promise<File | undefined> {
@@ -639,664 +262,356 @@ async function readOpfsFile(
   }
 }
 
-async function writeOpfsFile(
+async function readTextFile(
+  directory: FileSystemDirectoryHandle,
+  name: string,
+): Promise<string | undefined> {
+  return (await readFile(directory, name))?.text()
+}
+
+async function writeFile(
   directory: FileSystemDirectoryHandle,
   name: string,
   data: BlobPart,
 ): Promise<void> {
   const handle = await directory.getFileHandle(name, { create: true })
-  if (!handle.createWritable) {
-    throw new Error('OPFS writable files are unavailable.')
-  }
-  const writable = await handle.createWritable()
+  const writable = await handle.createWritable?.()
+  if (!writable) throw new Error('File catalog writes are unavailable.')
   await writable.write(data)
   await writable.close()
 }
 
-function createOpfsDiskSegmentedTreeStore(): DiskSegmentedTreeStore {
-  return {
-    async readManifest(engineId) {
-      const directory = await diskSegmentedTreeOpfsDirectory(engineId)
-      const file = await readOpfsFile(directory, 'manifest.json')
-      if (!file) return undefined
-      return JSON.parse(await file.text()) as DiskSegmentedTreeManifest
-    },
-    async writeManifest(engineId, manifest) {
-      const directory = await diskSegmentedTreeOpfsDirectory(engineId)
-      await writeOpfsFile(directory, 'manifest.json', JSON.stringify(manifest))
-    },
-    async readSegment(engineId, segmentId) {
-      const directory = await diskSegmentedTreeOpfsDirectory(engineId)
-      const file = await readOpfsFile(directory, `${segmentId}.bin`)
-      return file?.arrayBuffer()
-    },
-    async writeSegment(engineId, segmentId, data) {
-      const directory = await diskSegmentedTreeOpfsDirectory(engineId)
-      await writeOpfsFile(directory, `${segmentId}.bin`, data)
-    },
-    async clear(engineId) {
-      const directory = await diskSegmentedTreeOpfsDirectory(engineId)
-      await clearOpfsDirectory(directory)
-    },
-  }
-}
-
-function idbDiskSegmentedManifestKey(engineId: DiskSegmentedEngineId): string {
-  return `${engineId}:v2:manifest`
-}
-
-function idbDiskSegmentedSegmentKey(
-  engineId: DiskSegmentedEngineId,
-  segmentId: string,
-): string {
-  return `${engineId}:v2:segment:${segmentId}`
-}
-
-function createIdbDiskSegmentedTreeStore(): DiskSegmentedTreeStore {
-  return {
-    async readManifest(engineId) {
-      const database = await requireIndexedDb()
-      const transaction = database.transaction('indexCache', 'readonly')
-      const done = idbTransactionDone(transaction)
-      const row = await idbRequest<IdbIndexCache | undefined>(
-        transaction
-          .objectStore('indexCache')
-          .get(idbDiskSegmentedManifestKey(engineId)),
-      )
-      await done
-      return row?.manifest as DiskSegmentedTreeManifest | undefined
-    },
-    async writeManifest(engineId, manifest) {
-      const database = await requireIndexedDb()
-      const transaction = database.transaction('indexCache', 'readwrite')
-      const done = idbTransactionDone(transaction)
-      transaction.objectStore('indexCache').put({
-        id: idbDiskSegmentedManifestKey(engineId),
-        manifest,
-      } satisfies IdbIndexCache)
-      await done
-    },
-    async readSegment(engineId, segmentId) {
-      const database = await requireIndexedDb()
-      const transaction = database.transaction('indexCache', 'readonly')
-      const done = idbTransactionDone(transaction)
-      const row = await idbRequest<IdbIndexCache | undefined>(
-        transaction
-          .objectStore('indexCache')
-          .get(idbDiskSegmentedSegmentKey(engineId, segmentId)),
-      )
-      await done
-      return row?.data
-    },
-    async writeSegment(engineId, segmentId, data) {
-      const database = await requireIndexedDb()
-      const transaction = database.transaction('indexCache', 'readwrite')
-      const done = idbTransactionDone(transaction)
-      transaction.objectStore('indexCache').put({
-        id: idbDiskSegmentedSegmentKey(engineId, segmentId),
-        data,
-      } satisfies IdbIndexCache)
-      await done
-    },
-    async clear(engineId) {
-      const database = await requireIndexedDb()
-      const transaction = database.transaction('indexCache', 'readwrite')
-      const done = idbTransactionDone(transaction)
-      const store = transaction.objectStore('indexCache')
-      const prefix = `${engineId}:v2:`
-      await iterateIdbCursor(store.openCursor(), (cursor) => {
-        if (typeof cursor.key === 'string' && cursor.key.startsWith(prefix)) {
-          cursor.delete()
-        }
-      })
-      await done
-    },
-  }
-}
-
-function segmentedBallTreeIndex(): SegmentedBallTreeGeoIndex {
-  const index = geoIndexRegistry.get('segmented-ball-tree')
-  if (!(index instanceof SegmentedBallTreeGeoIndex)) {
-    throw new Error('Segmented ball-tree index is not available.')
-  }
-  return index
-}
-
-function isDiskSegmentedEngineId(
-  indexId: string,
-): indexId is DiskSegmentedEngineId {
-  return indexId === 'segmented-ball-tree'
-}
-
-function diskSegmentedRuntimeKey(
-  storageMode: WebCatalogStorageMode,
-  indexId: DiskSegmentedEngineId,
-): string {
-  return `${storageMode}:${indexId}`
-}
-
-function diskSegmentedIndex(
-  store: CatalogStore,
-  indexId: DiskSegmentedEngineId,
-): DiskSegmentedTreeIndex {
-  const key = diskSegmentedRuntimeKey(store.storageMode, indexId)
-  const existing = diskSegmentedIndexInstances.get(key)
-  if (existing) return existing
-  const index = new DiskSegmentedTreeIndex(indexId, store.diskSegmentedTreeStore())
-  diskSegmentedIndexInstances.set(key, index)
-  return index
-}
-
-function activeDiskSegmentedIndex(
-  store: CatalogStore,
-  indexId: string,
-): DiskSegmentedTreeIndex | undefined {
-  if (!isDiskSegmentedEngineId(indexId)) return undefined
-  return diskSegmentedIndexInstances.get(
-    diskSegmentedRuntimeKey(store.storageMode, indexId),
-  )
-}
-
-function invalidatePreparedSearchIndex(): void {
-  preparedSearchIndex = undefined
-}
-
-async function clearDiskSegmentedIndexCaches(store: CatalogStore): Promise<void> {
-  const diskStore = store.diskSegmentedTreeStore()
-  await diskStore.clear('segmented-ball-tree')
-  diskSegmentedIndexInstances.delete(
-    diskSegmentedRuntimeKey(store.storageMode, 'segmented-ball-tree'),
-  )
-  if (
-    preparedSearchIndex?.storageMode === store.storageMode &&
-    isDiskSegmentedEngineId(preparedSearchIndex.indexId)
-  ) {
-    preparedSearchIndex = undefined
-  }
-}
-
-async function restoreSegmentedBallTreeIndexFromData(
-  manifest: SegmentedBallTreeManifest,
-  data: ArrayBuffer,
-  catalogEpoch: number,
-): Promise<{ pointCount: number; segmentCount: number }> {
-  validateSegmentedBallTreeManifest(manifest, catalogEpoch)
-  const checksum = await sha256Hex(data)
-  if (checksum !== manifest.dataChecksum) {
-    throw new Error('Segmented ball-tree index checksum does not match manifest.')
-  }
-  const snapshot = decodeSegmentedBallTreeSnapshot(data)
-  if (
-    snapshot.pointCount !== manifest.pointCount ||
-    snapshot.segmentCount !== manifest.segmentCount
-  ) {
-    throw new Error('Segmented ball-tree index manifest count mismatch.')
-  }
-  segmentedBallTreeIndex().restore(snapshot)
-  return {
-    pointCount: snapshot.pointCount,
-    segmentCount: snapshot.segmentCount,
-  }
-}
-
-async function loadOpfsSegmentedBallTreeIndex(
-  catalogEpoch: number,
-): Promise<{ pointCount: number; segmentCount: number } | undefined> {
-  try {
-    const directory = await segmentedBallTreeOpfsDirectory()
-    const [manifestFile, dataFile] = await Promise.all([
-      readOpfsFile(directory, 'manifest.json'),
-      readOpfsFile(directory, 'index.bin'),
-    ])
-    if (!manifestFile || !dataFile) return undefined
-
-    return await restoreSegmentedBallTreeIndexFromData(
-      JSON.parse(await manifestFile.text()) as SegmentedBallTreeManifest,
-      await dataFile.arrayBuffer(),
-      catalogEpoch,
-    )
-  } catch {
-    return undefined
-  }
-}
-
-async function saveOpfsSegmentedBallTreeIndex(
-  catalogEpoch: number,
+async function writeFileParts(
+  directory: FileSystemDirectoryHandle,
+  name: string,
+  parts: Iterable<BlobPart>,
 ): Promise<void> {
-  const snapshot = segmentedBallTreeIndex().snapshot()
-  const data = encodeSegmentedBallTreeSnapshot(snapshot)
-  const manifest = createSegmentedBallTreeManifest(
-    snapshot,
-    catalogEpoch,
-    await sha256Hex(data),
-  )
-  const directory = await segmentedBallTreeOpfsDirectory()
-  await writeOpfsFile(directory, 'index.bin', data)
-  await writeOpfsFile(
-    directory,
-    'manifest.json',
-    JSON.stringify(manifest),
-  )
-}
-
-async function loadIdbSegmentedBallTreeIndex(
-  catalogEpoch: number,
-): Promise<{ pointCount: number; segmentCount: number } | undefined> {
+  const handle = await directory.getFileHandle(name, { create: true })
+  const writable = await handle.createWritable?.()
+  if (!writable) throw new Error('File catalog writes are unavailable.')
   try {
-    const database = await requireIndexedDb()
-    const transaction = database.transaction('indexCache', 'readonly')
-    const done = idbTransactionDone(transaction)
-    const row = await idbRequest<IdbIndexCache | undefined>(
-      transaction.objectStore('indexCache').get(SEGMENTED_BALL_TREE_CACHE_KEY),
-    )
-    await done
-    if (!row?.manifest || !row.data) return undefined
-    return await restoreSegmentedBallTreeIndexFromData(
-      row.manifest as SegmentedBallTreeManifest,
-      row.data,
-      catalogEpoch,
-    )
-  } catch {
-    return undefined
+    for (const part of parts) await writable.write(part)
+  } finally {
+    await writable.close()
   }
 }
 
-async function saveIdbSegmentedBallTreeIndex(catalogEpoch: number): Promise<void> {
-  const snapshot = segmentedBallTreeIndex().snapshot()
-  const data = encodeSegmentedBallTreeSnapshot(snapshot)
-  const manifest = createSegmentedBallTreeManifest(
-    snapshot,
-    catalogEpoch,
-    await sha256Hex(data),
-  )
-  const database = await requireIndexedDb()
-  const transaction = database.transaction('indexCache', 'readwrite')
-  const done = idbTransactionDone(transaction)
-  transaction.objectStore('indexCache').put({
-    id: SEGMENTED_BALL_TREE_CACHE_KEY,
-    manifest,
-    data,
-  } satisfies IdbIndexCache)
-  await done
+async function clearDirectory(directory: FileSystemDirectoryHandle): Promise<void> {
+  const iterable = directory as FileSystemDirectoryHandle & {
+    entries?: () => AsyncIterable<[string, FileSystemHandle]>
+  }
+  if (!iterable.entries) return
+  for await (const [name] of iterable.entries()) {
+    await directory.removeEntry(name, { recursive: true })
+  }
 }
 
-function idbAssetFromItem(item: MediaItem): IdbAsset {
+async function directoryEntries(
+  directory: FileSystemDirectoryHandle,
+): Promise<[string, FileSystemHandle][]> {
+  const iterable = directory as FileSystemDirectoryHandle & {
+    entries?: () => AsyncIterable<[string, FileSystemHandle]>
+  }
+  if (!iterable.entries) return []
+  const entries: [string, FileSystemHandle][] = []
+  for await (const entry of iterable.entries()) entries.push(entry)
+  return entries
+}
+
+async function readFileRange(file: File, offset: number, length: number): Promise<ArrayBuffer> {
+  return file.slice(offset, offset + length).arrayBuffer()
+}
+
+function setUint64(view: DataView, offset: number, value: number): void {
+  view.setBigUint64(offset, BigInt(value), true)
+}
+
+function getUint64(view: DataView, offset: number): number {
+  return Number(view.getBigUint64(offset, true))
+}
+
+function encodeHeader(
+  magic: number,
+  catalogVersion: number,
+  count: number,
+  entrySize: number,
+): Uint8Array {
+  const bytes = new Uint8Array(ASSET_TABLE_HEADER_SIZE)
+  const view = new DataView(bytes.buffer)
+  view.setUint32(0, magic, true)
+  view.setUint32(4, BINARY_SCHEMA_VERSION, true)
+  view.setFloat64(8, catalogVersion, true)
+  view.setFloat64(16, count, true)
+  view.setUint32(24, entrySize, true)
+  return bytes
+}
+
+function bytesAsBlobPart(bytes: Uint8Array): BlobPart {
+  return bytes as unknown as BlobPart
+}
+
+function readBinaryHeader(
+  bytes: ArrayBuffer,
+  expectedMagic: number,
+): { catalogVersion: number; count: number; entrySize: number } | undefined {
+  if (bytes.byteLength < ASSET_TABLE_HEADER_SIZE) return undefined
+  const view = new DataView(bytes)
+  if (view.getUint32(0, true) !== expectedMagic) return undefined
+  if (view.getUint32(4, true) !== BINARY_SCHEMA_VERSION) return undefined
   return {
-    contentHash: item.contentHash,
-    kind: item.kind,
-    mimeType: item.mimeType,
-    sizeBytes: item.sizeBytes,
-    durationMs: item.durationMs,
-    timestamp: item.timestamp,
-    latitude: item.latitude,
-    longitude: item.longitude,
-    thumbnailKey: item.thumbnailKey,
+    catalogVersion: view.getFloat64(8, true),
+    count: view.getFloat64(16, true),
+    entrySize: view.getUint32(24, true),
   }
 }
 
-function mediaFromIdbAsset(
-  asset: IdbAsset,
-  locations: MediaLocation[],
-): MediaItem {
-  const row = {
-    content_hash: asset.contentHash,
-    kind: asset.kind,
-    mime_type: asset.mimeType,
-    size_bytes: asset.sizeBytes,
-    duration_ms: asset.durationMs,
-    timestamp: asset.timestamp,
-    latitude: asset.latitude,
-    longitude: asset.longitude,
-    thumbnail_key: asset.thumbnailKey,
+function encodeHashKey(hash: string): Uint8Array {
+  const bytes = new Uint8Array(64)
+  const encoded = textEncoder.encode(hash.toLowerCase())
+  bytes.set(encoded.slice(0, bytes.length))
+  return bytes
+}
+
+function compareHashBytes(left: Uint8Array, right: Uint8Array): number {
+  for (let index = 0; index < left.length; index += 1) {
+    const delta = left[index] - right[index]
+    if (delta !== 0) return delta
   }
-  return mediaFromAssetRow(row, locations)
+  return 0
 }
 
-function mediaLocationFromIdbLocation(location: IdbLocation): MediaLocation {
-  return {
-    id: location.id,
-    sourceId: location.sourceId,
-    sourceLabel: location.sourceLabel,
-    rootPath: location.rootPath,
-    relativePath: location.relativePath,
-    absolutePath: location.absolutePath,
-    pointIndex: location.pointIndex,
-  }
+function timestampSeconds(value: number): number {
+  return Math.max(0, Math.min(0xffffffff, Math.floor(value / 1000)))
 }
 
-async function idbLocationsForHash(
-  database: IDBDatabase,
-  contentHash: string,
-): Promise<MediaLocation[]> {
-  const transaction = database.transaction('locations', 'readonly')
-  const done = idbTransactionDone(transaction)
-  const index = transaction.objectStore('locations').index('contentHash')
-  const rows = await idbRequest<IdbLocation[]>(index.getAll(contentHash))
-  await done
-  return rows.map(mediaLocationFromIdbLocation)
+function latE7(value: number): number {
+  return Math.round(Math.max(-90, Math.min(90, value)) * 10_000_000)
 }
 
-async function idbMediaItemsFromAssets(
-  database: IDBDatabase,
-  assets: IdbAsset[],
-): Promise<MediaItem[]> {
-  if (assets.length === 0) return []
+function lonE7(value: number): number {
+  return Math.round(Math.max(-180, Math.min(180, value)) * 10_000_000)
+}
 
-  const locationLists = await Promise.all(
-    assets.map((asset) => idbLocationsForHash(database, asset.contentHash)),
+function coordinateFromE7(value: number): number {
+  return value / 10_000_000
+}
+
+function kindFlags(item: MediaItem): number {
+  const kind =
+    item.kind === 'video'
+      ? KIND_FLAG_VIDEO
+      : item.kind === 'geo_point'
+        ? KIND_FLAG_GEO_POINT
+        : KIND_FLAG_IMAGE
+  return kind |
+    (item.latitude !== undefined && item.longitude !== undefined
+      ? KIND_FLAG_HAS_GEO
+      : 0)
+}
+
+function kindMatchesFlags(flags: number, kind: KindFilter | undefined): boolean {
+  if (!kind || kind === 'all') return true
+  const encoded = flags & 0b11
+  if (kind === 'media') return encoded === KIND_FLAG_IMAGE || encoded === KIND_FLAG_VIDEO
+  if (kind === 'image') return encoded === KIND_FLAG_IMAGE
+  if (kind === 'video') return encoded === KIND_FLAG_VIDEO
+  return encoded === KIND_FLAG_GEO_POINT
+}
+
+function geoCellId(latValueE7: number, lonValueE7: number): number {
+  const latCell = Math.max(
+    0,
+    Math.min(LAT_CELL_COUNT - 1, Math.floor((latValueE7 + LAT_OFFSET_E7) / CELL_SIZE_E7)),
   )
-
-  return assets.map((asset, index) =>
-    mediaFromIdbAsset(asset, locationLists[index] ?? []),
+  const lonCell = Math.max(
+    0,
+    Math.min(LON_CELL_COUNT - 1, Math.floor((lonValueE7 + LON_OFFSET_E7) / CELL_SIZE_E7)),
   )
+  return latCell * LON_CELL_COUNT + lonCell
 }
 
-async function idbUpsertSource(source: MediaSource): Promise<void> {
-  void source
-}
-
-async function idbUpsertMedia(items: MediaItem[]): Promise<number> {
-  if (items.length === 0) return 0
-
-  const database = await requireIndexedDb()
-  const transaction = database.transaction(['assets', 'locations'], 'readwrite')
-  const done = idbTransactionDone(transaction)
-  const assets = transaction.objectStore('assets')
-  const locations = transaction.objectStore('locations')
-
-  for (const item of items) {
-    assets.put(idbAssetFromItem(item))
-    for (const location of itemLocations(item)) {
-      locations.put({
-        ...location,
-        contentHash: item.contentHash,
-      } satisfies IdbLocation)
+function bboxCellRanges(bounds: GeoBounds): Array<{ minCellId: number; maxCellId: number }> {
+  const minLatCell = Math.max(
+    0,
+    Math.min(LAT_CELL_COUNT - 1, Math.floor((latE7(bounds.minLat) + LAT_OFFSET_E7) / CELL_SIZE_E7)),
+  )
+  const maxLatCell = Math.max(
+    0,
+    Math.min(LAT_CELL_COUNT - 1, Math.floor((latE7(bounds.maxLat) + LAT_OFFSET_E7) / CELL_SIZE_E7)),
+  )
+  const minLonCell = Math.max(
+    0,
+    Math.min(LON_CELL_COUNT - 1, Math.floor((lonE7(bounds.minLon) + LON_OFFSET_E7) / CELL_SIZE_E7)),
+  )
+  const maxLonCell = Math.max(
+    0,
+    Math.min(LON_CELL_COUNT - 1, Math.floor((lonE7(bounds.maxLon) + LON_OFFSET_E7) / CELL_SIZE_E7)),
+  )
+  const ranges: Array<{ minCellId: number; maxCellId: number }> = []
+  for (let latCell = minLatCell; latCell <= maxLatCell; latCell += 1) {
+    const base = latCell * LON_CELL_COUNT
+    const range = {
+      minCellId: base + minLonCell,
+      maxCellId: base + maxLonCell,
+    }
+    const previous = ranges.at(-1)
+    if (previous && previous.maxCellId + 1 >= range.minCellId) {
+      previous.maxCellId = Math.max(previous.maxCellId, range.maxCellId)
+    } else {
+      ranges.push(range)
     }
   }
-
-  await done
-  await idbBumpCatalogEpoch()
-  invalidatePreparedSearchIndex()
-  return items.length
+  return ranges
 }
 
-async function idbRemoveSources(sourceIds: string[]): Promise<void> {
-  if (sourceIds.length === 0) return
-
-  const database = await requireIndexedDb()
-  const sourceIdSet = new Set(sourceIds)
-  const locationsToDelete: IdbLocation[] = []
-  const sourceTransaction = database.transaction('locations', 'readonly')
-  const sourceDone = idbTransactionDone(sourceTransaction)
-  await iterateIdbCursor(
-    sourceTransaction.objectStore('locations').openCursor(),
-    (cursor) => {
-      const location = cursor.value as IdbLocation
-      if (sourceIdSet.has(location.sourceId)) {
-        locationsToDelete.push(location)
-      }
-    },
-  )
-  await sourceDone
-
-  const affectedHashes = Array.from(
-    new Set(locationsToDelete.map((location) => location.contentHash)),
-  )
-
-  const deleteTransaction = database.transaction('locations', 'readwrite')
-  const deleteDone = idbTransactionDone(deleteTransaction)
-  const locationStore = deleteTransaction.objectStore('locations')
-  for (const location of locationsToDelete) {
-    locationStore.delete(location.id)
-  }
-  await deleteDone
-
-  const orphanHashes: string[] = []
-  for (const contentHash of affectedHashes) {
-    const locations = await idbLocationsForHash(database, contentHash)
-    if (locations.length === 0) orphanHashes.push(contentHash)
-  }
-
-  if (orphanHashes.length > 0) {
-    const assetTransaction = database.transaction('assets', 'readwrite')
-    const assetDone = idbTransactionDone(assetTransaction)
-    const assets = assetTransaction.objectStore('assets')
-    for (const contentHash of orphanHashes) {
-      assets.delete(contentHash)
-    }
-    await assetDone
-  }
-
-  await idbBumpCatalogEpoch()
-  invalidatePreparedSearchIndex()
-}
-
-async function idbPrepareImportSource(
-  source: MediaSource,
-  duplicateSourceIds: string[],
-): Promise<void> {
-  await idbRemoveSources(duplicateSourceIds)
-  await idbUpsertSource(source)
-}
-
-function idbAssetMatchesQuery(
-  asset: IdbAsset,
-  query: CatalogQuery,
-): boolean {
-  if (query.kind === 'media') {
-    if (asset.kind !== 'image' && asset.kind !== 'video') return false
-  } else if (query.kind && query.kind !== 'all' && asset.kind !== query.kind) {
-    return false
-  }
-  if (query.hasGeo === true && (asset.latitude === undefined || asset.longitude === undefined)) {
-    return false
-  }
-  if (query.hasGeo === false && asset.latitude !== undefined && asset.longitude !== undefined) {
-    return false
-  }
+function packedRecordMatchesQuery(record: PackedIndexRecord, query: CatalogQuery): boolean {
+  if (!kindMatchesFlags(record.kindFlags, query.kind)) return false
+  const hasGeo = Boolean(record.kindFlags & KIND_FLAG_HAS_GEO)
+  if (query.hasGeo === true && !hasGeo) return false
+  if (query.hasGeo === false && hasGeo) return false
   if (query.geoBounds) {
+    if (!hasGeo) return false
+    const lat = coordinateFromE7(record.latE7)
+    const lon = coordinateFromE7(record.lonE7)
     if (
-      asset.latitude === undefined ||
-      asset.longitude === undefined ||
-      asset.latitude < query.geoBounds.minLat ||
-      asset.latitude > query.geoBounds.maxLat ||
-      asset.longitude < query.geoBounds.minLon ||
-      asset.longitude > query.geoBounds.maxLon
+      lat < query.geoBounds.minLat ||
+      lat > query.geoBounds.maxLat ||
+      lon < query.geoBounds.minLon ||
+      lon > query.geoBounds.maxLon
     ) {
-      return false
-    }
-  }
-  if (query.startTime !== undefined) {
-    if (asset.timestamp === undefined || asset.timestamp < query.startTime) {
-      return false
-    }
-  }
-  if (query.endTime !== undefined) {
-    if (asset.timestamp === undefined || asset.timestamp > query.endTime) {
       return false
     }
   }
   return true
 }
 
-function compareIdbAssetsBytimestamp(
-  sort: CatalogQuery['sort'],
-  a: IdbAsset,
-  b: IdbAsset,
-): number {
-  const aTime = a.timestamp
-  const bTime = b.timestamp
-  const aMissing = aTime === undefined
-  const bMissing = bTime === undefined
-
-  if (aMissing && !bMissing) return 1
-  if (!aMissing && bMissing) return -1
-  if (!aMissing && !bMissing && aTime !== bTime) {
-    return sort === 'timestamp_asc' ? aTime - bTime : bTime - aTime
-  }
-
-  return a.contentHash.localeCompare(b.contentHash)
-}
-
-async function idbListMedia(query: CatalogQuery): Promise<MediaItem[]> {
-  const database = await requireIndexedDb()
-  const limit = Math.max(1, Math.min(query.limit ?? 500, 10_000))
-  const offset = Math.max(0, query.offset ?? 0)
-  const matches: IdbAsset[] = []
-
-  const transaction = database.transaction('assets', 'readonly')
-  const done = idbTransactionDone(transaction)
-  await iterateIdbCursor(
-    transaction.objectStore('assets').openCursor(),
-    (cursor) => {
-      const asset = cursor.value as IdbAsset
-      if (!idbAssetMatchesQuery(asset, query)) return
-      matches.push(asset)
-    },
-  )
-  await done
-
-  matches.sort((a, b) => compareIdbAssetsBytimestamp(query.sort, a, b))
-  const results = matches.slice(offset, offset + limit)
-  return idbMediaItemsFromAssets(database, results)
-}
-
-async function idbSearchRows(query: CatalogQuery): Promise<MediaSearchRows> {
+function emptyManifest(): CatalogManifest {
   return {
-    items: await idbListMedia(query),
+    schemaVersion: 1,
+    catalogVersion: 0,
+    nextAssetId: 0,
+    assetStoreVersion: -1,
+    indexAppliedVersion: -1,
+    indexJob: { status: 'current' },
+    nextChunkId: 0,
+    occurrenceCount: 0,
+    assetCount: 0,
+    locationCount: 0,
+    materializedVersion: -1,
+    sources: {},
+    chunks: [],
   }
 }
 
-async function idbGetMediaByIds(ids: string[]): Promise<MediaItem[]> {
-  if (ids.length === 0) return []
-
-  const database = await requireIndexedDb()
-  const transaction = database.transaction('assets', 'readonly')
-  const done = idbTransactionDone(transaction)
-  const store = transaction.objectStore('assets')
-  const assets = await Promise.all(
-    ids.map((id) => idbRequest<IdbAsset | undefined>(store.get(id))),
-  )
-  await done
-  const byId = new Map(
-    (await idbMediaItemsFromAssets(
-      database,
-      assets.filter((asset): asset is IdbAsset => Boolean(asset)),
-    )).map((item) => [item.id, item]),
-  )
-  return ids.flatMap((id) => {
-    const item = byId.get(id)
-    return item ? [item] : []
-  })
+function normalizeManifest(value: unknown): CatalogManifest {
+  if (!isRecord(value) || value.schemaVersion !== 1) return emptyManifest()
+  const base = emptyManifest()
+  const catalogVersion = numeric(value.catalogVersion) ?? base.catalogVersion
+  return {
+    ...base,
+    ...value,
+    catalogVersion,
+    nextAssetId: numeric(value.nextAssetId) ?? numeric(value.assetCount) ?? 0,
+    assetStoreVersion: numeric(value.assetStoreVersion) ?? numeric(value.materializedVersion) ?? -1,
+    indexAppliedVersion: numeric(value.indexAppliedVersion) ?? -1,
+    indexJob: isRecord(value.indexJob)
+      ? {
+          status:
+            value.indexJob.status === 'pending' ||
+            value.indexJob.status === 'indexing' ||
+            value.indexJob.status === 'failed' ||
+            value.indexJob.status === 'current'
+              ? value.indexJob.status
+              : 'pending',
+          pendingSince: numeric(value.indexJob.pendingSince),
+          startedAt: numeric(value.indexJob.startedAt),
+          finishedAt: numeric(value.indexJob.finishedAt),
+          failedMessage:
+            typeof value.indexJob.failedMessage === 'string'
+              ? value.indexJob.failedMessage
+              : undefined,
+        }
+      : { status: catalogVersion === (numeric(value.indexAppliedVersion) ?? -1) ? 'current' : 'pending' },
+    sources: isRecord(value.sources)
+      ? (value.sources as Record<string, FileCatalogSource>)
+      : {},
+    chunks: Array.isArray(value.chunks) ? (value.chunks as FileCatalogChunk[]) : [],
+  }
 }
 
-async function idbGetGeoPoints(range: TimeRange): Promise<GeoIndexPoint[]> {
-  const database = await requireIndexedDb()
-  const points: GeoIndexPoint[] = []
-  const transaction = database.transaction('assets', 'readonly')
-  const done = idbTransactionDone(transaction)
-  await iterateIdbCursor(
-    transaction.objectStore('assets').openCursor(),
-    (cursor) => {
-      const asset = cursor.value as IdbAsset
-      if (
-        asset.latitude === undefined ||
-        asset.longitude === undefined ||
-        (range.startTime !== undefined &&
-          (asset.timestamp === undefined || asset.timestamp < range.startTime)) ||
-        (range.endTime !== undefined &&
-          (asset.timestamp === undefined || asset.timestamp > range.endTime))
-      ) {
-        return
-      }
-      points.push({
-        mediaId: asset.contentHash,
-        kind: asset.kind,
-        lat: asset.latitude,
-        lon: asset.longitude,
-        timestamp: asset.timestamp,
+function locationFromUnknown(value: unknown): MediaLocation | undefined {
+  if (!isRecord(value)) return undefined
+  return {
+    id: String(value.id ?? ''),
+    sourceId: String(value.sourceId ?? ''),
+    sourceLabel: String(value.sourceLabel ?? ''),
+    rootPath: typeof value.rootPath === 'string' ? value.rootPath : undefined,
+    relativePath:
+      typeof value.relativePath === 'string' ? value.relativePath : undefined,
+    absolutePath:
+      typeof value.absolutePath === 'string' ? value.absolutePath : undefined,
+    pointIndex: numeric(value.pointIndex),
+  }
+}
+
+function mediaFromUnknown(value: unknown): MediaItem | undefined {
+  if (!isRecord(value)) return undefined
+  const contentHash = String(value.contentHash ?? value.id ?? '')
+  const locations = Array.isArray(value.locations)
+    ? value.locations.flatMap((location) => {
+        const parsed = locationFromUnknown(location)
+        return parsed ? [parsed] : []
       })
-    },
-  )
-  await done
-  points.sort((a, b) => a.mediaId.localeCompare(b.mediaId))
-  return points
-}
-
-async function idbForEachGeoPointBatch(
-  batchSize: number,
-  onBatch: (batch: GeoIndexPoint[], processedPoints: number) => Promise<void>,
-): Promise<number> {
-  const database = await requireIndexedDb()
-  const transaction = database.transaction('assets', 'readonly')
-  const done = idbTransactionDone(transaction)
-  let batch: GeoIndexPoint[] = []
-  let processedPoints = 0
-
-  const flush = async () => {
-    if (batch.length === 0) return
-    processedPoints += batch.length
-    const current = batch
-    batch = []
-    await onBatch(current, processedPoints)
-  }
-
-  await iterateIdbCursorAsync(
-    transaction.objectStore('assets').openCursor(),
-    async (cursor) => {
-      const asset = cursor.value as IdbAsset
-      if (asset.latitude !== undefined && asset.longitude !== undefined) {
-        batch.push({
-          mediaId: asset.contentHash,
-          kind: asset.kind,
-          lat: asset.latitude,
-          lon: asset.longitude,
-          timestamp: asset.timestamp,
-        })
-      }
-      if (batch.length >= batchSize) await flush()
-    },
-  )
-  await flush()
-  await done
-  return processedPoints
-}
-
-async function idbCountMedia(): Promise<number> {
-  const database = await requireIndexedDb()
-  let count = 0
-  const transaction = database.transaction('assets', 'readonly')
-  const done = idbTransactionDone(transaction)
-  await iterateIdbCursor(transaction.objectStore('assets').openCursor(), (cursor) => {
-    if (cursor.value) count += 1
-  })
-  await done
-  return count
-}
-
-async function idbClear(): Promise<void> {
-  const database = await requireIndexedDb()
-  const transaction = database.transaction(
-    ['assets', 'locations'],
-    'readwrite',
-  )
-  const done = idbTransactionDone(transaction)
-  transaction.objectStore('locations').clear()
-  transaction.objectStore('assets').clear()
-  await done
-  await idbBumpCatalogEpoch()
-  invalidatePreparedSearchIndex()
-}
-
-function locationFromRow(row: Record<string, unknown>): MediaLocation {
+    : []
+  if (!contentHash || locations.length === 0) return undefined
+  const kind =
+    value.kind === 'video' || value.kind === 'geo_point' ? value.kind : 'image'
   return {
-    id: String(row.id),
-    sourceId: String(row.source_id),
-    sourceLabel: String(row.source_label),
-    rootPath: toString(row.root_path),
-    relativePath: toString(row.relative_path),
-    pointIndex: toNumber(row.point_index),
+    id: contentHash,
+    contentHash,
+    sourceId: String(value.sourceId ?? locations[0]?.sourceId ?? ''),
+    relativePath: String(value.relativePath ?? locations[0]?.relativePath ?? ''),
+    displayName: String(value.displayName ?? contentHash),
+    kind,
+    mimeType: String(value.mimeType ?? ''),
+    sizeBytes: numeric(value.sizeBytes) ?? 0,
+    durationMs: numeric(value.durationMs),
+    timestamp: numeric(value.timestamp),
+    latitude: numeric(value.latitude),
+    longitude: numeric(value.longitude),
+    thumbnailKey:
+      typeof value.thumbnailKey === 'string' ? value.thumbnailKey : undefined,
+    locations,
   }
+}
+
+function occurrenceFromLine(line: string): FileOccurrence | undefined {
+  if (!line.trim()) return undefined
+  try {
+    const parsed = JSON.parse(line) as unknown
+    if (!isRecord(parsed)) return undefined
+    const item = mediaFromUnknown(parsed.item)
+    if (!item) return undefined
+    return {
+      item,
+      sourceId: String(parsed.sourceId ?? item.sourceId),
+      generation: numeric(parsed.generation) ?? 0,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function itemLocations(item: MediaItem): MediaLocation[] {
+  if (item.locations.length > 0) return item.locations
+  return [
+    {
+      id: `${item.sourceId}:${item.relativePath}`,
+      sourceId: item.sourceId,
+      sourceLabel: item.sourceId,
+      relativePath: item.relativePath,
+    },
+  ]
 }
 
 function displayNameForLocation(
@@ -1313,352 +628,2253 @@ function displayNameForLocation(
   return pathDisplayName(location?.relativePath ?? contentHash)
 }
 
-function relativePathForLocation(
-  location: MediaLocation | undefined,
-): string {
+function relativePathForLocation(location: MediaLocation | undefined): string {
   return location?.relativePath ?? location?.sourceLabel ?? ''
 }
 
-function mediaFromAssetRow(
-  row: Record<string, unknown>,
-  locations: MediaLocation[],
-): MediaItem {
-  const contentHash = String(row.content_hash)
-  const kind =
-    row.kind === 'video' || row.kind === 'geo_point'
-      ? row.kind
-      : 'image'
-  const sortedLocations = [...locations].sort((a, b) => {
-    return (
+function normalizeMediaItem(item: MediaItem, locations: MediaLocation[]): MediaItem {
+  const sortedLocations = [...locations].sort(
+    (a, b) =>
       (a.relativePath ?? '').localeCompare(b.relativePath ?? '') ||
-      a.id.localeCompare(b.id)
-    )
-  })
+      a.id.localeCompare(b.id),
+  )
   const primaryLocation = sortedLocations[0] ?? {
-    id: contentHash,
-    sourceId: '',
-    sourceLabel: '',
-    relativePath: '',
+    id: item.contentHash,
+    sourceId: item.sourceId,
+    sourceLabel: item.sourceId,
+    relativePath: item.relativePath,
   }
-
   return {
-    id: contentHash,
-    contentHash,
+    ...item,
+    id: item.contentHash,
     sourceId: primaryLocation.sourceId,
     relativePath: relativePathForLocation(primaryLocation),
-    displayName: displayNameForLocation(
-      kind,
-      contentHash,
-      primaryLocation,
-    ),
-    kind,
-    mimeType: String(row.mime_type),
-    sizeBytes: toNumber(row.size_bytes) ?? 0,
-    durationMs: toNumber(row.duration_ms),
-    timestamp: toNumber(row.timestamp),
-    latitude: toNumber(row.latitude),
-    longitude: toNumber(row.longitude),
-    thumbnailKey: toString(row.thumbnail_key),
+    displayName: displayNameForLocation(item.kind, item.contentHash, primaryLocation),
     locations: sortedLocations,
   }
 }
 
-function assetBind(item: MediaItem): unknown[] {
-  return [
-    item.contentHash,
-    item.kind,
-    item.mimeType,
-    item.sizeBytes,
-    item.durationMs ?? null,
-    item.timestamp ?? null,
-    item.latitude ?? null,
-    item.longitude ?? null,
-    item.thumbnailKey ?? null,
-  ]
+function itemMatchesQuery(item: MediaItem, query: CatalogQuery): boolean {
+  if (query.kind === 'media') {
+    if (item.kind !== 'image' && item.kind !== 'video') return false
+  } else if (query.kind && query.kind !== 'all' && item.kind !== query.kind) {
+    return false
+  }
+  if (query.hasGeo === true && (item.latitude === undefined || item.longitude === undefined)) {
+    return false
+  }
+  if (query.hasGeo === false && item.latitude !== undefined && item.longitude !== undefined) {
+    return false
+  }
+  if (query.geoBounds) {
+    if (item.latitude === undefined || item.longitude === undefined) return false
+    if (
+      item.latitude < query.geoBounds.minLat ||
+      item.latitude > query.geoBounds.maxLat ||
+      item.longitude < query.geoBounds.minLon ||
+      item.longitude > query.geoBounds.maxLon
+    ) {
+      return false
+    }
+  }
+  if (item.timestamp === undefined) return false
+  if (query.startTime !== undefined && item.timestamp < query.startTime) return false
+  if (query.endTime !== undefined && item.timestamp > query.endTime) return false
+  return true
 }
 
-function itemLocations(item: MediaItem): MediaLocation[] {
-  if (item.locations.length > 0) return item.locations
-  return [
-    {
-      id: `${item.sourceId}:${item.relativePath}`,
-      sourceId: item.sourceId,
-      sourceLabel: item.sourceId,
-      relativePath: item.relativePath,
-    },
-  ]
+function compareByTimestamp(sort: CatalogQuery['sort'], a: MediaItem, b: MediaItem): number {
+  const aTime = a.timestamp ?? 0
+  const bTime = b.timestamp ?? 0
+  const delta = sort === 'timestamp_asc' ? aTime - bTime : bTime - aTime
+  return delta || a.contentHash.localeCompare(b.contentHash)
 }
 
-function placeholders(rowCount: number, columnCount: number): string {
-  const row = `(${Array.from({ length: columnCount }, () => '?').join(', ')})`
-  return Array.from({ length: rowCount }, () => row).join(', ')
-}
-
-function emptySqliteUpsertTiming(
-  label: string,
-  columnCount: number,
-): SqliteUpsertTiming {
+function defaultSearchStats(engineId: string, engineLabel: string): SearchIndexStats {
   return {
-    label,
-    rows: 0,
-    columnCount,
-    chunks: 0,
-    bindValues: 0,
-    sqlChars: 0,
-    placeholderMs: 0,
-    sqlBuildMs: 0,
-    bindFlattenMs: 0,
-    execMs: 0,
-    totalMs: 0,
-    chunkTimings: [],
+    engineId,
+    engineLabel,
+    exact: true,
+    persistent: true,
+    pointCount: 0,
+    distanceComputations: 0,
+    nodesVisited: 0,
+    pagesRead: 0,
+    candidatesInspected: 0,
+    prunedByGeo: 0,
+    prunedByTime: 0,
   }
 }
 
-function execMultiRowInsert(
-  activeDb: SqliteDb,
-  label: string,
-  insertPrefix: string,
-  rows: unknown[][],
-  columnCount: number,
-  conflictClause = '',
-): SqliteUpsertTiming {
-  const startedAt = performance.now()
-  const timing = emptySqliteUpsertTiming(label, columnCount)
-  timing.rows = rows.length
-  if (rows.length === 0) return timing
+type FileCatalogIndexId = 'file-time-geo' | 'file-cell-time'
 
-  const maxRows = Math.max(1, Math.floor(SQLITE_BIND_CHUNK_LIMIT / columnCount))
-  for (let offset = 0; offset < rows.length; offset += maxRows) {
-    const chunk = rows.slice(offset, offset + maxRows)
-    const placeholderStartedAt = performance.now()
-    const valuePlaceholders = placeholders(chunk.length, columnCount)
-    const placeholderMs = performance.now() - placeholderStartedAt
-    timing.placeholderMs += placeholderMs
-
-    const sqlBuildStartedAt = performance.now()
-    const sql = `
-      ${insertPrefix}
-      VALUES ${valuePlaceholders}
-      ${conflictClause}
-    `
-    const sqlBuildMs = performance.now() - sqlBuildStartedAt
-    timing.sqlBuildMs += sqlBuildMs
-
-    const bindStartedAt = performance.now()
-    const bind = chunk.flat()
-    const bindFlattenMs = performance.now() - bindStartedAt
-    timing.bindFlattenMs += bindFlattenMs
-
-    const execStartedAt = performance.now()
-    activeDb.exec({
-      sql,
-      bind,
-    })
-    const execMs = performance.now() - execStartedAt
-    timing.execMs += execMs
-    timing.chunks += 1
-    timing.bindValues += bind.length
-    timing.sqlChars += sql.length
-
-    timing.chunkTimings.push({
-      offset,
-      rows: chunk.length,
-      columnCount,
-      bindValues: bind.length,
-      sqlChars: sql.length,
-      placeholderMs,
-      sqlBuildMs,
-      bindFlattenMs,
-      execMs,
-    })
-  }
-
-  timing.totalMs = performance.now() - startedAt
-  return timing
+function isFileCatalogIndexId(indexId: string): indexId is FileCatalogIndexId {
+  return indexId === 'file-time-geo' || indexId === 'file-cell-time'
 }
 
-function upsertMediaIntoSqlite(
-  activeDb: SqliteDb,
-  items: MediaItem[],
-): SqliteMediaWriteTiming {
-  if (items.length === 0) {
+function fileCatalogIndexSpec(indexId: FileCatalogIndexId): {
+  fileName: string
+  kind: number
+  label: string
+} {
+  return indexId === 'file-time-geo'
+    ? {
+        fileName: TIME_GEO_INDEX_FILE,
+        kind: INDEX_KIND_TIME_GEO,
+        label: 'Time-first packed index',
+      }
+    : {
+        fileName: CELL_TIME_INDEX_FILE,
+        kind: INDEX_KIND_CELL_TIME,
+        label: 'Location-first packed index',
+      }
+}
+
+async function diskSegmentedStatusStats(
+  store: CatalogStore,
+  indexId: DiskSegmentedEngineId,
+): Promise<SearchIndexStats> {
+  const catalogVersion = await store.catalogEpoch()
+  const diskStore = store.diskSegmentedTreeStore()
+  const manifest = await diskStore.readManifest(indexId)
+  const diskIndex = diskSegmentedIndex(store, indexId)
+  if (
+    manifest &&
+    manifest.engineId === indexId &&
+    manifest.engineVersion === 2 &&
+    manifest.catalogEpoch === catalogVersion
+  ) {
+    await diskIndex.prepare(catalogVersion)
     return {
-      items: 0,
-      locations: 0,
-      totalMs: 0,
-      assetRowsMs: 0,
-      locationRowsMs: 0,
-      asset: emptySqliteUpsertTiming('media_assets', ASSET_BIND_COLUMNS),
-      location: emptySqliteUpsertTiming(
-        'media_locations',
-        LOCATION_BIND_COLUMNS,
-      ),
-      accountedMs: 0,
-      unaccountedMs: 0,
+      ...(await diskIndex.stats()),
+      engineLabel: diskIndex.label,
+      exact: diskIndex.capabilities.exact,
+      persistent: diskIndex.capabilities.persistent,
+      indexStatus: 'current',
+      catalogVersion,
+      indexCatalogVersion: manifest.catalogEpoch,
     }
   }
 
-  const startedAt = performance.now()
-  const assetRowsStartedAt = performance.now()
-  const assetRows = items.map(assetBind)
-  const assetRowsMs = performance.now() - assetRowsStartedAt
-  const assetTiming = execMultiRowInsert(
-    activeDb,
-    'media_assets',
-    `
-    INSERT INTO media_assets (
-      content_hash, kind, mime_type, size_bytes, duration_ms,
-      timestamp, latitude, longitude, thumbnail_key
-    )
-    `,
-    assetRows,
-    ASSET_BIND_COLUMNS,
-    `
-    ON CONFLICT(content_hash) DO NOTHING
-    `,
-  )
-
-  const locationRowsStartedAt = performance.now()
-  const locationRows = items.flatMap((item) =>
-    itemLocations(item).map((location) => [
-      location.id,
-      item.contentHash,
-      location.sourceId,
-      location.sourceLabel,
-      location.rootPath ?? null,
-      location.relativePath ?? null,
-      location.pointIndex ?? null,
-    ]),
-  )
-  const locationRowsMs = performance.now() - locationRowsStartedAt
-
-  const locationTiming = execMultiRowInsert(
-    activeDb,
-    'media_locations',
-    `
-    INSERT INTO media_locations (
-      id, content_hash, source_id, source_label, root_path, relative_path,
-      point_index
-    )
-    `,
-    locationRows,
-    LOCATION_BIND_COLUMNS,
-    `
-    ON CONFLICT(id) DO NOTHING
-    `,
-  )
-
-  const totalMs = performance.now() - startedAt
-  const accountedMs =
-    assetRowsMs +
-    assetTiming.totalMs +
-    locationRowsMs +
-    locationTiming.totalMs
-
+  diskSegmentedIndexInstances.delete(diskSegmentedRuntimeKey(indexId))
   return {
-    items: items.length,
-    locations: locationRows.length,
-    totalMs,
-    assetRowsMs,
-    locationRowsMs,
-    asset: assetTiming,
-    location: locationTiming,
-    accountedMs,
-    unaccountedMs: totalMs - accountedMs,
+    ...defaultSearchStats(indexId, diskIndex.label),
+    pointCount: manifest?.pointCount ?? 0,
+    indexSizeBytes: manifest?.segments.reduce(
+      (total, segment) => total + segment.byteLength,
+      0,
+    ),
+    segmentCount: manifest?.segmentCount ?? 0,
+    indexStorage: 'disk',
+    indexStatus: manifest ? 'stale' : 'missing',
+    catalogVersion,
+    indexCatalogVersion: manifest?.catalogEpoch,
   }
 }
 
-function timeWhere(
-  query: Pick<CatalogQuery, 'startTime' | 'endTime'>,
-  where: string[],
-  bind: unknown[],
-  prefix = '',
-): void {
-  if (typeof query.startTime === 'number') {
-    where.push(`${prefix}timestamp >= ?`)
-    bind.push(query.startTime)
-  }
-  if (typeof query.endTime === 'number') {
-    where.push(`${prefix}timestamp <= ?`)
-    bind.push(query.endTime)
+function withQueryMetrics(
+  base: SearchIndexStats,
+  spec: SearchSpec,
+  queryTimeMs: number,
+  rowsReturned: number,
+  limit: number,
+  offset: number,
+  limitReached: boolean,
+): SearchIndexStats {
+  return {
+    ...base,
+    queryPurpose: spec.purpose,
+    storageMode: 'file',
+    queryTimeMs,
+    lastQueryTimeMs: base.lastQueryTimeMs ?? queryTimeMs,
+    rowsReturned,
+    limit,
+    offset,
+    limitReached,
   }
 }
 
-function mediaItemsFromAssetRows(
-  activeDb: SqliteDb,
-  rows: Record<string, unknown>[],
-): MediaItem[] {
-  if (rows.length === 0) return []
-
-  const contentHashes = rows.map((row) => String(row.content_hash))
-  const placeholders = contentHashes.map(() => '?').join(', ')
-  const locationRows = activeDb.selectObjects(
-    `
-      SELECT *
-      FROM media_locations
-      WHERE content_hash IN (${placeholders})
-      ORDER BY relative_path ASC, id ASC
-    `,
-    contentHashes,
-  )
-  const locationsByHash = new Map<string, MediaLocation[]>()
-
-  for (const row of locationRows) {
-    const contentHash = String(row.content_hash)
-    const locations = locationsByHash.get(contentHash) ?? []
-    const location = locationFromRow(row)
-    locations.push(location)
-    locationsByHash.set(contentHash, locations)
+function searchSpecToCatalogQuery(spec: SearchSpec, limit: number): CatalogQuery {
+  return {
+    startTime: spec.startTime,
+    endTime: spec.endTime,
+    kind: spec.kind,
+    hasGeo: spec.hasGeo,
+    geoBounds: spec.geoBounds,
+    sort: spec.order.kind === 'timestamp' ? spec.order.sort : 'timestamp_desc',
+    limit,
+    offset: spec.offset,
   }
-
-  return rows.map((row) =>
-    mediaFromAssetRow(row, locationsByHash.get(String(row.content_hash)) ?? []),
-  )
 }
 
-function upsertSourceIntoSqlite(activeDb: SqliteDb, source: MediaSource): void {
-  void activeDb
-  void source
+function mediaItemsToSearchResults(items: MediaItem[]): SearchPage['items'] {
+  return items.map((item) => ({
+    item,
+    mediaId: item.id,
+  }))
 }
 
-function removeSourcesFromSqlite(activeDb: SqliteDb, sourceIds: string[]): void {
-  if (sourceIds.length === 0) return
-
-  const placeholders = sourceIds.map(() => '?').join(', ')
-  activeDb.exec({
-    sql: `DELETE FROM media_locations WHERE source_id IN (${placeholders})`,
-    bind: sourceIds,
+async function enrichDistanceResults(
+  getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
+  results: GeoSearchResult[],
+): Promise<SearchPage['items']> {
+  const resultIds = Array.from(new Set(results.map((result) => result.mediaId)))
+  const items = await getMediaByIdsFn(resultIds)
+  const itemsById = new Map(items.map((item) => [item.id, item]))
+  return results.flatMap((result) => {
+    const item = itemsById.get(result.mediaId)
+    return item ? [{ ...result, item }] : []
   })
-  const orphanRows = activeDb.selectObjects(`
-    SELECT content_hash
-    FROM media_assets
-    WHERE NOT EXISTS (
-      SELECT 1 FROM media_locations l
-      WHERE l.content_hash = media_assets.content_hash
+}
+
+function createFileSearchEngine(
+  engineId: FileCatalogIndexId,
+  engineLabel: string,
+  searchRowsFn: MediaSearchRowsFn,
+  ensureIndexReadyFn: EnsureSearchIndexReadyFn,
+): SearchIndexEngine {
+  return {
+    id: engineId,
+    label: engineLabel,
+    capabilities: {
+      exact: true,
+      persistent: true,
+      requiresBuild: false,
+      supportsTimestampOrder: true,
+      supportsDistanceOrder: false,
+      supportsGeoBounds: true,
+      supportsTimeRange: true,
+      supportsKind: true,
+    },
+    canHandle(spec) {
+      if (spec.order.kind !== 'timestamp') return false
+      if (spec.order.engineId && spec.order.engineId !== engineId) return false
+      if (engineId === 'file-cell-time' && !spec.geoBounds) return false
+      return true
+    },
+    async search(spec) {
+      await ensureIndexReadyFn(engineId)
+      const limit = Math.max(1, Math.min(spec.limit ?? 500, 10_000))
+      const offset = Math.max(0, spec.offset ?? 0)
+      const startedAt = performance.now()
+      const rows = await searchRowsFn(searchSpecToCatalogQuery(spec, limit + 1), engineId)
+      const limitedRows = rows.items.slice(0, limit)
+      const limitReached = rows.items.length > limit
+      return {
+        items: mediaItemsToSearchResults(limitedRows),
+        resultMetrics: withQueryMetrics(
+          {
+            ...defaultSearchStats(engineId, engineLabel),
+            ...rows.metrics,
+          },
+          spec,
+          performance.now() - startedAt,
+          limitedRows.length,
+          limit,
+          offset,
+          limitReached,
+        ),
+        engineId,
+        engineLabel,
+        limitReached,
+      }
+    },
+    async stats() {
+      return defaultSearchStats(engineId, engineLabel)
+    },
+  }
+}
+
+function isDiskSegmentedEngineId(indexId: string): indexId is DiskSegmentedEngineId {
+  return indexId === 'segmented-ball-tree'
+}
+
+function diskSegmentedRuntimeKey(indexId: DiskSegmentedEngineId): string {
+  return `file:${indexId}`
+}
+
+function diskSegmentedIndex(
+  store: CatalogStore,
+  indexId: DiskSegmentedEngineId,
+): DiskSegmentedTreeIndex {
+  const key = diskSegmentedRuntimeKey(indexId)
+  const existing = diskSegmentedIndexInstances.get(key)
+  if (existing) return existing
+  const index = new DiskSegmentedTreeIndex(indexId, store.diskSegmentedTreeStore())
+  diskSegmentedIndexInstances.set(key, index)
+  return index
+}
+
+function activeDiskSegmentedIndex(indexId: string): DiskSegmentedTreeIndex | undefined {
+  if (!isDiskSegmentedEngineId(indexId)) return undefined
+  return diskSegmentedIndexInstances.get(diskSegmentedRuntimeKey(indexId))
+}
+
+async function clearDiskSegmentedIndexCaches(store: CatalogStore): Promise<void> {
+  await store.diskSegmentedTreeStore().clear('segmented-ball-tree')
+  diskSegmentedIndexInstances.delete(diskSegmentedRuntimeKey('segmented-ball-tree'))
+}
+
+function createDistanceSearchEngine(
+  geoIndex: (typeof geoIndexRegistry.indexes)[number],
+  getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
+  ensureIndexReadyFn: EnsureSearchIndexReadyFn,
+): SearchIndexEngine {
+  return {
+    id: geoIndex.id,
+    label: geoIndex.label,
+    capabilities: {
+      exact: geoIndex.capabilities.exact,
+      persistent: geoIndex.capabilities.persistent,
+      requiresBuild: true,
+      supportsTimestampOrder: false,
+      supportsDistanceOrder: true,
+      supportsGeoBounds: true,
+      supportsTimeRange: true,
+      supportsKind: true,
+    },
+    canHandle(spec) {
+      return spec.order.kind === 'distance'
+    },
+    async search(spec) {
+      if (spec.order.kind !== 'distance') {
+        throw new Error(`${geoIndex.label} cannot serve timestamp queries.`)
+      }
+      const limit = Math.max(1, Math.min(spec.limit ?? 500, 10_000))
+      const offset = Math.max(0, spec.offset ?? 0)
+      const startedAt = performance.now()
+      const query = {
+        startTime: spec.startTime,
+        endTime: spec.endTime,
+        lat: spec.order.point.lat,
+        lon: spec.order.point.lon,
+        k: limit,
+        offset: spec.offset,
+        kind: spec.kind,
+        geoBounds: spec.geoBounds,
+      }
+      const activeIndex = isDiskSegmentedEngineId(geoIndex.id)
+        ? await ensureIndexReadyFn(geoIndex.id).then(() =>
+            activeDiskSegmentedIndex(geoIndex.id),
+          )
+        : activeDiskSegmentedIndex(geoIndex.id)
+      if (isDiskSegmentedEngineId(geoIndex.id) && !activeIndex) {
+        throw new Error(`${geoIndex.label} index is not ready. Update the index before querying.`)
+      }
+      const results = activeIndex
+        ? await activeIndex.search(query)
+        : await geoIndex.search(query)
+      const stats = activeIndex ? await activeIndex.stats() : await geoIndex.stats()
+      const items = await enrichDistanceResults(getMediaByIdsFn, results)
+      const resultMetrics = {
+        ...stats,
+        engineLabel: activeIndex?.label ?? geoIndex.label,
+        exact: activeIndex?.capabilities.exact ?? geoIndex.capabilities.exact,
+        persistent: activeIndex?.capabilities.persistent ?? geoIndex.capabilities.persistent,
+      }
+      const limitReached =
+        results.length >= limit && resultMetrics.pointCount > offset + limit
+      return {
+        items,
+        resultMetrics: withQueryMetrics(
+          resultMetrics,
+          spec,
+          performance.now() - startedAt,
+          items.length,
+          limit,
+          offset,
+          limitReached,
+        ),
+        engineId: geoIndex.id,
+        engineLabel: geoIndex.label,
+        limitReached,
+      }
+    },
+    async stats() {
+      return {
+        ...(await geoIndex.stats()),
+        engineLabel: geoIndex.label,
+        exact: geoIndex.capabilities.exact,
+        persistent: geoIndex.capabilities.persistent,
+      }
+    },
+  }
+}
+
+function createSearchRegistry(
+  searchRowsFn: MediaSearchRowsFn,
+  getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
+  ensureIndexReadyFn: EnsureSearchIndexReadyFn,
+): SearchIndexEngineRegistry {
+  return new SearchIndexEngineRegistry([
+    createFileSearchEngine(
+      'file-time-geo',
+      'Time-first packed index',
+      searchRowsFn,
+      ensureIndexReadyFn,
+    ),
+    createFileSearchEngine(
+      'file-cell-time',
+      'Location-first packed index',
+      searchRowsFn,
+      ensureIndexReadyFn,
+    ),
+    ...geoIndexRegistry.indexes.map((index) =>
+      createDistanceSearchEngine(index, getMediaByIdsFn, ensureIndexReadyFn),
+    ),
+  ])
+}
+
+type IndexedAsset = {
+  assetId: number
+  item: MediaItem
+}
+
+type PackedIndexRecord = {
+  timestampSec: number
+  latE7: number
+  lonE7: number
+  assetId: number
+  kindFlags: number
+  cellId?: number
+}
+
+type PackedIndexMetrics = {
+  pagesRead: number
+  diskReadBytes: number
+  candidatesInspected: number
+  cellsScanned?: number
+}
+
+type PackedIndexBuildRecord = PackedIndexRecord & { cellId: number }
+
+type PackedIndexHeader = {
+  catalogVersion: number
+  assetCount: number
+  entryCount: number
+  indexSizeBytes: number
+  kind: number
+  recordSize: number
+}
+
+type AssetTableMetrics = {
+  diskReadBytes: number
+  diskReadCount: number
+}
+
+class AssetTable {
+  private readonly assetsDir: FileSystemDirectoryHandle
+  private readonly header: { catalogVersion: number; count: number; entrySize: number }
+  private readonly recordIndexFile: File
+
+  constructor(
+    assetsDir: FileSystemDirectoryHandle,
+    header: { catalogVersion: number; count: number; entrySize: number },
+    recordIndexFile: File,
+  ) {
+    this.assetsDir = assetsDir
+    this.header = header
+    this.recordIndexFile = recordIndexFile
+  }
+
+  static async open(
+    assetsDir: FileSystemDirectoryHandle,
+  ): Promise<AssetTable | undefined> {
+    const recordIndexFile = await readFile(assetsDir, ASSET_RECORD_INDEX_FILE)
+    if (!recordIndexFile) return undefined
+    const header = readBinaryHeader(
+      await readFileRange(recordIndexFile, 0, ASSET_TABLE_HEADER_SIZE),
+      ASSET_TABLE_MAGIC,
     )
-  `)
-  const orphanHashes = orphanRows.map((row) => String(row.content_hash))
-  if (orphanHashes.length > 0) {
-    for (let offset = 0; offset < orphanHashes.length; offset += 900) {
-      const chunk = orphanHashes.slice(offset, offset + 900)
-      const orphanPlaceholderSql = chunk.map(() => '?').join(', ')
-      activeDb.exec({
-        sql: `DELETE FROM media_assets WHERE content_hash IN (${orphanPlaceholderSql})`,
-        bind: [...chunk],
+    if (!header || header.entrySize !== ASSET_RECORD_INDEX_ENTRY_SIZE) return undefined
+    return new AssetTable(assetsDir, header, recordIndexFile)
+  }
+
+  get count(): number {
+    return this.header.count
+  }
+
+  get catalogVersion(): number {
+    return this.header.catalogVersion
+  }
+
+  async read(assetId: number): Promise<{ item?: MediaItem; metrics: AssetTableMetrics }> {
+    if (assetId < 0 || assetId >= this.header.count) {
+      return { metrics: { diskReadBytes: 0, diskReadCount: 0 } }
+    }
+    const indexOffset =
+      ASSET_TABLE_HEADER_SIZE + assetId * ASSET_RECORD_INDEX_ENTRY_SIZE
+    const entryBuffer = await readFileRange(
+      this.recordIndexFile,
+      indexOffset,
+      ASSET_RECORD_INDEX_ENTRY_SIZE,
+    )
+    const entry = new DataView(entryBuffer)
+    const chunkId = entry.getUint32(0, true)
+    const recordOffset = entry.getUint32(4, true)
+    const recordLength = entry.getUint32(8, true)
+    if (recordLength === 0) {
+      return {
+        metrics: {
+          diskReadBytes: ASSET_RECORD_INDEX_ENTRY_SIZE,
+          diskReadCount: 1,
+        },
+      }
+    }
+    const chunkName = `${ASSET_CHUNK_PREFIX}${String(chunkId).padStart(6, '0')}${ASSET_BINARY_CHUNK_EXTENSION}`
+    const chunkFile = await readFile(this.assetsDir, chunkName)
+    if (!chunkFile) {
+      return {
+        metrics: {
+          diskReadBytes: ASSET_RECORD_INDEX_ENTRY_SIZE,
+          diskReadCount: 1,
+        },
+      }
+    }
+    const payload = await readFileRange(chunkFile, recordOffset + 4, recordLength)
+    const item = mediaFromUnknown(
+      JSON.parse(textDecoder.decode(new Uint8Array(payload))) as unknown,
+    )
+    return {
+      item,
+      metrics: {
+        diskReadBytes: ASSET_RECORD_INDEX_ENTRY_SIZE + recordLength,
+        diskReadCount: 2,
+      },
+    }
+  }
+
+  async readMany(assetIds: Iterable<number>): Promise<{
+    items: MediaItem[]
+    metrics: AssetTableMetrics
+  }> {
+    const items: MediaItem[] = []
+    const metrics = { diskReadBytes: 0, diskReadCount: 0 }
+    for (const assetId of assetIds) {
+      const result = await this.read(assetId)
+      metrics.diskReadBytes += result.metrics.diskReadBytes
+      metrics.diskReadCount += result.metrics.diskReadCount
+      if (result.item) items.push(result.item)
+    }
+    return { items, metrics }
+  }
+
+  async *scan(): AsyncGenerator<IndexedAsset> {
+    let assetId = 0
+    for (let chunkId = 0; assetId < this.header.count; chunkId += 1) {
+      const chunkName = `${ASSET_CHUNK_PREFIX}${String(chunkId).padStart(6, '0')}${ASSET_BINARY_CHUNK_EXTENSION}`
+      const chunkFile = await readFile(this.assetsDir, chunkName)
+      if (!chunkFile) break
+      const bytes = new Uint8Array(await chunkFile.arrayBuffer())
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+      let offset = 0
+      while (offset + 4 <= bytes.byteLength && assetId < this.header.count) {
+        const length = view.getUint32(offset, true)
+        offset += 4
+        if (length === 0 || offset + length > bytes.byteLength) break
+        const item = mediaFromUnknown(
+          JSON.parse(textDecoder.decode(bytes.slice(offset, offset + length))) as unknown,
+        )
+        if (item) yield { assetId, item }
+        assetId += 1
+        offset += length
+      }
+      await yieldToEventLoop()
+    }
+  }
+}
+
+class AssetIdMap {
+  private readonly header: { catalogVersion: number; count: number; entrySize: number }
+  private readonly file: File
+
+  constructor(
+    header: { catalogVersion: number; count: number; entrySize: number },
+    file: File,
+  ) {
+    this.header = header
+    this.file = file
+  }
+
+  static async open(assetsDir: FileSystemDirectoryHandle): Promise<AssetIdMap | undefined> {
+    const file = await readFile(assetsDir, ASSET_ID_MAP_FILE)
+    if (!file) return undefined
+    const header = readBinaryHeader(
+      await readFileRange(file, 0, ASSET_ID_MAP_HEADER_SIZE),
+      ASSET_ID_MAP_MAGIC,
+    )
+    if (!header || header.entrySize !== ASSET_ID_MAP_ENTRY_SIZE) return undefined
+    return new AssetIdMap(header, file)
+  }
+
+  async findAssetId(contentHash: string): Promise<number | undefined> {
+    const target = encodeHashKey(contentHash)
+    let low = 0
+    let high = this.header.count - 1
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2)
+      const offset = ASSET_ID_MAP_HEADER_SIZE + middle * ASSET_ID_MAP_ENTRY_SIZE
+      const bytes = new Uint8Array(await readFileRange(this.file, offset, ASSET_ID_MAP_ENTRY_SIZE))
+      const key = bytes.slice(0, 64)
+      const comparison = compareHashBytes(key, target)
+      if (comparison === 0) {
+        return getUint64(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), 64)
+      }
+      if (comparison < 0) low = middle + 1
+      else high = middle - 1
+    }
+    return undefined
+  }
+}
+
+function expectedPackedRecordSize(kind: number): number {
+  return kind === INDEX_KIND_TIME_GEO ? TIME_GEO_RECORD_SIZE : CELL_TIME_RECORD_SIZE
+}
+
+function parsePackedIndexHeader(
+  bytes: ArrayBuffer,
+  expectedKind: number,
+  indexSizeBytes: number,
+): PackedIndexHeader | undefined {
+  if (bytes.byteLength < PACKED_INDEX_HEADER_SIZE) return undefined
+  const header = new DataView(bytes)
+  if (header.getUint32(0, true) !== PACKED_INDEX_MAGIC) return undefined
+  if (header.getUint32(4, true) !== BINARY_SCHEMA_VERSION) return undefined
+  const kind = header.getUint32(40, true)
+  if (kind !== expectedKind) return undefined
+  const recordSize = header.getUint32(36, true)
+  if (recordSize !== expectedPackedRecordSize(expectedKind)) return undefined
+  const catalogVersion = header.getFloat64(8, true)
+  const assetCount = header.getFloat64(16, true)
+  const entryCount = header.getFloat64(24, true)
+  if (
+    !Number.isSafeInteger(catalogVersion) ||
+    !Number.isSafeInteger(assetCount) ||
+    !Number.isSafeInteger(entryCount) ||
+    catalogVersion < 0 ||
+    assetCount < 0 ||
+    entryCount < 0
+  ) {
+    return undefined
+  }
+  const expectedByteLength = PACKED_INDEX_HEADER_SIZE + entryCount * recordSize
+  if (indexSizeBytes !== expectedByteLength) return undefined
+  return {
+    catalogVersion,
+    assetCount,
+    entryCount,
+    indexSizeBytes,
+    kind,
+    recordSize,
+  }
+}
+
+class ResidentPackedGeoIndex {
+  readonly catalogVersion: number
+  readonly assetCount: number
+  readonly entryCount: number
+  readonly indexSizeBytes: number
+  readonly kind: number
+  readonly recordSize: number
+  readonly bytes: ArrayBuffer
+  private readonly view: DataView
+
+  constructor(header: PackedIndexHeader, bytes: ArrayBuffer) {
+    this.catalogVersion = header.catalogVersion
+    this.assetCount = header.assetCount
+    this.entryCount = header.entryCount
+    this.indexSizeBytes = header.indexSizeBytes
+    this.kind = header.kind
+    this.recordSize = header.recordSize
+    this.bytes = bytes
+    this.view = new DataView(bytes)
+  }
+
+  static fromArrayBuffer(
+    bytes: ArrayBuffer,
+    expectedKind: number,
+  ): ResidentPackedGeoIndex | undefined {
+    const header = parsePackedIndexHeader(bytes, expectedKind, bytes.byteLength)
+    return header ? new ResidentPackedGeoIndex(header, bytes) : undefined
+  }
+
+  private recordOffset(index: number): number {
+    return PACKED_INDEX_HEADER_SIZE + index * this.recordSize
+  }
+
+  private readRecord(offset: number): PackedIndexRecord {
+    if (this.kind === INDEX_KIND_CELL_TIME) {
+      return {
+        cellId: Number(this.view.getBigUint64(offset, true)),
+        timestampSec: this.view.getUint32(offset + 8, true),
+        latE7: this.view.getInt32(offset + 12, true),
+        lonE7: this.view.getInt32(offset + 16, true),
+        assetId: this.view.getUint32(offset + 20, true),
+        kindFlags: this.view.getUint8(offset + 24),
+      }
+    }
+    return {
+      timestampSec: this.view.getUint32(offset, true),
+      latE7: this.view.getInt32(offset + 4, true),
+      lonE7: this.view.getInt32(offset + 8, true),
+      assetId: this.view.getUint32(offset + 12, true),
+      kindFlags: this.view.getUint8(offset + 16),
+    }
+  }
+
+  private readRecordAt(index: number): PackedIndexRecord {
+    return this.readRecord(this.recordOffset(index))
+  }
+
+  private lowerBound(isBeforeTarget: (record: PackedIndexRecord) => boolean): number {
+    let low = 0
+    let high = this.entryCount
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2)
+      const record = this.readRecordAt(middle)
+      if (isBeforeTarget(record)) low = middle + 1
+      else high = middle
+    }
+    return low
+  }
+
+  async scanTimeRange(
+    minTimestampSec: number,
+    maxTimestampSec: number,
+    direction: 'asc' | 'desc',
+    onRecord: (record: PackedIndexRecord) => Promise<boolean>,
+  ): Promise<PackedIndexMetrics> {
+    const start = this.lowerBound((record) => record.timestampSec < minTimestampSec)
+    const end = this.lowerBound((record) => record.timestampSec <= maxTimestampSec)
+    return this.scanRecordRange(start, end, direction, onRecord)
+  }
+
+  async scanCellRanges(
+    ranges: Array<{ minCellId: number; maxCellId: number }>,
+    onRecord: (record: PackedIndexRecord) => Promise<boolean>,
+  ): Promise<PackedIndexMetrics> {
+    const metrics: PackedIndexMetrics = {
+      pagesRead: 0,
+      diskReadBytes: 0,
+      candidatesInspected: 0,
+      cellsScanned: 0,
+    }
+    for (const range of ranges) {
+      metrics.cellsScanned = (metrics.cellsScanned ?? 0) + Math.max(0, range.maxCellId - range.minCellId + 1)
+      const start = this.lowerBound((record) =>
+        (record.cellId ?? -1) < range.minCellId,
+      )
+      const end = this.lowerBound((record) =>
+        (record.cellId ?? -1) <= range.maxCellId,
+      )
+      const rangeMetrics = await this.scanRecordRange(start, end, 'asc', onRecord)
+      metrics.pagesRead += rangeMetrics.pagesRead
+      metrics.diskReadBytes += rangeMetrics.diskReadBytes
+      metrics.candidatesInspected += rangeMetrics.candidatesInspected
+    }
+    return metrics
+  }
+
+  private async scanRecordRange(
+    start: number,
+    end: number,
+    direction: 'asc' | 'desc',
+    onRecord: (record: PackedIndexRecord) => Promise<boolean>,
+  ): Promise<PackedIndexMetrics> {
+    const metrics = { pagesRead: 0, diskReadBytes: 0, candidatesInspected: 0 }
+    if (end <= start) return metrics
+    if (direction === 'desc') {
+      for (let offset = end; offset > start;) {
+        const count = Math.min(PACKED_SCAN_RECORDS, offset - start)
+        const first = offset - count
+        metrics.pagesRead += 1
+        for (let index = count - 1; index >= 0; index -= 1) {
+          metrics.candidatesInspected += 1
+          const shouldContinue = await onRecord(
+            this.readRecord(this.recordOffset(first + index)),
+          )
+          if (!shouldContinue) return metrics
+        }
+        offset = first
+        await yieldToEventLoop()
+      }
+      return metrics
+    }
+    for (let offset = start; offset < end; offset += PACKED_SCAN_RECORDS) {
+      const count = Math.min(PACKED_SCAN_RECORDS, end - offset)
+      metrics.pagesRead += 1
+      for (let index = 0; index < count; index += 1) {
+        metrics.candidatesInspected += 1
+        const shouldContinue = await onRecord(
+          this.readRecord(this.recordOffset(offset + index)),
+        )
+        if (!shouldContinue) return metrics
+      }
+      await yieldToEventLoop()
+    }
+    return metrics
+  }
+}
+
+class FileCatalogStore implements CatalogStore {
+  readonly storageMode = 'file' as const
+  readonly geoImportWriteBatchSize = GEO_IMPORT_WRITE_BATCH_SIZE
+  private manifest: CatalogManifest | undefined
+  private materialized: MaterializedCatalog | undefined
+  private importSource:
+    | {
+        sourceId: string
+        generation: number
+      }
+    | undefined
+  private transactionDepth = 0
+  private backgroundIndexPromise: Promise<void> | undefined
+  private residentPackedIndexes = new Map<FileCatalogIndexId, ResidentPackedGeoIndex>()
+  private residentPackedIndexLoadPromise: Promise<void> | undefined
+  private residentPackedIndexLoadError: Error | undefined
+
+  async init(): Promise<InitResult> {
+    await this.ensureManifest()
+    return {
+      storageMode: 'file',
+      filename: `opfs://${CATALOG_DIR}`,
+    }
+  }
+
+  async upsertSource(source: MediaSource): Promise<void> {
+    const manifest = await this.ensureManifest()
+    const existing = manifest.sources[source.id]
+    manifest.sources[source.id] = {
+      ...source,
+      generation: existing?.generation ?? 0,
+      active: true,
+      importedAt: Date.now(),
+    }
+    await this.saveManifest()
+  }
+
+  async upsertMedia(items: MediaItem[]): Promise<number> {
+    if (items.length === 0) return 0
+    await this.writeMediaBatch(items)
+    this.scheduleBackgroundCatalogIndexing()
+    return items.length
+  }
+
+  async prepareImportSource(
+    source: MediaSource,
+    duplicateSourceIds: string[],
+  ): Promise<void> {
+    const manifest = await this.ensureManifest()
+    const existing = manifest.sources[source.id]
+    const generation = (existing?.generation ?? 0) + 1
+    manifest.sources[source.id] = {
+      ...source,
+      generation,
+      active: true,
+      importedAt: Date.now(),
+    }
+    const inactiveIds = new Set([source.id, ...duplicateSourceIds])
+    for (const sourceId of inactiveIds) {
+      if (sourceId !== source.id && manifest.sources[sourceId]) {
+        manifest.sources[sourceId] = {
+          ...manifest.sources[sourceId],
+          active: false,
+        }
+      }
+    }
+    for (const chunk of manifest.chunks) {
+      if (inactiveIds.has(chunk.sourceId)) chunk.active = false
+    }
+    this.importSource = { sourceId: source.id, generation }
+    await this.markDirty()
+    await clearDiskSegmentedIndexCaches(this)
+  }
+
+  async writeMediaBatch(items: MediaItem[]): Promise<MediaBatchWriteResult> {
+    if (items.length === 0) return { written: 0 }
+    const manifest = await this.ensureManifest()
+    const chunkId = `chunk-${String(manifest.nextChunkId).padStart(6, '0')}`
+    manifest.nextChunkId += 1
+    const sourceId = this.importSource?.sourceId ?? items[0]?.sourceId ?? ''
+    const generation =
+      this.importSource?.generation ?? manifest.sources[sourceId]?.generation ?? 0
+    const occurrences = items.map((item) => ({
+      item,
+      sourceId: item.sourceId || sourceId,
+      generation,
+    }))
+    const root = await rootDirectory()
+    const occurrencesDir = await childDirectory(root, 'occurrences')
+    await writeFile(
+      occurrencesDir,
+      `${chunkId}.bin`,
+      occurrences.map((occurrence) => JSON.stringify(occurrence)).join('\n') + '\n',
+    )
+    manifest.chunks.push({
+      id: chunkId,
+      sourceId,
+      generation,
+      count: occurrences.length,
+      createdAt: Date.now(),
+      active: true,
+    })
+    manifest.occurrenceCount += occurrences.length
+    await this.markDirty()
+    if (this.transactionDepth === 0) this.scheduleBackgroundCatalogIndexing()
+    return { written: items.length }
+  }
+
+  async commitImport(): Promise<void> {
+    this.scheduleBackgroundCatalogIndexing()
+  }
+
+  async withImportTransaction<T>(run: () => Promise<T>): Promise<T> {
+    this.transactionDepth += 1
+    try {
+      const result = await run()
+      return result
+    } finally {
+      this.transactionDepth -= 1
+      if (this.transactionDepth === 0) {
+        this.importSource = undefined
+        this.scheduleBackgroundCatalogIndexing()
+      }
+    }
+  }
+
+  async listMedia(query: CatalogQuery): Promise<MediaItem[]> {
+    return (await this.searchRows(query)).items
+  }
+
+  async searchMedia(spec: SearchSpec): Promise<SearchPage> {
+    return createSearchRegistry(
+      (query) => this.searchRows(query),
+      (ids) => this.getMediaByIds(ids),
+      (indexId) => this.ensureSearchIndexReady(indexId),
+    ).search(spec)
+  }
+
+  async getMediaByIds(ids: string[]): Promise<MediaItem[]> {
+    if (ids.length === 0) return []
+    const assetTable = await this.openAssetTable()
+    const idMap = await this.openAssetIdMap()
+    if (!assetTable || !idMap) {
+      const catalog = await this.ensureMaterialized()
+      return ids.flatMap((id) => {
+        const item = catalog.byId.get(id)
+        return item ? [item] : []
       })
     }
+    const resolved: MediaItem[] = []
+    for (const id of ids) {
+      const assetId = await idMap.findAssetId(id)
+      if (assetId === undefined) continue
+      const result = await assetTable.read(assetId)
+      if (result.item) resolved.push(result.item)
+    }
+    return resolved
   }
-  bumpSqliteCatalogEpochInDb(activeDb)
-  invalidatePreparedSearchIndex()
+
+  async getGeoPoints(range: TimeRange = {}): Promise<GeoIndexPoint[]> {
+    const assetTable = await this.openAssetTable()
+    if (!assetTable) {
+      const catalog = await this.ensureMaterialized()
+      return catalog.geoPoints.filter((point) => {
+        if (range.startTime !== undefined) {
+          if (point.timestamp === undefined || point.timestamp < range.startTime) return false
+        }
+        if (range.endTime !== undefined) {
+          if (point.timestamp === undefined || point.timestamp > range.endTime) return false
+        }
+        return true
+      })
+    }
+    const points: GeoIndexPoint[] = []
+    for await (const { item } of assetTable.scan()) {
+      if (item.latitude === undefined || item.longitude === undefined) continue
+      const point = {
+        mediaId: item.id,
+        kind: item.kind,
+        lat: item.latitude,
+        lon: item.longitude,
+        timestamp: item.timestamp,
+      }
+      if (range.startTime !== undefined) {
+        if (point.timestamp === undefined || point.timestamp < range.startTime) continue
+      }
+      if (range.endTime !== undefined) {
+        if (point.timestamp === undefined || point.timestamp > range.endTime) continue
+      }
+      if (range.startTime !== undefined && point.timestamp === undefined) continue
+      points.push(point)
+    }
+    return points
+  }
+
+  async forEachGeoPointBatch(
+    batchSize: number,
+    onBatch: (batch: GeoIndexPoint[], processedPoints: number) => Promise<void>,
+  ): Promise<number> {
+    const assetTable = await this.openAssetTable()
+    if (assetTable) {
+      let processed = 0
+      let batch: GeoIndexPoint[] = []
+      for await (const { item } of assetTable.scan()) {
+        if (item.latitude !== undefined && item.longitude !== undefined) {
+          batch.push({
+            mediaId: item.id,
+            kind: item.kind,
+            lat: item.latitude,
+            lon: item.longitude,
+            timestamp: item.timestamp,
+          })
+          processed += 1
+        }
+        if (batch.length >= batchSize) {
+          await onBatch(batch, processed)
+          batch = []
+          await yieldToEventLoop()
+        }
+      }
+      if (batch.length > 0) await onBatch(batch, processed)
+      return processed
+    }
+    const points = await this.getGeoPoints()
+    for (let offset = 0; offset < points.length; offset += batchSize) {
+      const batch = points.slice(offset, offset + batchSize)
+      await onBatch(batch, Math.min(points.length, offset + batch.length))
+      await yieldToEventLoop()
+    }
+    return points.length
+  }
+
+  diskSegmentedTreeStore(): DiskSegmentedTreeStore {
+    return createOpfsDiskSegmentedTreeStore()
+  }
+
+  async catalogEpoch(): Promise<number> {
+    return (await this.ensureManifest()).catalogVersion
+  }
+
+  async buildSearchIndexes(
+    indexId: string,
+    forceRebuild: boolean,
+    postProgress: (progress: GeoIndexBuildProgress) => void,
+  ): Promise<GeoIndexBuildSummary & { engineCount: number }> {
+    if (isFileCatalogIndexId(indexId)) {
+      return this.buildFileCatalogIndexes(indexId, postProgress)
+    }
+    return buildSearchIndexes(this, indexId, forceRebuild, postProgress)
+  }
+
+  async getSearchIndexStats(): Promise<SearchIndexStats[]> {
+    const registry = createSearchRegistry(
+      (query, indexId) => this.searchRows(query, indexId),
+      (ids) => this.getMediaByIds(ids),
+      (indexId) => this.ensureSearchIndexReady(indexId),
+    )
+    const stats = await registry.stats()
+    const timeGeoStats = await this.fileCatalogIndexStats('file-time-geo')
+    const cellTimeStats = await this.fileCatalogIndexStats('file-cell-time')
+    const segmentedStats = await diskSegmentedStatusStats(
+      this,
+      'segmented-ball-tree',
+    )
+    return stats.map((entry) =>
+      entry.engineId === 'file-time-geo'
+        ? timeGeoStats
+        : entry.engineId === 'file-cell-time'
+          ? cellTimeStats
+          : entry.engineId === 'segmented-ball-tree'
+            ? segmentedStats
+            : entry,
+    )
+  }
+
+  async countMedia(): Promise<number> {
+    return (await this.ensureManifest()).assetCount
+  }
+
+  async clear(): Promise<void> {
+    await clearDirectory(await rootDirectory())
+    this.manifest = emptyManifest()
+    this.materialized = undefined
+    this.importSource = undefined
+    this.clearResidentPackedIndexes()
+    diskSegmentedIndexInstances.clear()
+    await this.saveManifest()
+  }
+
+  private async openAssetTable(): Promise<AssetTable | undefined> {
+    return AssetTable.open(await childDirectory(await rootDirectory(), 'assets'))
+  }
+
+  private async openAssetIdMap(): Promise<AssetIdMap | undefined> {
+    return AssetIdMap.open(await childDirectory(await rootDirectory(), 'assets'))
+  }
+
+  private clearResidentPackedIndexes(): void {
+    this.residentPackedIndexes.clear()
+    this.residentPackedIndexLoadPromise = undefined
+    this.residentPackedIndexLoadError = undefined
+  }
+
+  private async readPackedIndexHeader(
+    indexId: FileCatalogIndexId,
+  ): Promise<PackedIndexHeader | undefined> {
+    const spec = fileCatalogIndexSpec(indexId)
+    const indexesDir = await childDirectory(await rootDirectory(), 'indexes')
+    const file = await readFile(indexesDir, spec.fileName)
+    if (!file) return undefined
+    const headerBuffer = await readFileRange(file, 0, PACKED_INDEX_HEADER_SIZE)
+    return parsePackedIndexHeader(headerBuffer, spec.kind, file.size)
+  }
+
+  private async loadResidentPackedIndex(
+    indexId: FileCatalogIndexId,
+    catalogVersion: number,
+  ): Promise<ResidentPackedGeoIndex> {
+    const spec = fileCatalogIndexSpec(indexId)
+    const indexesDir = await childDirectory(await rootDirectory(), 'indexes')
+    const file = await readFile(indexesDir, spec.fileName)
+    if (!file) {
+      throw new Error(`${spec.label} file is missing.`)
+    }
+    const bytes = await file.arrayBuffer()
+    const index = ResidentPackedGeoIndex.fromArrayBuffer(bytes, spec.kind)
+    if (!index) {
+      throw new Error(`${spec.label} file is invalid.`)
+    }
+    if (index.catalogVersion !== catalogVersion) {
+      throw new Error(`${spec.label} file is stale.`)
+    }
+    return index
+  }
+
+  private residentIndexesCurrent(catalogVersion: number): boolean {
+    return (
+      this.residentPackedIndexes.get('file-time-geo')?.catalogVersion === catalogVersion &&
+      this.residentPackedIndexes.get('file-cell-time')?.catalogVersion === catalogVersion
+    )
+  }
+
+  private async ensureResidentPackedIndexes(): Promise<void> {
+    const manifest = await this.ensureManifest()
+    if (
+      manifest.materializedVersion !== manifest.catalogVersion ||
+      manifest.indexAppliedVersion !== manifest.catalogVersion
+    ) {
+      this.clearResidentPackedIndexes()
+      throw new Error('Catalog indexes are not current. Update the indexes before querying.')
+    }
+    if (this.residentIndexesCurrent(manifest.catalogVersion)) return
+    if (this.residentPackedIndexLoadError) {
+      throw this.residentPackedIndexLoadError
+    }
+    if (!this.residentPackedIndexLoadPromise) {
+      this.residentPackedIndexLoadPromise = this.loadAllResidentPackedIndexes(
+        manifest.catalogVersion,
+      )
+    }
+    await this.residentPackedIndexLoadPromise
+  }
+
+  private async residentPackedIndex(
+    indexId: FileCatalogIndexId,
+  ): Promise<ResidentPackedGeoIndex> {
+    await this.ensureResidentPackedIndexes()
+    const index = this.residentPackedIndexes.get(indexId)
+    if (!index) {
+      throw new Error(
+        'Catalog indexes could not be loaded into memory. Rebuild indexes or reduce catalog size.',
+      )
+    }
+    return index
+  }
+
+  private async loadAllResidentPackedIndexes(catalogVersion: number): Promise<void> {
+    try {
+      console.log('[geo-index:worker] loading packed catalog indexes into memory', {
+        catalogVersion,
+      })
+      const [timeIndex, cellIndex] = await Promise.all([
+        this.loadResidentPackedIndex('file-time-geo', catalogVersion),
+        this.loadResidentPackedIndex('file-cell-time', catalogVersion),
+      ])
+      this.residentPackedIndexes.set('file-time-geo', timeIndex)
+      this.residentPackedIndexes.set('file-cell-time', cellIndex)
+      this.residentPackedIndexLoadError = undefined
+      console.log('[geo-index:worker] packed catalog indexes loaded into memory', {
+        catalogVersion,
+        residentBytes: timeIndex.indexSizeBytes + cellIndex.indexSizeBytes,
+      })
+    } catch (caught) {
+      console.error('[geo-index:worker] failed to load packed catalog indexes into memory', caught)
+      this.residentPackedIndexes.clear()
+      this.residentPackedIndexLoadError = new Error(
+        'Catalog indexes could not be loaded into memory. Rebuild indexes or reduce catalog size.',
+      )
+      throw this.residentPackedIndexLoadError
+    } finally {
+      this.residentPackedIndexLoadPromise = undefined
+    }
+  }
+
+  private scheduleResidentPackedIndexPreload(): void {
+    if (this.residentPackedIndexLoadPromise || this.residentPackedIndexLoadError) return
+    void this.ensureResidentPackedIndexes().catch((caught) => {
+      console.error('[geo-index:worker] resident packed index preload failed', caught)
+    })
+  }
+
+  private async searchRows(
+    query: CatalogQuery,
+    indexId: FileCatalogIndexId = 'file-time-geo',
+  ): Promise<MediaSearchRows> {
+    const index = await this.residentPackedIndex(indexId)
+    const assetTable = await this.openAssetTable()
+    if (!assetTable) {
+      throw new Error('Catalog asset table is missing. Finish the import before querying.')
+    }
+    if (indexId === 'file-cell-time') {
+      return this.searchCellTimeRows(assetTable, index, query)
+    }
+    return this.searchTimeGeoRows(assetTable, index, query)
+  }
+
+  private async searchTimeGeoRows(
+    assetTable: AssetTable,
+    timeIndex: ResidentPackedGeoIndex,
+    query: CatalogQuery,
+  ): Promise<MediaSearchRows> {
+    const limit = Math.max(1, Math.min(query.limit ?? 500, 10_000))
+    const offset = Math.max(0, query.offset ?? 0)
+    const items: MediaItem[] = []
+    const minTime = query.startTime === undefined ? 0 : timestampSeconds(query.startTime)
+    const maxTime = query.endTime === undefined ? 0xffffffff : timestampSeconds(query.endTime)
+    let matched = 0
+    let assetDiskReadBytes = 0
+    let assetDiskReadCount = 0
+    const indexMetrics = await timeIndex.scanTimeRange(
+      minTime,
+      maxTime,
+      query.sort === 'timestamp_asc' ? 'asc' : 'desc',
+      async (record) => {
+        if (!packedRecordMatchesQuery(record, query)) return true
+        const result = await assetTable.read(record.assetId)
+        assetDiskReadBytes += result.metrics.diskReadBytes
+        assetDiskReadCount += result.metrics.diskReadCount
+        if (result.item && itemMatchesQuery(result.item, query)) {
+          if (matched >= offset && items.length <= limit) items.push(result.item)
+          matched += 1
+        }
+        return items.length <= limit
+      },
+    )
+    return {
+      items,
+      metrics: {
+        pagesRead: indexMetrics.pagesRead,
+        diskReadBytes: assetDiskReadBytes,
+        diskReadCount: assetDiskReadCount,
+        candidatesInspected: indexMetrics.candidatesInspected,
+        indexStorage: 'memory',
+        residentBytes: timeIndex.indexSizeBytes,
+      },
+    }
+  }
+
+  private async searchCellTimeRows(
+    assetTable: AssetTable,
+    cellIndex: ResidentPackedGeoIndex,
+    query: CatalogQuery,
+  ): Promise<MediaSearchRows> {
+    if (!query.geoBounds) {
+      throw new Error('Location-first catalog index requires a bounding box query.')
+    }
+    const minTime = query.startTime === undefined ? 0 : timestampSeconds(query.startTime)
+    const maxTime = query.endTime === undefined ? 0xffffffff : timestampSeconds(query.endTime)
+    const cellRanges = bboxCellRanges(query.geoBounds)
+    const candidates = new Map<string, MediaItem>()
+    let assetDiskReadBytes = 0
+    let assetDiskReadCount = 0
+    const indexMetrics = await cellIndex.scanCellRanges(cellRanges, async (record) => {
+      if (record.timestampSec < minTime || record.timestampSec > maxTime) return true
+      if (!packedRecordMatchesQuery(record, query)) return true
+      const result = await assetTable.read(record.assetId)
+      assetDiskReadBytes += result.metrics.diskReadBytes
+      assetDiskReadCount += result.metrics.diskReadCount
+      if (result.item && itemMatchesQuery(result.item, query)) {
+        candidates.set(result.item.id, result.item)
+      }
+      return true
+    })
+    const limit = Math.max(1, Math.min(query.limit ?? 500, 10_000))
+    const offset = Math.max(0, query.offset ?? 0)
+    const items = Array.from(candidates.values())
+      .sort((a, b) => compareByTimestamp(query.sort, a, b))
+      .slice(offset, offset + limit + 1)
+    return {
+      items,
+      metrics: {
+        pagesRead: indexMetrics.pagesRead,
+        diskReadBytes: assetDiskReadBytes,
+        diskReadCount: assetDiskReadCount,
+        candidatesInspected: indexMetrics.candidatesInspected,
+        cellCount: indexMetrics.cellsScanned,
+        indexStorage: 'memory',
+        residentBytes: cellIndex.indexSizeBytes,
+      },
+    }
+  }
+
+  async ensureSearchIndexReady(indexId: string): Promise<SearchIndexStats> {
+    const stats = isFileCatalogIndexId(indexId)
+      ? await this.fileCatalogIndexStats(indexId)
+      : isDiskSegmentedEngineId(indexId)
+        ? await diskSegmentedStatusStats(this, indexId)
+        : undefined
+    if (!stats) {
+      throw new Error(`Search index "${indexId}" is not available.`)
+    }
+    if (isFileCatalogIndexId(indexId) && this.residentPackedIndexLoadError) {
+      throw this.residentPackedIndexLoadError
+    }
+    if (stats.indexStatus !== 'current') {
+      throw new Error(
+        `${stats.engineLabel ?? indexId} index is ${stats.indexStatus ?? 'not ready'}. Update the index before querying.`,
+      )
+    }
+    if (isFileCatalogIndexId(indexId)) {
+      await this.ensureResidentPackedIndexes()
+      return this.fileCatalogIndexStats(indexId)
+    }
+    return stats
+  }
+
+  private async ensureManifest(): Promise<CatalogManifest> {
+    if (this.manifest) return this.manifest
+    const text = await readTextFile(await rootDirectory(), MANIFEST_FILE)
+    this.manifest = text ? normalizeManifest(JSON.parse(text)) : emptyManifest()
+    return this.manifest
+  }
+
+  private async saveManifest(): Promise<void> {
+    await writeFile(
+      await rootDirectory(),
+      MANIFEST_FILE,
+      JSON.stringify(await this.ensureManifest()),
+    )
+  }
+
+  private async markDirty(): Promise<void> {
+    const manifest = await this.ensureManifest()
+    manifest.catalogVersion += 1
+    manifest.materializedVersion = -1
+    manifest.assetStoreVersion = -1
+    manifest.indexJob = {
+      status: 'pending',
+      pendingSince: Date.now(),
+    }
+    this.materialized = undefined
+    this.clearResidentPackedIndexes()
+    await this.saveManifest()
+  }
+
+  private scheduleBackgroundCatalogIndexing(): void {
+    if (this.backgroundIndexPromise) return
+    this.backgroundIndexPromise = this.applyCatalogIndexJournal(postBackgroundIndexProgress)
+      .catch((error) => {
+        console.error('[geo-index:worker] background catalog indexing failed', error)
+      })
+      .finally(() => {
+        this.backgroundIndexPromise = undefined
+      })
+  }
+
+  private async applyCatalogIndexJournal(
+    postProgress?: (progress: GeoIndexBuildProgress) => void,
+  ): Promise<void> {
+    const manifest = await this.ensureManifest()
+    if (manifest.indexAppliedVersion === manifest.catalogVersion) return
+    manifest.indexJob = {
+      status: 'indexing',
+      pendingSince: manifest.indexJob?.pendingSince,
+      startedAt: Date.now(),
+    }
+    await this.saveManifest()
+    try {
+      if (manifest.materializedVersion !== manifest.catalogVersion) {
+        await this.materialize(postProgress, 'Catalog packed indexes: background materializing catalog')
+      }
+      await this.writeMaterializedIndexFiles(postProgress, 'Catalog packed indexes')
+      const updated = await this.ensureManifest()
+      updated.indexAppliedVersion = updated.catalogVersion
+      updated.indexJob = {
+        status: 'current',
+        pendingSince: manifest.indexJob?.pendingSince,
+        startedAt: manifest.indexJob?.startedAt,
+        finishedAt: Date.now(),
+      }
+      await this.saveManifest()
+      await this.ensureResidentPackedIndexes()
+    } catch (error) {
+      const failed = await this.ensureManifest()
+      failed.indexJob = {
+        status: 'failed',
+        pendingSince: manifest.indexJob?.pendingSince,
+        startedAt: manifest.indexJob?.startedAt,
+        failedMessage: error instanceof Error ? error.message : String(error),
+      }
+      await this.saveManifest()
+      throw error
+    }
+  }
+
+  private async ensureMaterialized(): Promise<MaterializedCatalog> {
+    const manifest = await this.ensureManifest()
+    if (
+      this.materialized &&
+      this.materialized.version === manifest.catalogVersion &&
+      manifest.materializedVersion === manifest.catalogVersion
+    ) {
+      return this.materialized
+    }
+    if (manifest.materializedVersion === manifest.catalogVersion) {
+      const loaded = await this.loadMaterialized()
+      if (loaded) {
+        this.materialized = loaded
+        return loaded
+      }
+    }
+    return this.materialize()
+  }
+
+  private async loadMaterialized(): Promise<MaterializedCatalog | undefined> {
+    const root = await rootDirectory()
+    const assetsDir = await childDirectory(root, 'assets')
+    const manifest = await this.ensureManifest()
+    const assetTable = await AssetTable.open(assetsDir)
+    if (assetTable && assetTable.catalogVersion === manifest.catalogVersion) {
+      const assets: MediaItem[] = []
+      for await (const { item } of assetTable.scan()) assets.push(item)
+      return this.createMaterializedCatalog(manifest.catalogVersion, assets)
+    }
+    const entries = await directoryEntries(assetsDir)
+    const chunkNames = entries
+      .filter(
+        ([name, handle]) =>
+          handle.kind === 'file' &&
+          name.startsWith(ASSET_CHUNK_PREFIX) &&
+          name.endsWith(ASSET_CHUNK_EXTENSION),
+      )
+      .map(([name]) => name)
+      .sort()
+    const assets: MediaItem[] = []
+    if (chunkNames.length > 0) {
+      for (const chunkName of chunkNames) {
+        const file = await readFile(assetsDir, chunkName)
+        if (!file) continue
+        const text = await file.text()
+        for (const line of text.split('\n')) {
+          if (!line.trim()) continue
+          const item = mediaFromUnknown(JSON.parse(line) as unknown)
+          if (item) assets.push(item)
+        }
+        await yieldToEventLoop()
+      }
+    } else {
+      const text = await readTextFile(assetsDir, ASSETS_FILE)
+      if (!text) return undefined
+      const parsed = JSON.parse(text) as unknown
+      if (!Array.isArray(parsed)) return undefined
+      for (const value of parsed) {
+        const item = mediaFromUnknown(value)
+        if (item) assets.push(item)
+      }
+    }
+    return this.createMaterializedCatalog(manifest.catalogVersion, assets)
+  }
+
+  private async materialize(
+    postProgress?: (progress: GeoIndexBuildProgress) => void,
+    progressLabel = 'Catalog packed indexes: materializing catalog',
+  ): Promise<MaterializedCatalog> {
+    const manifest = await this.ensureManifest()
+    const root = await rootDirectory()
+    const occurrencesDir = await childDirectory(root, 'occurrences')
+    const assetsByHash = new Map<string, MediaItem>()
+    const locationsByHash = new Map<string, Map<string, MediaLocation>>()
+    const activeChunks = manifest.chunks.filter((chunk) => chunk.active)
+    const totalOccurrences = activeChunks.reduce((total, chunk) => total + chunk.count, 0)
+    let processedOccurrences = 0
+
+    for (const chunk of activeChunks) {
+      const file = await readFile(occurrencesDir, `${chunk.id}.bin`)
+      if (!file) continue
+      const text = await file.text()
+      for (const line of text.split('\n')) {
+        const occurrence = occurrenceFromLine(line)
+        if (!occurrence) {
+          continue
+        }
+        processedOccurrences += 1
+        const source = manifest.sources[occurrence.sourceId]
+        if (!source?.active || source.generation !== occurrence.generation) continue
+        const existing = assetsByHash.get(occurrence.item.contentHash)
+        if (!existing) assetsByHash.set(occurrence.item.contentHash, occurrence.item)
+        const locationMap =
+          locationsByHash.get(occurrence.item.contentHash) ?? new Map<string, MediaLocation>()
+        for (const location of itemLocations(occurrence.item)) {
+          locationMap.set(location.id, location)
+        }
+        locationsByHash.set(occurrence.item.contentHash, locationMap)
+        if (processedOccurrences % 50_000 === 0) {
+          console.log('[geo-index:worker] materialize read progress', {
+            processedOccurrences,
+            totalOccurrences,
+            assets: assetsByHash.size,
+          })
+          postProgress?.({
+            phase: 'building',
+            pointCount: totalOccurrences,
+            builtIndexes: 0,
+            totalIndexes: 1,
+            currentIndexId: 'file-time-geo',
+            currentIndexLabel: `${progressLabel}: reading occurrences`,
+            currentIndexProcessedPoints: processedOccurrences,
+            currentIndexTotalPoints: totalOccurrences,
+          })
+          await yieldToEventLoop()
+        }
+      }
+      await yieldToEventLoop()
+    }
+
+    const assets: MediaItem[] = []
+    const sourceAssets = Array.from(assetsByHash.values())
+    let locationCount = 0
+    for (let index = 0; index < sourceAssets.length; index += 1) {
+      const item = sourceAssets[index]
+      const locations = Array.from(locationsByHash.get(item.contentHash)?.values() ?? [])
+      locationCount += locations.length
+      assets.push(
+        normalizeMediaItem(
+          item,
+          locations,
+        ),
+      )
+      const processedAssets = index + 1
+      if (processedAssets % 50_000 === 0 || processedAssets === sourceAssets.length) {
+        console.log('[geo-index:worker] materialize normalize progress', {
+          processedAssets,
+          totalAssets: sourceAssets.length,
+        })
+        postProgress?.({
+          phase: 'building',
+          pointCount: sourceAssets.length,
+          builtIndexes: 0,
+          totalIndexes: 1,
+          currentIndexId: 'file-time-geo',
+          currentIndexLabel: `${progressLabel}: normalizing assets`,
+          currentIndexProcessedPoints: processedAssets,
+          currentIndexTotalPoints: sourceAssets.length,
+        })
+        await yieldToEventLoop()
+      }
+    }
+    postProgress?.({
+      phase: 'building',
+      pointCount: assets.length,
+      builtIndexes: 0,
+      totalIndexes: 1,
+      currentIndexId: 'file-time-geo',
+      currentIndexLabel: `${progressLabel}: preparing asset table`,
+      currentIndexProcessedPoints: 0,
+      currentIndexTotalPoints: assets.length,
+    })
+    await yieldToEventLoop()
+    const materialized: MaterializedCatalog = {
+      version: manifest.catalogVersion,
+      assets,
+      byId: new Map(),
+      geoPoints: [],
+    }
+    manifest.assetCount = materialized.assets.length
+    manifest.locationCount = locationCount
+    manifest.materializedVersion = manifest.catalogVersion
+    manifest.assetStoreVersion = manifest.catalogVersion
+    manifest.nextAssetId = Math.max(manifest.nextAssetId, materialized.assets.length)
+
+    await this.writeMaterializedCatalogFiles(materialized, postProgress, progressLabel)
+    postProgress?.({
+      phase: 'building',
+      pointCount: materialized.assets.length,
+      builtIndexes: 0,
+      totalIndexes: 1,
+      currentIndexId: 'file-time-geo',
+      currentIndexLabel: `${progressLabel}: saving manifest`,
+      currentIndexProcessedPoints: materialized.assets.length,
+      currentIndexTotalPoints: materialized.assets.length,
+    })
+    await this.saveManifest()
+    postProgress?.({
+      phase: 'building',
+      pointCount: materialized.assets.length,
+      builtIndexes: 0,
+      totalIndexes: 1,
+      currentIndexId: 'file-time-geo',
+      currentIndexLabel: `${progressLabel}: complete`,
+      currentIndexProcessedPoints: materialized.assets.length,
+      currentIndexTotalPoints: materialized.assets.length,
+    })
+    this.materialized = undefined
+    return materialized
+  }
+
+  private async writeMaterializedCatalogFiles(
+    materialized: MaterializedCatalog,
+    postProgress?: (progress: GeoIndexBuildProgress) => void,
+    progressLabel = 'Catalog packed indexes: materializing catalog',
+  ): Promise<void> {
+    const root = await rootDirectory()
+    const assetsDir = await childDirectory(root, 'assets')
+    postProgress?.({
+      phase: 'building',
+      pointCount: materialized.assets.length,
+      builtIndexes: 0,
+      totalIndexes: 1,
+      currentIndexId: 'file-time-geo',
+      currentIndexLabel: `${progressLabel}: clearing old asset table`,
+      currentIndexProcessedPoints: 0,
+      currentIndexTotalPoints: materialized.assets.length,
+    })
+    await clearDirectory(assetsDir)
+    await this.writeAssetTable(assetsDir, materialized, postProgress, progressLabel)
+  }
+
+  private async writeAssetTable(
+    assetsDir: FileSystemDirectoryHandle,
+    materialized: MaterializedCatalog,
+    postProgress?: (progress: GeoIndexBuildProgress) => void,
+    progressLabel = 'Catalog packed indexes: materializing catalog',
+  ): Promise<void> {
+    const assets = materialized.assets
+    postProgress?.({
+      phase: 'building',
+      pointCount: assets.length,
+      builtIndexes: 0,
+      totalIndexes: 1,
+      currentIndexId: 'file-time-geo',
+      currentIndexLabel: `${progressLabel}: preparing record index`,
+      currentIndexProcessedPoints: 0,
+      currentIndexTotalPoints: assets.length,
+    })
+    const recordIndexParts: BlobPart[] = [
+      bytesAsBlobPart(encodeHeader(
+          ASSET_TABLE_MAGIC,
+          materialized.version,
+          assets.length,
+          ASSET_RECORD_INDEX_ENTRY_SIZE,
+        )),
+    ]
+    const idMapIds = new Uint32Array(assets.length)
+
+    for (let offset = 0; offset < assets.length; offset += ASSET_CHUNK_SIZE) {
+      const chunk = assets.slice(offset, offset + ASSET_CHUNK_SIZE)
+      const payloads = chunk.map((item) => textEncoder.encode(JSON.stringify(item)))
+      const chunkByteLength = payloads.reduce(
+        (total, payload) => total + 4 + payload.byteLength,
+        0,
+      )
+      const chunkBytes = new Uint8Array(chunkByteLength)
+      const chunkView = new DataView(
+        chunkBytes.buffer,
+        chunkBytes.byteOffset,
+        chunkBytes.byteLength,
+      )
+      const recordBytes = new Uint8Array(chunk.length * ASSET_RECORD_INDEX_ENTRY_SIZE)
+      const recordView = new DataView(recordBytes.buffer)
+      let chunkOffset = 0
+      for (let index = 0; index < chunk.length; index += 1) {
+        const assetId = offset + index
+        const payload = payloads[index]
+        chunkView.setUint32(chunkOffset, payload.byteLength, true)
+        chunkBytes.set(payload, chunkOffset + 4)
+        const recordOffset = index * ASSET_RECORD_INDEX_ENTRY_SIZE
+        recordView.setUint32(recordOffset, offset / ASSET_CHUNK_SIZE, true)
+        recordView.setUint32(recordOffset + 4, chunkOffset, true)
+        recordView.setUint32(recordOffset + 8, payload.byteLength, true)
+        idMapIds[assetId] = assetId
+        chunkOffset += 4 + payload.byteLength
+      }
+      const chunkId = String(offset / ASSET_CHUNK_SIZE).padStart(6, '0')
+      await writeFileParts(
+        assetsDir,
+        `${ASSET_CHUNK_PREFIX}${chunkId}${ASSET_BINARY_CHUNK_EXTENSION}`,
+        [bytesAsBlobPart(chunkBytes)],
+      )
+      recordIndexParts.push(bytesAsBlobPart(recordBytes))
+      const written = Math.min(assets.length, offset + chunk.length)
+      if (written % 50_000 === 0 || written === assets.length) {
+        console.log('[geo-index:worker] materialize asset write progress', {
+          written,
+          total: assets.length,
+        })
+        postProgress?.({
+          phase: 'building',
+          pointCount: assets.length,
+          builtIndexes: 0,
+          totalIndexes: 1,
+          currentIndexId: 'file-time-geo',
+          currentIndexLabel: `${progressLabel}: writing asset table`,
+          currentIndexProcessedPoints: written,
+          currentIndexTotalPoints: assets.length,
+        })
+      }
+      await yieldToEventLoop()
+    }
+    postProgress?.({
+      phase: 'building',
+      pointCount: assets.length,
+      builtIndexes: 0,
+      totalIndexes: 1,
+      currentIndexId: 'file-time-geo',
+      currentIndexLabel: `${progressLabel}: sorting asset id map`,
+      currentIndexProcessedPoints: assets.length,
+      currentIndexTotalPoints: assets.length,
+    })
+    idMapIds.sort((left, right) =>
+      assets[left].contentHash < assets[right].contentHash
+        ? -1
+        : assets[left].contentHash > assets[right].contentHash
+          ? 1
+          : left - right,
+    )
+    const idMapParts: BlobPart[] = [
+      bytesAsBlobPart(encodeHeader(
+        ASSET_ID_MAP_MAGIC,
+        materialized.version,
+        assets.length,
+        ASSET_ID_MAP_ENTRY_SIZE,
+      )),
+    ]
+    for (let offset = 0; offset < idMapIds.length; offset += ASSET_CHUNK_SIZE) {
+      const count = Math.min(ASSET_CHUNK_SIZE, idMapIds.length - offset)
+      const idMapBytes = new Uint8Array(count * ASSET_ID_MAP_ENTRY_SIZE)
+      const idMapView = new DataView(idMapBytes.buffer)
+      for (let index = 0; index < count; index += 1) {
+        const assetId = idMapIds[offset + index]
+        const idMapOffset = index * ASSET_ID_MAP_ENTRY_SIZE
+        idMapBytes.set(encodeHashKey(assets[assetId].contentHash), idMapOffset)
+        setUint64(idMapView, idMapOffset + 64, assetId)
+      }
+      idMapParts.push(bytesAsBlobPart(idMapBytes))
+      const processed = offset + count
+      if (processed % 50_000 === 0 || processed === idMapIds.length) {
+        postProgress?.({
+          phase: 'building',
+          pointCount: assets.length,
+          builtIndexes: 0,
+          totalIndexes: 1,
+          currentIndexId: 'file-time-geo',
+          currentIndexLabel: `${progressLabel}: writing asset id map`,
+          currentIndexProcessedPoints: processed,
+          currentIndexTotalPoints: idMapIds.length,
+        })
+        await yieldToEventLoop()
+      }
+    }
+    postProgress?.({
+      phase: 'building',
+      pointCount: assets.length,
+      builtIndexes: 0,
+      totalIndexes: 1,
+      currentIndexId: 'file-time-geo',
+      currentIndexLabel: `${progressLabel}: writing record index`,
+      currentIndexProcessedPoints: assets.length,
+      currentIndexTotalPoints: assets.length,
+    })
+    await writeFileParts(assetsDir, ASSET_RECORD_INDEX_FILE, recordIndexParts)
+    postProgress?.({
+      phase: 'building',
+      pointCount: assets.length,
+      builtIndexes: 0,
+      totalIndexes: 1,
+      currentIndexId: 'file-time-geo',
+      currentIndexLabel: `${progressLabel}: writing asset id index`,
+      currentIndexProcessedPoints: assets.length,
+      currentIndexTotalPoints: assets.length,
+    })
+    await writeFileParts(assetsDir, ASSET_ID_MAP_FILE, idMapParts)
+  }
+
+  private async writeMaterializedIndexFiles(
+    postProgress?: (progress: GeoIndexBuildProgress) => void,
+    currentIndexLabel = 'Catalog packed indexes',
+  ): Promise<void> {
+    const manifest = await this.ensureManifest()
+    this.clearResidentPackedIndexes()
+    manifest.indexAppliedVersion = -1
+    console.log('[geo-index:worker] write packed file catalog indexes start', {
+      catalogVersion: manifest.catalogVersion,
+      assetCount: manifest.assetCount,
+    })
+    const assetTable = await this.openAssetTable()
+    if (!assetTable || assetTable.catalogVersion !== manifest.catalogVersion) {
+      throw new Error('Catalog asset table is missing or stale. Finish the import before rebuilding indexes.')
+    }
+    const timeRecords: PackedIndexRecord[] = []
+    const cellRecords: PackedIndexBuildRecord[] = []
+    let processed = 0
+    for await (const { assetId, item } of assetTable.scan()) {
+      if (item.timestamp !== undefined) {
+        const hasGeo = item.latitude !== undefined && item.longitude !== undefined
+        const record: PackedIndexRecord = {
+          timestampSec: timestampSeconds(item.timestamp),
+          latE7: hasGeo ? latE7(item.latitude!) : 0,
+          lonE7: hasGeo ? lonE7(item.longitude!) : 0,
+          assetId,
+          kindFlags: kindFlags(item),
+        }
+        timeRecords.push(record)
+        if (hasGeo) {
+          cellRecords.push({
+            ...record,
+            cellId: geoCellId(record.latE7, record.lonE7),
+          })
+        }
+      }
+      processed += 1
+      if (processed % 50_000 === 0) {
+        console.log('[geo-index:worker] packed file catalog index scan progress', {
+          processed,
+          total: manifest.assetCount,
+        })
+        postProgress?.({
+          phase: 'building',
+          pointCount: manifest.assetCount,
+          builtIndexes: 0,
+          totalIndexes: 2,
+          currentIndexId: 'file-time-geo',
+          currentIndexLabel: `${currentIndexLabel}: scanning asset table`,
+          currentIndexProcessedPoints: processed,
+          currentIndexTotalPoints: manifest.assetCount,
+        })
+        await yieldToEventLoop()
+      }
+    }
+    const indexesDir = await childDirectory(await rootDirectory(), 'indexes')
+    console.log('[geo-index:worker] writing packed file catalog index files', {
+      timeRecords: timeRecords.length,
+      cellRecords: cellRecords.length,
+    })
+    await this.writePackedIndex(
+      indexesDir,
+      TIME_GEO_INDEX_FILE,
+      INDEX_KIND_TIME_GEO,
+      timeRecords,
+      postProgress,
+      currentIndexLabel,
+      0,
+      'time-first index',
+    )
+    await this.writePackedIndex(
+      indexesDir,
+      CELL_TIME_INDEX_FILE,
+      INDEX_KIND_CELL_TIME,
+      cellRecords,
+      postProgress,
+      currentIndexLabel,
+      1,
+      'location-first index',
+    )
+    console.log('[geo-index:worker] write packed file catalog indexes complete', {
+      catalogVersion: manifest.catalogVersion,
+      timeRecords: timeRecords.length,
+      cellRecords: cellRecords.length,
+    })
+  }
+
+  private async writePackedIndex(
+    indexesDir: FileSystemDirectoryHandle,
+    fileName: string,
+    kind: number,
+    records: PackedIndexRecord[],
+    postProgress: ((progress: GeoIndexBuildProgress) => void) | undefined,
+    currentIndexLabel: string,
+    builtIndexes: number,
+    indexLabel: string,
+  ): Promise<void> {
+    postProgress?.({
+      phase: 'building',
+      pointCount: records.length,
+      builtIndexes,
+      totalIndexes: 2,
+      currentIndexId: kind === INDEX_KIND_TIME_GEO ? 'file-time-geo' : 'file-cell-time',
+      currentIndexLabel: `${currentIndexLabel}: sorting ${indexLabel}`,
+      currentIndexProcessedPoints: 0,
+      currentIndexTotalPoints: records.length,
+    })
+    await yieldToEventLoop()
+    if (kind === INDEX_KIND_CELL_TIME) {
+      records.sort((a, b) =>
+        (a.cellId ?? 0) - (b.cellId ?? 0) ||
+        a.timestampSec - b.timestampSec ||
+        a.assetId - b.assetId,
+      )
+    } else {
+      records.sort((a, b) => a.timestampSec - b.timestampSec || a.assetId - b.assetId)
+    }
+    postProgress?.({
+      phase: 'building',
+      pointCount: records.length,
+      builtIndexes,
+      totalIndexes: 2,
+      currentIndexId: kind === INDEX_KIND_TIME_GEO ? 'file-time-geo' : 'file-cell-time',
+      currentIndexLabel: `${currentIndexLabel}: encoding ${indexLabel}`,
+      currentIndexProcessedPoints: 0,
+      currentIndexTotalPoints: records.length,
+    })
+    await yieldToEventLoop()
+    const recordSize = kind === INDEX_KIND_TIME_GEO ? TIME_GEO_RECORD_SIZE : CELL_TIME_RECORD_SIZE
+    const header = new Uint8Array(PACKED_INDEX_HEADER_SIZE)
+    const headerView = new DataView(header.buffer)
+    const manifest = await this.ensureManifest()
+    headerView.setUint32(0, PACKED_INDEX_MAGIC, true)
+    headerView.setUint32(4, BINARY_SCHEMA_VERSION, true)
+    headerView.setFloat64(8, manifest.catalogVersion, true)
+    headerView.setFloat64(16, manifest.assetCount, true)
+    headerView.setFloat64(24, records.length, true)
+    headerView.setUint32(32, CELL_SIZE_E7, true)
+    headerView.setUint32(36, recordSize, true)
+    headerView.setUint32(40, kind, true)
+    headerView.setUint32(44, LAT_CELL_COUNT, true)
+    headerView.setUint32(48, LON_CELL_COUNT, true)
+    headerView.setFloat64(56, PACKED_INDEX_HEADER_SIZE, true)
+    headerView.setFloat64(80, manifest.indexAppliedVersion, true)
+    const parts: BlobPart[] = [header]
+    for (let offset = 0; offset < records.length; offset += PACKED_SCAN_RECORDS) {
+      const chunk = records.slice(offset, offset + PACKED_SCAN_RECORDS)
+      const bytes = new Uint8Array(chunk.length * recordSize)
+      const view = new DataView(bytes.buffer)
+      for (let index = 0; index < chunk.length; index += 1) {
+        const record = chunk[index]
+        const recordOffset = index * recordSize
+        if (kind === INDEX_KIND_CELL_TIME) {
+          view.setBigUint64(recordOffset, BigInt(record.cellId ?? 0), true)
+          view.setUint32(recordOffset + 8, record.timestampSec, true)
+          view.setInt32(recordOffset + 12, record.latE7, true)
+          view.setInt32(recordOffset + 16, record.lonE7, true)
+          view.setUint32(recordOffset + 20, record.assetId, true)
+          view.setUint8(recordOffset + 24, record.kindFlags)
+        } else {
+          view.setUint32(recordOffset, record.timestampSec, true)
+          view.setInt32(recordOffset + 4, record.latE7, true)
+          view.setInt32(recordOffset + 8, record.lonE7, true)
+          view.setUint32(recordOffset + 12, record.assetId, true)
+          view.setUint8(recordOffset + 16, record.kindFlags)
+        }
+      }
+      parts.push(bytes)
+      const processed = Math.min(records.length, offset + chunk.length)
+      if (processed % (PACKED_SCAN_RECORDS * 8) === 0 || processed === records.length) {
+        postProgress?.({
+          phase: 'building',
+          pointCount: records.length,
+          builtIndexes,
+          totalIndexes: 2,
+          currentIndexId: kind === INDEX_KIND_TIME_GEO ? 'file-time-geo' : 'file-cell-time',
+          currentIndexLabel: `${currentIndexLabel}: encoding ${indexLabel}`,
+          currentIndexProcessedPoints: processed,
+          currentIndexTotalPoints: records.length,
+        })
+        await yieldToEventLoop()
+      }
+    }
+    postProgress?.({
+      phase: 'building',
+      pointCount: records.length,
+      builtIndexes,
+      totalIndexes: 2,
+      currentIndexId: kind === INDEX_KIND_TIME_GEO ? 'file-time-geo' : 'file-cell-time',
+      currentIndexLabel: `${currentIndexLabel}: writing ${indexLabel}`,
+      currentIndexProcessedPoints: records.length,
+      currentIndexTotalPoints: records.length,
+    })
+    await writeFileParts(indexesDir, fileName, parts)
+    postProgress?.({
+      phase: 'building',
+      pointCount: records.length,
+      builtIndexes: builtIndexes + 1,
+      totalIndexes: 2,
+      currentIndexId: kind === INDEX_KIND_TIME_GEO ? 'file-time-geo' : 'file-cell-time',
+      currentIndexLabel: `${currentIndexLabel}: wrote ${indexLabel}`,
+      currentIndexProcessedPoints: records.length,
+      currentIndexTotalPoints: records.length,
+    })
+  }
+
+  private async buildFileCatalogIndexes(
+    indexId: FileCatalogIndexId,
+    postProgress: (progress: GeoIndexBuildProgress) => void,
+  ): Promise<GeoIndexBuildSummary & { engineCount: number }> {
+    if (this.backgroundIndexPromise) {
+      await this.backgroundIndexPromise
+    }
+    const startedAt = performance.now()
+    const label = 'Catalog packed indexes'
+    console.log('[geo-index:worker] buildFileCatalogIndexes start', {
+      indexId,
+      label,
+    })
+    postProgress({
+      phase: 'building',
+      pointCount: 0,
+      builtIndexes: 0,
+      totalIndexes: 2,
+      currentIndexId: indexId,
+      currentIndexLabel: label,
+    })
+    let manifest = await this.ensureManifest()
+    manifest.indexAppliedVersion = -1
+    manifest.indexJob = {
+      status: 'indexing',
+      pendingSince: manifest.indexJob?.pendingSince ?? Date.now(),
+      startedAt: Date.now(),
+    }
+    await this.saveManifest()
+    if (manifest.materializedVersion !== manifest.catalogVersion) {
+      console.log('[geo-index:worker] materializing catalog before file index build', {
+        catalogVersion: manifest.catalogVersion,
+        materializedVersion: manifest.materializedVersion,
+      })
+      postProgress({
+        phase: 'building',
+        pointCount: manifest.assetCount || manifest.occurrenceCount,
+        builtIndexes: 0,
+        totalIndexes: 2,
+        currentIndexId: indexId,
+        currentIndexLabel: `${label}: materializing catalog`,
+        currentIndexProcessedPoints: 0,
+        currentIndexTotalPoints: manifest.assetCount || manifest.occurrenceCount,
+      })
+      await this.materialize(postProgress, `${label}: materializing catalog`)
+    }
+    await this.writeMaterializedIndexFiles(postProgress, label)
+    manifest = await this.ensureManifest()
+    manifest.indexAppliedVersion = manifest.catalogVersion
+    manifest.indexJob = {
+      status: 'current',
+      pendingSince: manifest.indexJob?.pendingSince,
+      startedAt: manifest.indexJob?.startedAt,
+      finishedAt: Date.now(),
+    }
+    await this.saveManifest()
+    await this.ensureResidentPackedIndexes()
+    console.log('[geo-index:worker] buildFileCatalogIndexes ready', {
+      indexId,
+      elapsedMs: performance.now() - startedAt,
+      pointCount: manifest.assetCount,
+    })
+    postProgress({
+      phase: 'ready',
+      pointCount: manifest.assetCount,
+      builtIndexes: 2,
+      totalIndexes: 2,
+      currentIndexId: indexId,
+      currentIndexLabel: label,
+      currentIndexProcessedPoints: manifest.assetCount,
+      currentIndexTotalPoints: manifest.assetCount,
+    })
+    return {
+      pointCount: manifest.assetCount,
+      buildTimeMs: performance.now() - startedAt,
+      engineCount: 2,
+    }
+  }
+
+  private async fileCatalogIndexStats(
+    indexId: FileCatalogIndexId,
+  ): Promise<SearchIndexStats> {
+    const manifest = await this.ensureManifest()
+    const index = await this.readPackedIndexHeader(indexId)
+    const resident = this.residentPackedIndexes.get(indexId)
+    const indexCatalogVersion = index?.catalogVersion
+    const isCurrent =
+      Boolean(index) &&
+      manifest.materializedVersion === manifest.catalogVersion &&
+      manifest.indexAppliedVersion === manifest.catalogVersion &&
+      indexCatalogVersion === manifest.catalogVersion
+    const isResident =
+      isCurrent &&
+      resident?.catalogVersion === manifest.catalogVersion &&
+      resident?.indexSizeBytes === index?.indexSizeBytes
+    if (isCurrent && !isResident && !this.residentPackedIndexLoadError) {
+      this.scheduleResidentPackedIndexPreload()
+    }
+
+    return {
+      ...defaultSearchStats(
+        indexId,
+        fileCatalogIndexSpec(indexId).label,
+      ),
+      pointCount: manifest.assetCount,
+      indexSizeBytes: index?.indexSizeBytes,
+      residentBytes: isResident ? resident.indexSizeBytes : undefined,
+      indexStorage: isResident ? 'memory' : 'disk',
+      indexStatus: this.residentPackedIndexLoadError
+        ? 'failed'
+        : isCurrent
+        ? 'current'
+        : manifest.indexJob?.status === 'indexing'
+          ? 'indexing'
+          : manifest.indexJob?.status === 'pending'
+            ? 'pending'
+          : manifest.indexJob?.status === 'failed'
+              ? 'failed'
+              : index ? 'stale' : 'missing',
+      catalogVersion: manifest.catalogVersion,
+      indexCatalogVersion,
+    }
+  }
+
+  private createMaterializedCatalog(
+    version: number,
+    assets: MediaItem[],
+    alreadyNormalized = false,
+  ): MaterializedCatalog {
+    const normalized = alreadyNormalized
+      ? assets
+      : assets.map((item) => normalizeMediaItem(item, item.locations))
+    const byId = new Map(normalized.map((item) => [item.id, item]))
+    const geoPoints = normalized.flatMap((item) => {
+      if (item.latitude === undefined || item.longitude === undefined) return []
+      return [
+        {
+          mediaId: item.id,
+          kind: item.kind,
+          lat: item.latitude,
+          lon: item.longitude,
+          timestamp: item.timestamp,
+        },
+      ]
+    })
+    return {
+      version,
+      assets: normalized,
+      byId,
+      geoPoints,
+    }
+  }
 }
 
-function prepareImportSource(
-  activeDb: SqliteDb,
-  source: MediaSource,
-  duplicateSourceIds: string[],
-): void {
-  removeSourcesFromSqlite(activeDb, duplicateSourceIds)
-  upsertSourceIntoSqlite(activeDb, source)
+async function diskSegmentedTreeOpfsDirectory(
+  engineId: DiskSegmentedEngineId,
+): Promise<FileSystemDirectoryHandle> {
+  const root = await rootDirectory()
+  const indexes = await childDirectory(root, 'indexes')
+  const engine = await childDirectory(indexes, engineId)
+  return childDirectory(engine, 'v2')
+}
+
+function createOpfsDiskSegmentedTreeStore(): DiskSegmentedTreeStore {
+  return {
+    async readManifest(engineId) {
+      const directory = await diskSegmentedTreeOpfsDirectory(engineId)
+      const file = await readFile(directory, 'manifest.json')
+      if (!file) return undefined
+      return JSON.parse(await file.text()) as DiskSegmentedTreeManifest
+    },
+    async writeManifest(engineId, manifest) {
+      const directory = await diskSegmentedTreeOpfsDirectory(engineId)
+      await writeFile(directory, 'manifest.json', JSON.stringify(manifest))
+    },
+    async readSegment(engineId, segmentId) {
+      const directory = await diskSegmentedTreeOpfsDirectory(engineId)
+      return (await readFile(directory, `${segmentId}.bin`))?.arrayBuffer()
+    },
+    async writeSegment(engineId, segmentId, data) {
+      const directory = await diskSegmentedTreeOpfsDirectory(engineId)
+      await writeFile(directory, `${segmentId}.bin`, data)
+    },
+    async clear(engineId) {
+      await clearDirectory(await diskSegmentedTreeOpfsDirectory(engineId))
+    },
+  }
+}
+
+async function buildSearchIndexes(
+  store: CatalogStore,
+  requestedIndexId: string,
+  forceRebuild: boolean,
+  postProgress: (progress: GeoIndexBuildProgress) => void,
+): Promise<GeoIndexBuildSummary & { engineCount: number }> {
+  const startedAt = performance.now()
+  const selectedIndexId = isDiskSegmentedEngineId(requestedIndexId)
+    ? requestedIndexId
+    : 'segmented-ball-tree'
+  const catalogEpoch = await store.catalogEpoch()
+  const diskIndex = diskSegmentedIndex(store, selectedIndexId)
+
+  postProgress({
+    phase: 'loading',
+    pointCount: 0,
+    builtIndexes: 0,
+    totalIndexes: 1,
+    currentIndexId: selectedIndexId,
+    currentIndexLabel: diskIndex.label,
+  })
+
+  if (!forceRebuild) {
+    const restored = await diskIndex.prepare(catalogEpoch)
+    if (restored) {
+      const stats = await diskIndex.stats()
+      postProgress({
+        phase: 'ready',
+        pointCount: stats.pointCount,
+        builtIndexes: 1,
+        totalIndexes: 1,
+        currentIndexId: selectedIndexId,
+        currentIndexLabel: diskIndex.label,
+      })
+      return {
+        pointCount: stats.pointCount,
+        buildTimeMs: performance.now() - startedAt,
+        engineCount: 1,
+      }
+    }
+  }
+
+  const pointCount = await diskIndex.build(
+    (onBatch) => store.forEachGeoPointBatch(100_000, onBatch),
+    catalogEpoch,
+    (processedPoints, totalPoints) => {
+      postProgress({
+        phase: 'building',
+        pointCount: totalPoints ?? processedPoints,
+        builtIndexes: 0,
+        totalIndexes: 1,
+        currentIndexId: selectedIndexId,
+        currentIndexLabel: diskIndex.label,
+        currentIndexProcessedPoints: processedPoints,
+        currentIndexTotalPoints: totalPoints,
+      })
+    },
+  )
+  postProgress({
+    phase: 'ready',
+    pointCount,
+    builtIndexes: 1,
+    totalIndexes: 1,
+    currentIndexId: selectedIndexId,
+    currentIndexLabel: diskIndex.label,
+  })
+  return {
+    pointCount,
+    buildTimeMs: performance.now() - startedAt,
+    engineCount: 1,
+  }
 }
 
 export async function fileContentHash(file: File): Promise<string> {
@@ -1666,21 +2882,22 @@ export async function fileContentHash(file: File): Promise<string> {
   return bytesToHex(new Uint8Array(digest))
 }
 
-async function stableOccurrenceId(
-  sourceId: string,
-  relativePath: string,
-): Promise<string> {
+function bytesToHex(bytes: Uint8Array): string {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+async function stableId(...parts: string[]): Promise<string> {
+  return sha256Hex(new TextEncoder().encode(parts.join('\n')).buffer)
+}
+
+async function stableOccurrenceId(sourceId: string, relativePath: string): Promise<string> {
   return stableId(sourceId, relativePath)
 }
 
 async function writeThumbnail(id: string, file: File): Promise<string | undefined> {
-  if (
-    typeof createImageBitmap !== 'function' ||
-    typeof OffscreenCanvas === 'undefined'
-  ) {
+  if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas === 'undefined') {
     return undefined
   }
-
   try {
     const bitmap = await createImageBitmap(file)
     const maxSide = 360
@@ -1690,22 +2907,16 @@ async function writeThumbnail(id: string, file: File): Promise<string | undefine
     const canvas = new OffscreenCanvas(width, height)
     const context = canvas.getContext('2d')
     if (!context) return undefined
-
     context.drawImage(bitmap, 0, 0, width, height)
     bitmap.close()
-
     const blob = await canvas.convertToBlob({
       type: 'image/webp',
       quality: 0.78,
     })
     const root = await navigator.storage.getDirectory()
-    const thumbs = await root.getDirectoryHandle('thumbs', { create: true })
+    const thumbs = await childDirectory(root, 'thumbs')
     const key = `${id}.webp`
-    const handle = await thumbs.getFileHandle(key, { create: true })
-    const writable = await handle.createWritable?.()
-    if (!writable) return undefined
-    await writable.write(blob)
-    await writable.close()
+    await writeFile(thumbs, key, blob)
     return `thumbs/${key}`
   } catch {
     return undefined
@@ -1726,21 +2937,16 @@ async function readImageMetadata(file: File): Promise<{
       reviveValues: true,
     })
     .catch(() => undefined)
-
   const record = isRecord(metadata) ? metadata : {}
-  const latitude = numeric(record.latitude) ?? numeric(record.GPSLatitude)
-  const longitude = numeric(record.longitude) ?? numeric(record.GPSLongitude)
-  const timestamp =
-    dateMillis(record.DateTimeOriginal) ??
-    dateMillis(record.CreateDate) ??
-    dateMillis(record.DateCreated) ??
-    dateMillis(record.ModifyDate) ??
-    dateMillis(record.DateTime)
-
   return {
-    timestamp,
-    latitude,
-    longitude,
+    latitude: numeric(record.latitude) ?? numeric(record.GPSLatitude),
+    longitude: numeric(record.longitude) ?? numeric(record.GPSLongitude),
+    timestamp:
+      dateMillis(record.DateTimeOriginal) ??
+      dateMillis(record.CreateDate) ??
+      dateMillis(record.DateCreated) ??
+      dateMillis(record.ModifyDate) ??
+      dateMillis(record.DateTime),
   }
 }
 
@@ -1753,7 +2959,6 @@ async function mediaFromFile(
   const file = await fileHandle.getFile()
   const kind = detectMediaKind(file)
   if (!kind || kind === 'geo_point') return undefined
-
   const contentHash = await fileContentHash(file)
   const locationId = await stableOccurrenceId(sourceId, relativePath)
   const location: MediaLocation = {
@@ -1773,17 +2978,14 @@ async function mediaFromFile(
     sizeBytes: file.size,
     locations: [location],
   }
-
   if (kind === 'video') {
     return {
       ...base,
       timestamp: file.lastModified || undefined,
     }
   }
-
   const imageMetadata = await readImageMetadata(file)
   const thumbnailKey = await writeThumbnail(contentHash, file)
-
   return {
     ...base,
     ...imageMetadata,
@@ -1807,23 +3009,18 @@ function geoPointItemFromParsedPoint(
     point.longitude,
     point.timestamp,
   )
-
-  const locationId = geoPointLocationId(sourceId, contentHash)
-
-  const displayName = `${sourceLabel} #${point.index}`
   const location: MediaLocation = {
-    id: locationId,
+    id: geoPointLocationId(sourceId, contentHash),
     sourceId,
     sourceLabel,
     pointIndex: point.index,
   }
-
-  const item: MediaItem = {
+  return {
     id: contentHash,
     contentHash,
     sourceId,
     relativePath: sourceLabel,
-    displayName,
+    displayName: `${sourceLabel} #${point.index}`,
     kind: 'geo_point',
     mimeType,
     sizeBytes: 0,
@@ -1832,8 +3029,6 @@ function geoPointItemFromParsedPoint(
     longitude: point.longitude,
     locations: [location],
   }
-
-  return item
 }
 
 function geoPointItemsFromParsedPoints(
@@ -1843,12 +3038,7 @@ function geoPointItemsFromParsedPoints(
   points: ParsedGeoPoint[],
 ): MediaItem[] {
   return points.map((point) =>
-    geoPointItemFromParsedPoint(
-      sourceId,
-      sourceLabel,
-      mimeType,
-      point,
-    ),
+    geoPointItemFromParsedPoint(sourceId, sourceLabel, mimeType, point),
   )
 }
 
@@ -1882,14 +3072,6 @@ async function importFolderIntoCatalog(
   const flushBatch = async (phase: ImportProgress['phase']) => {
     if (batch.length === 0) return
     const items = batch.splice(0)
-    postProgress({
-      phase,
-      sourceLabel,
-      scannedFiles,
-      totalFiles,
-      acceptedMedia,
-      skippedFiles,
-    })
     await store.writeMediaBatch(items)
     postProgress({
       phase,
@@ -1909,41 +3091,24 @@ async function importFolderIntoCatalog(
       }
       if (entry.kind === 'directory') {
         await countFiles(entry as FileSystemDirectoryHandle)
-        if (cancelled) return
-        continue
-      }
-
-      totalFiles += 1
-      if (totalFiles % 200 === 0) {
-        postProgress({
-          phase: 'counting',
-          sourceLabel,
-          scannedFiles: 0,
-          totalFiles,
-          acceptedMedia: 0,
-          skippedFiles: 0,
-        })
+      } else {
+        totalFiles += 1
       }
     }
   }
 
-  async function walk(
-    directoryHandle: FileSystemDirectoryHandle,
-    prefix: string,
-  ): Promise<void> {
+  async function walk(directoryHandle: FileSystemDirectoryHandle, prefix: string): Promise<void> {
     for await (const [name, entry] of directoryHandle.entries()) {
       if (isCancelled()) {
         cancelled = true
         return
       }
       const relativePath = prefix ? `${prefix}/${name}` : name
-
       if (entry.kind === 'directory') {
         await walk(entry as FileSystemDirectoryHandle, relativePath)
         if (cancelled) return
         continue
       }
-
       scannedFiles += 1
       try {
         const item = await mediaFromFile(
@@ -1955,21 +3120,16 @@ async function importFolderIntoCatalog(
         if (item) {
           batch.push(item)
           acceptedMedia += 1
-          if (batch.length >= IMPORT_BATCH_SIZE) {
-            await flushBatch('scanning')
-          }
+          if (batch.length >= IMPORT_BATCH_SIZE) await flushBatch('scanning')
         } else {
           skippedFiles += 1
         }
       } catch (error) {
         skippedFiles += 1
         errors.push(
-          `${relativePath}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+          `${relativePath}: ${error instanceof Error ? error.message : String(error)}`,
         )
       }
-
       if (scannedFiles % 20 === 0) {
         postProgress({
           phase: 'scanning',
@@ -1989,32 +3149,16 @@ async function importFolderIntoCatalog(
     sourceLabel,
     scannedFiles: 0,
     totalFiles,
-    acceptedMedia: 0,
-    skippedFiles: 0,
+    acceptedMedia,
+    skippedFiles,
   })
   await countFiles(handle)
   if (cancelled) return summary()
   await store.prepareImportSource(source, duplicateSourceIds)
-  if (isCancelled()) {
-    cancelled = true
-    return summary()
-  }
-
-  postProgress({
-    phase: 'scanning',
-    sourceLabel,
-    scannedFiles,
-    totalFiles,
-    acceptedMedia,
-    skippedFiles,
+  await store.withImportTransaction(async () => {
+    await walk(handle, '')
+    await flushBatch('storing')
   })
-  await store.withImportTransaction(
-    async () => {
-      await walk(handle, '')
-      await flushBatch('storing')
-    },
-  )
-
   return summary()
 }
 
@@ -2029,7 +3173,6 @@ async function readFileTextWithProgress(
   const chunks: string[] = []
   let bytesRead = 0
   let lastProgressAt = 0
-
   while (true) {
     if (isCancelled()) {
       await reader.cancel()
@@ -2037,7 +3180,6 @@ async function readFileTextWithProgress(
     }
     const { done, value } = await reader.read()
     if (done) break
-
     bytesRead += value.byteLength
     chunks.push(decoder.decode(value, { stream: true }))
     const now = performance.now()
@@ -2056,7 +3198,6 @@ async function readFileTextWithProgress(
       })
     }
   }
-
   const finalChunk = decoder.decode()
   if (finalChunk) chunks.push(finalChunk)
   return { text: chunks.join(''), cancelled: false }
@@ -2088,17 +3229,9 @@ async function importGpxIntoCatalog(
   isCancelled: CancellationSignal,
 ): Promise<{ acceptedMedia: number; skippedFiles: number; cancelled: boolean }> {
   const sourceLabel = source.label
-  const readResult = await readFileTextWithProgress(
-    file,
-    sourceLabel,
-    postProgress,
-    isCancelled,
-  )
-  if (readResult.cancelled) {
-    return { acceptedMedia: 0, skippedFiles: 0, cancelled: true }
-  }
-  const text = readResult.text
-  const parsed = parseGeoFilePoints(file.name || sourceLabel, text)
+  const readResult = await readFileTextWithProgress(file, sourceLabel, postProgress, isCancelled)
+  if (readResult.cancelled) return { acceptedMedia: 0, skippedFiles: 0, cancelled: true }
+  const parsed = parseGeoFilePoints(file.name || sourceLabel, readResult.text)
   let acceptedMedia = 0
   let cancelled = false
   const batch: MediaItem[] = []
@@ -2106,10 +3239,8 @@ async function importGpxIntoCatalog(
   const flushBatch = async (phase: ImportProgress['phase']) => {
     if (batch.length === 0) return
     const flushedItems = batch.length
-    await store.writeMediaBatch(batch)
+    await store.writeMediaBatch(batch.splice(0))
     acceptedMedia += flushedItems
-    batch.length = 0
-
     postProgress({
       phase,
       sourceLabel,
@@ -2124,62 +3255,24 @@ async function importGpxIntoCatalog(
     await yieldToEventLoop()
   }
 
-  const commitIfRequested = async (phase: ImportProgress['phase']) => {
-    if (!importCommitRequested) return
-    importCommitRequested = false
-    await flushBatch(phase)
-    await store.commitImport()
-  }
-
   await store.withImportTransaction(async () => {
-    for (
-      let offset = 0;
-      offset < parsed.points.length;
-      offset += GEO_POINT_ITEM_BUILD_CHUNK_SIZE
-    ) {
+    for (let offset = 0; offset < parsed.points.length; offset += GEO_POINT_ITEM_BUILD_CHUNK_SIZE) {
       if (isCancelled()) {
         cancelled = true
         break
       }
-      const itemChunk = geoPointItemsFromParsedPoints(
-        source.id,
-        sourceLabel,
-        parsed.mimeType,
-        parsed.points.slice(offset, offset + GEO_POINT_ITEM_BUILD_CHUNK_SIZE),
+      batch.push(
+        ...geoPointItemsFromParsedPoints(
+          source.id,
+          sourceLabel,
+          parsed.mimeType,
+          parsed.points.slice(offset, offset + GEO_POINT_ITEM_BUILD_CHUNK_SIZE),
+        ),
       )
-
-      for (const item of itemChunk) {
-        batch.push(item)
-        if (batch.length >= store.geoImportWriteBatchSize) {
-          await flushBatch('storing')
-          await commitIfRequested('storing')
-          if (isCancelled()) {
-            cancelled = true
-            break
-          }
-        }
-      }
-      if (cancelled) break
-
-      postProgress({
-        phase: 'scanning',
-        sourceLabel,
-        scannedFiles: 1,
-        totalFiles: 1,
-        acceptedMedia,
-        skippedFiles: parsed.skippedPoints,
-        currentPath: sourceLabel,
-        scannedBytes: file.size,
-        totalBytes: file.size,
-      })
-      await yieldToEventLoop()
-      await commitIfRequested('storing')
+      if (batch.length >= store.geoImportWriteBatchSize) await flushBatch('storing')
     }
-
     await flushBatch('storing')
-    await commitIfRequested('storing')
   })
-
   return { acceptedMedia, skippedFiles: parsed.skippedPoints, cancelled }
 }
 
@@ -2215,72 +3308,40 @@ async function importGoogleTakeoutIntoCatalog(
       totalBytes: file.size,
     })
   }
-
   const maybeEmitProgress = () => {
     const now = performance.now()
     if (now - lastProgressAt < PROGRESS_HEARTBEAT_MS) return
     lastProgressAt = now
     emitProgress('scanning')
   }
-
   const flushBatch = async (phase: ImportProgress['phase']) => {
     if (batch.length === 0) return
     const flushedItems = batch.length
-    await store.writeMediaBatch(batch)
+    await store.writeMediaBatch(batch.splice(0))
     acceptedMedia += flushedItems
-    batch.length = 0
     emitProgress(phase)
     await yieldToEventLoop()
-    if (isCancelled()) {
-      cancelled = true
-    }
   }
-
-  const commitIfRequested = async (phase: ImportProgress['phase']) => {
-    if (!importCommitRequested) return
-    importCommitRequested = false
-    await flushBatch(phase)
-    await store.commitImport()
-  }
-
   const consumePoints = async () => {
     const points = pendingPoints.splice(0)
-
-    for (
-      let offset = 0;
-      offset < points.length;
-      offset += GEO_POINT_ITEM_BUILD_CHUNK_SIZE
-    ) {
+    for (let offset = 0; offset < points.length; offset += GEO_POINT_ITEM_BUILD_CHUNK_SIZE) {
       if (isCancelled()) {
         cancelled = true
         break
       }
-      const pointChunk = points.slice(
-        offset,
-        offset + GEO_POINT_ITEM_BUILD_CHUNK_SIZE,
+      batch.push(
+        ...geoPointItemsFromParsedPoints(
+          source.id,
+          sourceLabel,
+          'application/json',
+          points.slice(offset, offset + GEO_POINT_ITEM_BUILD_CHUNK_SIZE),
+        ),
       )
-      const itemChunk = geoPointItemsFromParsedPoints(
-        source.id,
-        sourceLabel,
-        'application/json',
-        pointChunk,
-      )
-
-      for (const item of itemChunk) {
-        batch.push(item)
-        if (batch.length >= store.geoImportWriteBatchSize) {
-          await flushBatch('scanning')
-          if (cancelled) break
-        }
-      }
-      if (cancelled) break
-
+      if (batch.length >= store.geoImportWriteBatchSize) await flushBatch('scanning')
       maybeEmitProgress()
       await yieldToEventLoop()
-      await commitIfRequested('scanning')
     }
   }
-
   const consumeText = async (text: string) => {
     let chunk = text
     while (true) {
@@ -2288,57 +3349,41 @@ async function importGoogleTakeoutIntoCatalog(
         cancelled = true
         break
       }
-      const result = parser.feed(chunk, {
-        maxDurationMs: GEO_IMPORT_PARSE_SLICE_MS,
-      })
+      const result = parser.feed(chunk, { maxDurationMs: GEO_IMPORT_PARSE_SLICE_MS })
       chunk = ''
       skippedFiles += result.skippedPoints
       pendingPoints.push(...result.points)
       await consumePoints()
       maybeEmitProgress()
-
       if (cancelled || !result.paused) break
       await yieldToEventLoop()
     }
   }
 
   emitProgress('scanning')
-
-  await store.withImportTransaction(
-    async () => {
-      while (true) {
-        if (isCancelled()) {
-          cancelled = true
-          await reader.cancel()
-          break
-        }
-        const { done, value } = await reader.read()
-        if (done) break
-
-        bytesRead += value.byteLength
-        const text = decoder.decode(value, { stream: true })
-        await consumeText(text)
-        await commitIfRequested('scanning')
-        if (cancelled) break
+  await store.withImportTransaction(async () => {
+    while (true) {
+      if (isCancelled()) {
+        cancelled = true
+        await reader.cancel()
+        break
       }
-
-      if (!cancelled) {
-        const finalChunk = decoder.decode()
-        if (finalChunk) {
-          await consumeText(finalChunk)
-          await commitIfRequested('scanning')
-        }
-
-        const final = parser.finish()
-        skippedFiles = final.skippedPoints
-        await consumePoints()
-      }
-      await flushBatch('storing')
-      await commitIfRequested('storing')
-    },
-  )
+      const { done, value } = await reader.read()
+      if (done) break
+      bytesRead += value.byteLength
+      await consumeText(decoder.decode(value, { stream: true }))
+      if (cancelled) break
+    }
+    if (!cancelled) {
+      const finalChunk = decoder.decode()
+      if (finalChunk) await consumeText(finalChunk)
+      const final = parser.finish()
+      skippedFiles = final.skippedPoints
+      await consumePoints()
+    }
+    await flushBatch('storing')
+  })
   emitProgress('storing')
-
   return { acceptedMedia, skippedFiles, cancelled }
 }
 
@@ -2350,7 +3395,6 @@ async function importGeoFileIntoCatalog(
 ): Promise<ImportSummary> {
   const { source, duplicateSourceIds, file } = payload
   const sourceLabel = source.label
-
   const cancelledSummary = (): ImportSummary => ({
     source,
     sourceLabel,
@@ -2361,7 +3405,6 @@ async function importGeoFileIntoCatalog(
     errors: [],
     cancelled: true,
   })
-
   postProgress({
     phase: 'counting',
     sourceLabel,
@@ -2373,29 +3416,17 @@ async function importGeoFileIntoCatalog(
     scannedBytes: 0,
     totalBytes: file.size,
   })
-
   if (isCancelled()) return cancelledSummary()
-
   await store.prepareImportSource(source, duplicateSourceIds)
   if (isCancelled()) return cancelledSummary()
-
   const prefix = await file.slice(0, GEO_IMPORT_PREFIX_BYTES).text()
   if (isCancelled()) return cancelledSummary()
   const result = jsonLikePrefix(prefix)
     ? await (async () => {
         throwKnownUnsupportedJsonPrefix(prefix)
-        return importGoogleTakeoutIntoCatalog(
-          file,
-          source,
-          store,
-          postProgress,
-          isCancelled,
-        )
+        return importGoogleTakeoutIntoCatalog(file, source, store, postProgress, isCancelled)
       })()
-    : await (async () => {
-        return importGpxIntoCatalog(file, source, store, postProgress, isCancelled)
-      })()
-
+    : await importGpxIntoCatalog(file, source, store, postProgress, isCancelled)
   return {
     source,
     sourceLabel,
@@ -2408,1240 +3439,13 @@ async function importGeoFileIntoCatalog(
   }
 }
 
-function sqliteListMediaStatement(query: CatalogQuery): {
-  sql: string
-  bind: unknown[]
-  limit: number
-  offset: number
-} {
-  const where = [
-    `EXISTS (
-      SELECT 1 FROM media_locations l
-      WHERE l.content_hash = a.content_hash
-    )`,
-  ]
-  const bind: unknown[] = []
-
-  if (query.kind === 'media') {
-    where.push("a.kind IN ('image', 'video')")
-  } else if (query.kind && query.kind !== 'all') {
-    where.push('a.kind = ?')
-    bind.push(query.kind)
-  }
-  if (typeof query.hasGeo === 'boolean') {
-    where.push(
-      query.hasGeo
-        ? 'a.latitude IS NOT NULL AND a.longitude IS NOT NULL'
-        : '(a.latitude IS NULL OR a.longitude IS NULL)',
-    )
-  }
-  if (query.geoBounds) {
-    where.push('a.latitude BETWEEN ? AND ?')
-    bind.push(query.geoBounds.minLat, query.geoBounds.maxLat)
-    where.push('a.longitude BETWEEN ? AND ?')
-    bind.push(query.geoBounds.minLon, query.geoBounds.maxLon)
-  }
-
-  where.push('a.timestamp IS NOT NULL')
-  timeWhere(query, where, bind, 'a.')
-
-  const order =
-    query.sort === 'timestamp_asc'
-      ? 'a.timestamp ASC, a.content_hash ASC'
-      : 'a.timestamp DESC, a.content_hash DESC'
-  const limit = Math.max(1, Math.min(query.limit ?? 500, 10_000))
-  const offset = Math.max(0, query.offset ?? 0)
-  bind.push(limit, offset)
-
-  return {
-    sql: `
-      SELECT a.*
-      FROM media_assets a
-      WHERE ${where.join(' AND ')}
-      ORDER BY ${order}
-      LIMIT ? OFFSET ?
-    `,
-    bind,
-    limit,
-    offset,
-  }
-}
-
-function sqliteExplainPlan(
-  activeDb: SqliteDb,
-  sql: string,
-  bind: unknown[],
-): SqlExplainPlan {
-  const rows = activeDb.selectObjects(
-    `EXPLAIN QUERY PLAN ${sql}`,
-    bind,
-  ) as SqliteSelectPlanRow[]
-
-  return createSqlExplainPlan(
-    rows.map((row) => ({
-      id: Number(row.id ?? 0),
-      parent: Number(row.parent ?? 0),
-      detail: String(row.detail ?? ''),
-    })),
-  )
-}
-
-async function sqliteSearchRows(
-  query: CatalogQuery,
-  options?: { explainSql?: boolean },
-): Promise<MediaSearchRows> {
-  await ensureDb()
-  const activeDb = requireDb()
-  const statement = sqliteListMediaStatement(query)
-  const sqlPlan = options?.explainSql
-    ? sqliteExplainPlan(activeDb, statement.sql, statement.bind)
-    : undefined
-  const rows = activeDb.selectObjects(statement.sql, statement.bind)
-
-  return {
-    items: mediaItemsFromAssetRows(activeDb, rows),
-    sqlPlan,
-  }
-}
-
-async function listMedia(query: CatalogQuery): Promise<MediaItem[]> {
-  return (await sqliteSearchRows(query)).items
-}
-
-function defaultSearchStats(
-  engineId: string,
-  engineLabel: string,
-): SearchIndexStats {
-  return {
-    engineId,
-    engineLabel,
-    exact: true,
-    persistent: true,
-    pointCount: 0,
-    distanceComputations: 0,
-    nodesVisited: 0,
-    pagesRead: 0,
-    candidatesInspected: 0,
-    prunedByGeo: 0,
-    prunedByTime: 0,
-  }
-}
-
-function withQueryMetrics(
-  base: SearchIndexStats,
-  spec: SearchSpec,
-  storageMode: SearchStorageMode,
-  queryTimeMs: number,
-  rowsReturned: number,
-  limit: number,
-  offset: number,
-  limitReached: boolean,
-  sqlPlan?: SqlExplainPlan,
-): SearchIndexStats {
-  return {
-    ...base,
-    queryPurpose: spec.purpose,
-    storageMode,
-    queryTimeMs,
-    lastQueryTimeMs: base.lastQueryTimeMs ?? queryTimeMs,
-    rowsReturned,
-    limit,
-    offset,
-    limitReached,
-    sqlPlan,
-  }
-}
-
-function searchSpecToCatalogQuery(
-  spec: SearchSpec,
-  limit: number,
-): CatalogQuery {
-  return {
-    startTime: spec.startTime,
-    endTime: spec.endTime,
-    kind: spec.kind,
-    hasGeo: spec.hasGeo,
-    geoBounds: spec.geoBounds,
-    sort: spec.order.kind === 'timestamp' ? spec.order.sort : 'timestamp_desc',
-    limit,
-    offset: spec.offset,
-  }
-}
-
-function mediaItemsToSearchResults(items: MediaItem[]): SearchPage['items'] {
-  return items.map((item) => ({
-    item,
-    mediaId: item.id,
-  }))
-}
-
-async function enrichDistanceResults(
-  getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
-  results: GeoSearchResult[],
-): Promise<SearchPage['items']> {
-  const resultIds = Array.from(new Set(results.map((result) => result.mediaId)))
-  const itemChunks = await Promise.all(
-    Array.from({ length: Math.ceil(resultIds.length / 500) }, (_, index) =>
-      getMediaByIdsFn(resultIds.slice(index * 500, (index + 1) * 500)),
-    ),
-  )
-  const itemsById = new Map(
-    itemChunks.flat().map((item) => [item.id, item]),
-  )
-  return results.flatMap((result) => {
-    const item = itemsById.get(result.mediaId)
-    return item ? [{ ...result, item }] : []
-  })
-}
-
-function createSqlSearchEngine(
-  engineId: string,
-  engineLabel: string,
-  supportsGeoBounds: boolean,
-  storageMode: SearchStorageMode,
-  searchRowsFn: MediaSearchRowsFn,
-): SearchIndexEngine {
-  return {
-    id: engineId,
-    label: engineLabel,
-    capabilities: {
-      exact: true,
-      persistent: true,
-      requiresBuild: false,
-      supportsTimestampOrder: true,
-      supportsDistanceOrder: false,
-      supportsGeoBounds,
-      supportsTimeRange: true,
-      supportsKind: true,
-    },
-    canHandle(spec) {
-      return spec.order.kind === 'timestamp' && Boolean(spec.geoBounds) === supportsGeoBounds
-    },
-    async search(spec) {
-      const limit = Math.max(1, Math.min(spec.limit ?? 500, 10_000))
-      const offset = Math.max(0, spec.offset ?? 0)
-      const startedAt = performance.now()
-      const rows = await searchRowsFn(searchSpecToCatalogQuery(spec, limit + 1), {
-        explainSql: spec.diagnostics?.explainSql,
-      })
-      const limitedRows = rows.items.slice(0, limit)
-      const limitReached = rows.items.length > limit
-      return {
-        items: mediaItemsToSearchResults(limitedRows),
-        resultMetrics: withQueryMetrics(
-          defaultSearchStats(engineId, engineLabel),
-          spec,
-          storageMode,
-          performance.now() - startedAt,
-          limitedRows.length,
-          limit,
-          offset,
-          limitReached,
-          rows.sqlPlan,
-        ),
-        engineId,
-        engineLabel,
-        limitReached,
-      }
-    },
-    async stats() {
-      return defaultSearchStats(engineId, engineLabel)
-    },
-  }
-}
-
-function createDistanceSearchEngine(
-  geoIndex: (typeof geoIndexRegistry.indexes)[number],
-  getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
-  storageMode: SearchStorageMode,
-  store: CatalogStore,
-): SearchIndexEngine {
-  return {
-    id: geoIndex.id,
-    label: geoIndex.label,
-    capabilities: {
-      exact: geoIndex.capabilities.exact,
-      persistent: geoIndex.capabilities.persistent,
-      requiresBuild: true,
-      supportsTimestampOrder: false,
-      supportsDistanceOrder: true,
-      supportsGeoBounds: true,
-      supportsTimeRange: true,
-      supportsKind: true,
-    },
-    canHandle(spec) {
-      return spec.order.kind === 'distance'
-    },
-    async search(spec) {
-      if (spec.order.kind !== 'distance') {
-        throw new Error(`${geoIndex.label} cannot serve timestamp queries.`)
-      }
-
-      const limit = Math.max(1, Math.min(spec.limit ?? 500, 10_000))
-      const offset = Math.max(0, spec.offset ?? 0)
-      const startedAt = performance.now()
-      const query = {
-        startTime: spec.startTime,
-        endTime: spec.endTime,
-        lat: spec.order.point.lat,
-        lon: spec.order.point.lon,
-        k: limit,
-        offset: spec.offset,
-        kind: spec.kind,
-        geoBounds: spec.geoBounds,
-      }
-      const activeIndex = activeDiskSegmentedIndex(store, geoIndex.id)
-      const results = activeIndex
-        ? await activeIndex.search(query)
-        : await searchGeoIndex(store, {
-            indexId: geoIndex.id,
-            query,
-          })
-      const stats = activeIndex ? await activeIndex.stats() : await geoIndex.stats()
-      const resultMetrics = {
-        ...stats,
-        engineLabel: activeIndex?.label ?? geoIndex.label,
-        exact: activeIndex?.capabilities.exact ?? geoIndex.capabilities.exact,
-        persistent:
-          activeIndex?.capabilities.persistent ?? geoIndex.capabilities.persistent,
-      }
-      const items = await enrichDistanceResults(getMediaByIdsFn, results)
-      const limitReached =
-        results.length >= limit &&
-        resultMetrics.pointCount > offset + limit
-      return {
-        items,
-        resultMetrics: withQueryMetrics(
-          resultMetrics,
-          spec,
-          storageMode,
-          performance.now() - startedAt,
-          items.length,
-          limit,
-          offset,
-          limitReached,
-        ),
-        engineId: geoIndex.id,
-        engineLabel: geoIndex.label,
-        limitReached,
-      }
-    },
-    async stats() {
-      return {
-        ...(await geoIndex.stats()),
-        engineLabel: geoIndex.label,
-        exact: geoIndex.capabilities.exact,
-        persistent: geoIndex.capabilities.persistent,
-      }
-    },
-  }
-}
-
-function createSearchRegistry(
-  searchRowsFn: MediaSearchRowsFn,
-  getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
-  storageMode: SearchStorageMode,
-  store: CatalogStore,
-): SearchIndexEngineRegistry {
-  const engines: SearchIndexEngine[] = [
-    createSqlSearchEngine(
-      'sqlite-timestamp',
-      'SQLite timestamp B-tree',
-      false,
-      storageMode,
-      searchRowsFn,
-    ),
-    createSqlSearchEngine(
-      'sqlite-bbox-time',
-      'SQLite bbox/time B-tree',
-      true,
-      storageMode,
-      searchRowsFn,
-    ),
-  ]
-
-  engines.push(
-    ...geoIndexRegistry.indexes.map((index) =>
-      createDistanceSearchEngine(index, getMediaByIdsFn, storageMode, store),
-    ),
-  )
-
-  return new SearchIndexEngineRegistry(engines)
-}
-
-async function searchMediaWithCatalogFunctions(
-  spec: SearchSpec,
-  searchRowsFn: MediaSearchRowsFn,
-  getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
-  storageMode: SearchStorageMode,
-  store: CatalogStore,
-): Promise<SearchPage> {
-  return createSearchRegistry(
-    searchRowsFn,
-    getMediaByIdsFn,
-    storageMode,
-    store,
-  ).search(spec)
-}
-
-async function getMediaByIds(ids: string[]): Promise<MediaItem[]> {
-  await ensureDb()
-  if (ids.length === 0) return []
-
-  const activeDb = requireDb()
-  const placeholders = ids.map(() => '?').join(', ')
-  const rows = activeDb.selectObjects(
-    `SELECT * FROM media_assets WHERE content_hash IN (${placeholders})`,
-    ids,
-  )
-  const items = mediaItemsFromAssetRows(activeDb, rows)
-  const byId = new Map(items.map((item) => [item.id, item]))
-  return ids.flatMap((id) => {
-    const item = byId.get(id)
-    return item ? [item] : []
-  })
-}
-
-async function getGeoPoints(range: {
-  startTime?: number
-  endTime?: number
-}): Promise<GeoIndexPoint[]> {
-  await ensureDb()
-  const where = [
-    'a.latitude IS NOT NULL',
-    'a.longitude IS NOT NULL',
-    `EXISTS (
-      SELECT 1 FROM media_locations l
-      WHERE l.content_hash = a.content_hash
-    )`,
-  ]
-  const bind: unknown[] = []
-  timeWhere(range, where, bind, 'a.')
-
-  const rows = requireDb().selectObjects(
-    `
-      SELECT a.content_hash, a.latitude, a.longitude, a.timestamp
-        , a.kind
-      FROM media_assets a
-      WHERE ${where.join(' AND ')}
-      ORDER BY a.content_hash ASC
-    `,
-    bind,
-  )
-
-  return rows.map((row) => ({
-    mediaId: String(row.content_hash),
-    kind:
-      row.kind === 'image' || row.kind === 'video' || row.kind === 'geo_point'
-        ? row.kind
-        : undefined,
-    lat: toNumber(row.latitude) ?? 0,
-    lon: toNumber(row.longitude) ?? 0,
-    timestamp: toNumber(row.timestamp),
-  }))
-}
-
-async function forEachGeoPointBatch(
-  batchSize: number,
-  onBatch: (batch: GeoIndexPoint[], processedPoints: number) => Promise<void>,
-): Promise<number> {
-  await ensureDb()
-  const activeDb = requireDb()
-  let lastContentHash = ''
-  let processedPoints = 0
-
-  while (true) {
-    const rows = activeDb.selectObjects(
-      `
-        SELECT a.content_hash, a.latitude, a.longitude, a.timestamp, a.kind
-        FROM media_assets a
-        WHERE a.content_hash > ?
-          AND a.latitude IS NOT NULL
-          AND a.longitude IS NOT NULL
-          AND EXISTS (
-            SELECT 1 FROM media_locations l
-            WHERE l.content_hash = a.content_hash
-          )
-        ORDER BY a.content_hash ASC
-        LIMIT ?
-      `,
-      [lastContentHash, batchSize],
-    )
-    if (rows.length === 0) break
-
-    const batch: GeoIndexPoint[] = rows.map((row) => ({
-      mediaId: String(row.content_hash),
-      kind:
-        row.kind === 'image' || row.kind === 'video' || row.kind === 'geo_point'
-          ? row.kind
-          : undefined,
-      lat: toNumber(row.latitude) ?? 0,
-      lon: toNumber(row.longitude) ?? 0,
-      timestamp: toNumber(row.timestamp),
-    }))
-    processedPoints += batch.length
-    lastContentHash = batch[batch.length - 1]?.mediaId ?? lastContentHash
-    await onBatch(batch, processedPoints)
-    if (rows.length < batchSize) break
-  }
-
-  return processedPoints
-}
-
-async function buildGeoIndexes(
-  store: CatalogStore,
-  postProgress: (progress: GeoIndexBuildProgress) => void,
-): Promise<GeoIndexBuildSummary> {
-  const startedAt = performance.now()
-  const totalIndexes = geoIndexRegistry.indexes.length
-
-  postProgress({
-    phase: 'loading',
-    pointCount: 0,
-    builtIndexes: 0,
-    totalIndexes,
-  })
-
-  const points = await store.getGeoPoints({})
-
-  postProgress({
-    phase: 'building',
-    pointCount: points.length,
-    builtIndexes: 0,
-    totalIndexes,
-  })
-
-  let builtIndexes = 0
-  for (const index of geoIndexRegistry.indexes) {
-    postProgress({
-      phase: 'building',
-      pointCount: points.length,
-      builtIndexes,
-      totalIndexes,
-      currentIndexId: index.id,
-      currentIndexLabel: index.label,
-      currentIndexProcessedPoints: 0,
-      currentIndexTotalPoints: points.length,
-    })
-    await index.build(points, {
-      yieldEvery: 2_000,
-      onProgress: (progress) => {
-        postProgress({
-          phase: 'building',
-          pointCount: points.length,
-          builtIndexes,
-          totalIndexes,
-          currentIndexId: progress.indexId,
-          currentIndexLabel: progress.indexLabel,
-          currentIndexProcessedPoints: progress.processedPoints,
-          currentIndexTotalPoints: progress.totalPoints,
-        })
-      },
-    })
-    builtIndexes += 1
-    postProgress({
-      phase: 'building',
-      pointCount: points.length,
-      builtIndexes,
-      totalIndexes,
-      currentIndexId: index.id,
-      currentIndexLabel: index.label,
-    })
-  }
-
-  const summary = {
-    pointCount: points.length,
-    buildTimeMs: performance.now() - startedAt,
-  }
-
-  postProgress({
-    phase: 'ready',
-    pointCount: points.length,
-    builtIndexes,
-    totalIndexes,
-  })
-
-  return summary
-}
-
-function searchEngineCountForStore(store: CatalogStore): number {
-  void store
-  return geoIndexRegistry.indexes.length + 2
-}
-
-async function buildSearchIndexes(
-  store: CatalogStore,
-  indexId: string,
-  forceRebuild: boolean,
-  postProgress: (progress: GeoIndexBuildProgress) => void,
-): Promise<GeoIndexBuildSummary & { engineCount: number }> {
-  const startedAt = performance.now()
-  const totalIndexes = 1
-  const selectedIndexId =
-    indexId === 'brute-force'
-      ? 'brute-force'
-      : isDiskSegmentedEngineId(indexId)
-        ? indexId
-        : 'segmented-ball-tree'
-  const diskIndex = isDiskSegmentedEngineId(selectedIndexId)
-    ? diskSegmentedIndex(store, selectedIndexId)
-    : undefined
-  const registryIndex =
-    selectedIndexId === 'brute-force'
-      ? geoIndexRegistry.get('brute-force')
-      : geoIndexRegistry.get('segmented-ball-tree')
-  const index = diskIndex ?? registryIndex
-
-  traceStartup('[geo-index:worker]', 'buildSearchIndexes start', {
-    requestedIndexId: indexId,
-    selectedIndexId,
-    effectiveIndexId: index.id,
-    forceRebuild,
-    storageMode: store.storageMode,
-    hasDiskIndex: Boolean(diskIndex),
-    preparedSearchIndex,
-  })
-
-  postProgress({
-    phase: 'loading',
-    pointCount: 0,
-    builtIndexes: 0,
-    totalIndexes,
-    currentIndexId: index.id,
-    currentIndexLabel: index.label,
-  })
-
-  const catalogEpoch = await store.catalogEpoch()
-  traceStartup('[geo-index:worker]', 'catalog epoch loaded', {
-    selectedIndexId,
-    catalogEpoch,
-    preparedSearchIndex,
-  })
-  if (
-    !forceRebuild &&
-    preparedSearchIndex?.storageMode === store.storageMode &&
-    preparedSearchIndex?.indexId === index.id &&
-    preparedSearchIndex.catalogEpoch === catalogEpoch
-  ) {
-    traceStartup('[geo-index:worker]', 'using already-prepared worker index', {
-      indexId: index.id,
-      storageMode: store.storageMode,
-      catalogEpoch,
-    })
-    const stats = await index.stats()
-    postProgress({
-      phase: 'ready',
-      pointCount: stats.pointCount,
-      builtIndexes: totalIndexes,
-      totalIndexes,
-      currentIndexId: index.id,
-      currentIndexLabel: index.label,
-      currentIndexProcessedPoints: stats.pointCount,
-      currentIndexTotalPoints: stats.pointCount,
-    })
-
-    return {
-      pointCount: stats.pointCount,
-      buildTimeMs: performance.now() - startedAt,
-      engineCount: searchEngineCountForStore(store),
-    }
-  }
-
-  if (forceRebuild) {
-    traceStartup('[geo-index:worker]', 'skipping restore because forceRebuild=true', {
-      indexId: index.id,
-      storageMode: store.storageMode,
-      catalogEpoch,
-    })
-  } else if (preparedSearchIndex) {
-    traceStartup('[geo-index:worker]', 'already-prepared worker index did not match', {
-      indexId: index.id,
-      storageMode: store.storageMode,
-      catalogEpoch,
-      preparedSearchIndex,
-    })
-  } else {
-    traceStartup('[geo-index:worker]', 'no already-prepared worker index available', {
-      indexId: index.id,
-      storageMode: store.storageMode,
-      catalogEpoch,
-    })
-  }
-
-  if (!forceRebuild && diskIndex) {
-    traceStartup('[geo-index:worker]', 'attempting persisted disk index restore', {
-      indexId: index.id,
-      storageMode: store.storageMode,
-      catalogEpoch,
-    })
-    const restored = await diskIndex.prepare(catalogEpoch)
-    if (restored) {
-      traceStartup('[geo-index:worker]', 'persisted disk index restored', {
-        indexId: index.id,
-        storageMode: store.storageMode,
-        catalogEpoch,
-      })
-      const stats = await index.stats()
-      preparedSearchIndex = {
-        storageMode: store.storageMode,
-        indexId: index.id,
-        catalogEpoch,
-        cacheDirty: false,
-      }
-      postProgress({
-        phase: 'ready',
-        pointCount: stats.pointCount,
-        builtIndexes: totalIndexes,
-        totalIndexes,
-        currentIndexId: index.id,
-        currentIndexLabel: index.label,
-        currentIndexProcessedPoints: stats.pointCount,
-        currentIndexTotalPoints: stats.pointCount,
-      })
-
-      return {
-        pointCount: stats.pointCount,
-        buildTimeMs: performance.now() - startedAt,
-        engineCount: searchEngineCountForStore(store),
-      }
-    }
-    traceStartup('[geo-index:worker]', 'persisted disk index restore failed; rebuilding', {
-      indexId: index.id,
-      storageMode: store.storageMode,
-      catalogEpoch,
-    })
-  }
-
-  if (diskIndex) {
-    traceStartup('[geo-index:worker]', 'disk index build branch entered', {
-      indexId: index.id,
-      storageMode: store.storageMode,
-      catalogEpoch,
-    })
-    postProgress({
-      phase: 'building',
-      pointCount: 0,
-      builtIndexes: 0,
-      totalIndexes,
-      currentIndexId: index.id,
-      currentIndexLabel: index.label,
-      currentIndexProcessedPoints: 0,
-    })
-
-    const producer: DiskSegmentedBatchProducer = (onBatch) =>
-      store.forEachGeoPointBatch(100_000, onBatch)
-    const pointCount = await diskIndex.build(
-      producer,
-      catalogEpoch,
-      (processedPoints, totalPoints) => {
-        postProgress({
-          phase: 'building',
-          pointCount: processedPoints,
-          builtIndexes: 0,
-          totalIndexes,
-          currentIndexId: index.id,
-          currentIndexLabel: index.label,
-          currentIndexProcessedPoints: processedPoints,
-          currentIndexTotalPoints: totalPoints,
-        })
-      },
-    )
-
-    traceStartup('[geo-index:worker]', 'disk index build complete', {
-      indexId: index.id,
-      storageMode: store.storageMode,
-      catalogEpoch,
-      pointCount,
-      buildTimeMs: performance.now() - startedAt,
-    })
-
-    preparedSearchIndex = {
-      storageMode: store.storageMode,
-      indexId: index.id,
-      catalogEpoch,
-      cacheDirty: false,
-    }
-
-    postProgress({
-      phase: 'ready',
-      pointCount,
-      builtIndexes: totalIndexes,
-      totalIndexes,
-      currentIndexId: index.id,
-      currentIndexLabel: index.label,
-      currentIndexProcessedPoints: pointCount,
-      currentIndexTotalPoints: pointCount,
-    })
-
-    return {
-      pointCount,
-      buildTimeMs: performance.now() - startedAt,
-      engineCount: searchEngineCountForStore(store),
-    }
-  }
-
-  traceStartup('[geo-index:worker]', 'in-memory index build branch entered', {
-    indexId: index.id,
-    storageMode: store.storageMode,
-    catalogEpoch,
-  })
-  const points = await store.getGeoPoints({})
-
-  postProgress({
-    phase: 'building',
-    pointCount: points.length,
-    builtIndexes: 0,
-    totalIndexes,
-    currentIndexId: index.id,
-    currentIndexLabel: index.label,
-    currentIndexProcessedPoints: 0,
-    currentIndexTotalPoints: points.length,
-  })
-
-  await registryIndex.build(points, {
-    yieldEvery: 2_000,
-    onProgress: (progress) => {
-      postProgress({
-        phase: 'building',
-        pointCount: points.length,
-        builtIndexes: 0,
-        totalIndexes,
-        currentIndexId: progress.indexId,
-        currentIndexLabel: progress.indexLabel,
-        currentIndexProcessedPoints: progress.processedPoints,
-        currentIndexTotalPoints: progress.totalPoints,
-      })
-    },
-  })
-
-  preparedSearchIndex = {
-    storageMode: store.storageMode,
-    indexId: index.id,
-    catalogEpoch,
-    cacheDirty: index.capabilities.persistent,
-  }
-
-  const summary = {
-    pointCount: points.length,
-    buildTimeMs: performance.now() - startedAt,
-  }
-  traceStartup('[geo-index:worker]', 'in-memory index build complete', {
-    indexId: index.id,
-    storageMode: store.storageMode,
-    catalogEpoch,
-    pointCount: points.length,
-    buildTimeMs: summary.buildTimeMs,
-  })
-
-  postProgress({
-    phase: 'ready',
-    pointCount: points.length,
-    builtIndexes: totalIndexes,
-    totalIndexes,
-    currentIndexId: index.id,
-    currentIndexLabel: index.label,
-    currentIndexProcessedPoints: points.length,
-    currentIndexTotalPoints: points.length,
-  })
-
-  return {
-    ...summary,
-    engineCount: searchEngineCountForStore(store),
-  }
-}
-
-async function searchGeoIndex(store: CatalogStore, payload: {
-  indexId: string
-  query: GeoSearchQuery
-}): Promise<GeoSearchResult[]> {
-  const diskIndex = activeDiskSegmentedIndex(store, payload.indexId)
-  if (diskIndex) return diskIndex.search(payload.query)
-  return geoIndexRegistry.get(payload.indexId).search(payload.query)
-}
-
-async function getGeoIndexStats(
-  store: CatalogStore,
-  indexId: string,
-): Promise<GeoIndexStats> {
-  const diskIndex = activeDiskSegmentedIndex(store, indexId)
-  if (diskIndex) return diskIndex.stats()
-  return geoIndexRegistry.get(indexId).stats()
-}
-
-async function getSearchIndexStats(store: CatalogStore): Promise<SearchIndexStats[]> {
-  const sqlStats = [
-    defaultSearchStats('sqlite-timestamp', 'SQLite timestamp B-tree'),
-    defaultSearchStats('sqlite-bbox-time', 'SQLite bbox/time B-tree'),
-  ]
-  const geoStats = await Promise.all(
-    geoIndexRegistry.indexes.map(async (index) => {
-      const activeIndex = activeDiskSegmentedIndex(store, index.id)
-      const stats = activeIndex ? await activeIndex.stats() : await index.stats()
-      return {
-        ...stats,
-        engineLabel: activeIndex?.label ?? index.label,
-        exact: activeIndex?.capabilities.exact ?? index.capabilities.exact,
-        persistent:
-          activeIndex?.capabilities.persistent ?? index.capabilities.persistent,
-      }
-    }),
-  )
-  return [...sqlStats, ...geoStats]
-}
-
-async function validateGeoIndex(store: CatalogStore, payload: {
-  indexId: string
-  query: GeoSearchQuery
-}): Promise<ValidationReport> {
-  const diskIndex = activeDiskSegmentedIndex(store, payload.indexId)
-  if (diskIndex) return diskIndex.validateAgainstBruteForce(payload.query)
-  return geoIndexRegistry
-    .get(payload.indexId)
-    .validateAgainstBruteForce(payload.query)
-}
-
-async function countMedia(): Promise<number> {
-  await ensureDb()
-  const count = requireDb().selectValue(
-    `
-      SELECT COUNT(*)
-      FROM media_assets a
-      WHERE EXISTS (
-          SELECT 1 FROM media_locations l
-          WHERE l.content_hash = a.content_hash
-        )
-    `,
-  )
-  return toNumber(count) ?? 0
-}
-
-async function clearCatalog(): Promise<void> {
-  await ensureDb()
-  requireDb().exec(`
-    DELETE FROM media_locations;
-    DELETE FROM media_assets;
-  `)
-  bumpSqliteCatalogEpochInDb(requireDb())
-  invalidatePreparedSearchIndex()
-}
-
-type SqliteImportTransactionState = {
-  active: boolean
-  writtenItems: number
-  committedChunks: number
-}
-
-function beginSqliteImportTransaction(
-  activeDb: SqliteDb,
-  state: SqliteImportTransactionState,
-): void {
-  if (state.active) return
-  activeDb.exec('BEGIN')
-  state.active = true
-  state.writtenItems = 0
-}
-
-function commitSqliteImportTransaction(
-  activeDb: SqliteDb,
-  state: SqliteImportTransactionState,
-): void {
-  if (!state.active) return
-  if (state.writtenItems > 0) {
-    bumpSqliteCatalogEpochInDb(activeDb)
-  }
-  activeDb.exec('COMMIT')
-  state.active = false
-  state.writtenItems = 0
-  state.committedChunks += 1
-}
-
-function rollbackSqliteImportTransaction(
-  activeDb: SqliteDb,
-  state: SqliteImportTransactionState,
-): void {
-  if (!state.active) return
-  activeDb.exec('ROLLBACK')
-  state.active = false
-  state.writtenItems = 0
-}
-
-function createSqliteCatalogStore(mode: SqliteStorageMode): CatalogStore {
-  const ensureMode = () => ensureDb(mode)
-  const webStorageMode: WebCatalogStorageMode = 'sqlite'
-  let importTransactionState: SqliteImportTransactionState | undefined
-
-  const store: CatalogStore = {
-    storageMode: webStorageMode,
-    geoImportWriteBatchSize: GEO_IMPORT_SQLITE_WRITE_BATCH_SIZE,
-    init: ensureMode,
-    async upsertSource(source) {
-      await ensureMode()
-      upsertSourceIntoSqlite(requireDb(), source)
-    },
-    async upsertMedia(items) {
-      await ensureMode()
-      upsertMediaIntoSqlite(requireDb(), items)
-      if (items.length > 0) {
-        bumpSqliteCatalogEpochInDb(requireDb())
-        invalidatePreparedSearchIndex()
-      }
-      return items.length
-    },
-    async prepareImportSource(source, duplicateSourceIds) {
-      await ensureMode()
-      prepareImportSource(requireDb(), source, duplicateSourceIds)
-      if (duplicateSourceIds.length > 0) {
-        bumpSqliteCatalogEpochInDb(requireDb())
-        invalidatePreparedSearchIndex()
-        await clearDiskSegmentedIndexCaches(store)
-      }
-    },
-    async writeMediaBatch(items) {
-      const startedAt = performance.now()
-      const ensureStartedAt = performance.now()
-      await ensureMode()
-      const ensureDbMs = performance.now() - ensureStartedAt
-      if (items.length === 0) {
-        const totalMs = performance.now() - startedAt
-        return {
-          written: 0,
-          timing: {
-            storageMode: webStorageMode,
-            items: 0,
-            transactionActive: Boolean(importTransactionState?.active),
-            totalMs,
-            ensureDbMs,
-            requireDbMs: 0,
-            writeMs: 0,
-            accountedMs: ensureDbMs,
-            unaccountedMs: totalMs - ensureDbMs,
-          },
-        }
-      }
-      const requireStartedAt = performance.now()
-      const activeDb = requireDb()
-      const requireDbMs = performance.now() - requireStartedAt
-      const writeStartedAt = performance.now()
-      const transactionState = importTransactionState
-      let transactionActive = false
-      if (transactionState) {
-        beginSqliteImportTransaction(activeDb, transactionState)
-        transactionActive = true
-      }
-      const sqliteTiming = upsertMediaIntoSqlite(activeDb, items)
-      if (transactionState) {
-        transactionState.writtenItems += items.length
-      } else {
-        bumpSqliteCatalogEpochInDb(activeDb)
-        invalidatePreparedSearchIndex()
-      }
-      const writeMs = performance.now() - writeStartedAt
-      const totalMs = performance.now() - startedAt
-      const accountedMs = ensureDbMs + requireDbMs + writeMs
-      return {
-        written: items.length,
-        timing: {
-          storageMode: webStorageMode,
-          items: items.length,
-          transactionActive,
-          totalMs,
-          ensureDbMs,
-          requireDbMs,
-          writeMs,
-          accountedMs,
-          unaccountedMs: totalMs - accountedMs,
-          sqlite: sqliteTiming,
-        },
-      }
-    },
-    async commitImport() {
-      await ensureMode()
-      if (!importTransactionState) return
-      commitSqliteImportTransaction(requireDb(), importTransactionState)
-    },
-    async withImportTransaction(run) {
-      if (importTransactionState) {
-        throw new Error('Nested SQLite import transactions are not supported.')
-      }
-
-      await ensureMode()
-      if (preparedSearchIndex?.storageMode === store.storageMode) {
-        traceStartup('[geo-index:worker]', 'prepared search index invalidated for bulk import', {
-          storageMode: store.storageMode,
-          preparedSearchIndex,
-        })
-        preparedSearchIndex = undefined
-      }
-      const transactionState: SqliteImportTransactionState = {
-        active: false,
-        writtenItems: 0,
-        committedChunks: 0,
-      }
-      importTransactionState = transactionState
-
-      try {
-        const result = await run()
-        commitSqliteImportTransaction(requireDb(), transactionState)
-        return result
-      } catch (error) {
-        rollbackSqliteImportTransaction(requireDb(), transactionState)
-        throw error
-      } finally {
-        importTransactionState = undefined
-      }
-    },
-    async listMedia(query) {
-      await ensureMode()
-      return listMedia(query)
-    },
-    async searchMedia(spec) {
-      await ensureMode()
-      return searchMediaWithCatalogFunctions(
-        spec,
-        sqliteSearchRows,
-        getMediaByIds,
-        'sqlite',
-        store,
-      )
-    },
-    async getMediaByIds(ids) {
-      await ensureMode()
-      return getMediaByIds(ids)
-    },
-    async getGeoPoints(range) {
-      await ensureMode()
-      return getGeoPoints(range)
-    },
-    async forEachGeoPointBatch(batchSize, onBatch) {
-      await ensureMode()
-      return forEachGeoPointBatch(batchSize, onBatch)
-    },
-    diskSegmentedTreeStore() {
-      return createOpfsDiskSegmentedTreeStore()
-    },
-    async catalogEpoch() {
-      await ensureMode()
-      return sqliteCatalogEpoch()
-    },
-    async loadPersistedSegmentedBallTreeIndex(catalogEpoch) {
-      await ensureMode()
-      return loadOpfsSegmentedBallTreeIndex(catalogEpoch)
-    },
-    async savePersistedSegmentedBallTreeIndex(catalogEpoch) {
-      await ensureMode()
-      return saveOpfsSegmentedBallTreeIndex(catalogEpoch)
-    },
-    async buildSearchIndexes(indexId, forceRebuild, postProgress) {
-      await ensureMode()
-      return buildSearchIndexes(this, indexId, forceRebuild, postProgress)
-    },
-    async getSearchIndexStats() {
-      return getSearchIndexStats(store)
-    },
-    async countMedia() {
-      await ensureMode()
-      return countMedia()
-    },
-    async clear() {
-      await ensureMode()
-      await clearCatalog()
-      await clearDiskSegmentedIndexCaches(store)
-    },
-  }
-
-  return store
-}
-
-const sqliteCatalogStore = createSqliteCatalogStore('opfs')
-
-const indexedDbCatalogStore: CatalogStore = {
-  storageMode: 'indexeddb',
-  geoImportWriteBatchSize: GEO_IMPORT_INDEXEDDB_WRITE_BATCH_SIZE,
-  init: ensureIndexedDb,
-  upsertSource: idbUpsertSource,
-  upsertMedia: idbUpsertMedia,
-  async prepareImportSource(source, duplicateSourceIds) {
-    await idbPrepareImportSource(source, duplicateSourceIds)
-    if (duplicateSourceIds.length > 0) {
-      await clearDiskSegmentedIndexCaches(indexedDbCatalogStore)
-    }
-  },
-  async writeMediaBatch(items, options) {
-    const startedAt = performance.now()
-    const writeStartedAt = performance.now()
-    const written = await idbUpsertMedia(items)
-    const writeMs = performance.now() - writeStartedAt
-    const totalMs = performance.now() - startedAt
-    return {
-      written,
-      timing: {
-        storageMode: 'indexeddb',
-        items: items.length,
-        transactionActive: Boolean(options?.transactionActive),
-        totalMs,
-        ensureDbMs: 0,
-        requireDbMs: 0,
-        writeMs,
-        accountedMs: writeMs,
-        unaccountedMs: totalMs - writeMs,
-      },
-    }
-  },
-  async commitImport() {},
-  async withImportTransaction(run) {
-    return run()
-  },
-  listMedia: idbListMedia,
-  searchMedia(spec) {
-    return searchMediaWithCatalogFunctions(
-      spec,
-      idbSearchRows,
-      idbGetMediaByIds,
-      'indexeddb',
-      indexedDbCatalogStore,
-    )
-  },
-  getMediaByIds: idbGetMediaByIds,
-  getGeoPoints: idbGetGeoPoints,
-  forEachGeoPointBatch: idbForEachGeoPointBatch,
-  diskSegmentedTreeStore: createIdbDiskSegmentedTreeStore,
-  catalogEpoch: idbCatalogEpoch,
-  loadPersistedSegmentedBallTreeIndex: loadIdbSegmentedBallTreeIndex,
-  savePersistedSegmentedBallTreeIndex: saveIdbSegmentedBallTreeIndex,
-  buildSearchIndexes(indexId, forceRebuild, postProgress) {
-    return buildSearchIndexes(
-      indexedDbCatalogStore,
-      indexId,
-      forceRebuild,
-      postProgress,
-    )
-  },
-  getSearchIndexStats() {
-    return getSearchIndexStats(indexedDbCatalogStore)
-  },
-  countMedia: idbCountMedia,
-  async clear() {
-    await idbClear()
-    await clearDiskSegmentedIndexCaches(indexedDbCatalogStore)
-  },
-}
-
-function storageModeForRequest(request: WorkerRequest): WebCatalogStorageMode {
-  if (request.storageMode === 'indexeddb') return 'indexeddb'
-  return 'sqlite'
-}
-
-function catalogStoreForMode(mode: WebCatalogStorageMode): CatalogStore {
-  if (mode === 'indexeddb') return indexedDbCatalogStore
-  return sqliteCatalogStore
-}
+const fileCatalogStore = new FileCatalogStore()
 
 async function handleRequest(
   request: WorkerRequest,
   postProgress: (progress: GeoIndexBuildProgress | ImportProgress) => void,
 ): Promise<unknown> {
-  const store = catalogStoreForMode(storageModeForRequest(request))
-
+  const store = fileCatalogStore
   switch (request.type) {
     case 'init':
       return store.init()
@@ -3653,19 +3457,18 @@ async function handleRequest(
       return importFolderIntoCatalog(
         request.payload as ImportFolderPayload,
         store,
-        postProgress as (progress: ImportProgress) => void,
+        postProgress,
         () => cancelledRequests.has(request.id),
       )
     case 'importGeoFile':
       return importGeoFileIntoCatalog(
         request.payload as ImportGeoFilePayload,
         store,
-        postProgress as (progress: ImportProgress) => void,
+        postProgress,
         () => cancelledRequests.has(request.id),
       )
     case 'commitImport':
-      importCommitRequested = true
-      return undefined
+      return store.commitImport()
     case 'listMedia':
       return store.listMedia(request.payload as CatalogQuery)
     case 'searchMedia':
@@ -3673,89 +3476,85 @@ async function handleRequest(
     case 'getMediaByIds':
       return store.getMediaByIds(request.payload as string[])
     case 'getGeoPoints':
-      return store.getGeoPoints((request.payload ?? {}) as TimeRange)
+      return store.getGeoPoints(request.payload as TimeRange)
     case 'countMedia':
       return store.countMedia()
     case 'buildGeoIndexes':
-      return buildGeoIndexes(store, postProgress)
-    case 'buildSearchIndexes':
+      return store.buildSearchIndexes('segmented-ball-tree', false, postProgress)
+    case 'buildSearchIndexes': {
+      const payload = request.payload as { indexId: string; forceRebuild?: boolean }
       return store.buildSearchIndexes(
-        (request.payload as { indexId?: string } | undefined)?.indexId ??
-          'segmented-ball-tree',
-        Boolean(
-          (request.payload as { forceRebuild?: boolean } | undefined)
-            ?.forceRebuild,
-        ),
+        payload.indexId,
+        Boolean(payload.forceRebuild),
         postProgress,
       )
-    case 'searchGeoIndex':
-      return searchGeoIndex(
-        store,
-        request.payload as { indexId: string; query: GeoSearchQuery },
-      )
-    case 'getGeoIndexStats':
-      return getGeoIndexStats(store, request.payload as string)
+    }
+    case 'searchGeoIndex': {
+      const payload = request.payload as { indexId: string; query: GeoSearchQuery }
+      if (isDiskSegmentedEngineId(payload.indexId)) {
+        await store.ensureSearchIndexReady(payload.indexId)
+      }
+      const diskIndex = activeDiskSegmentedIndex(payload.indexId)
+      return diskIndex
+        ? diskIndex.search(payload.query)
+        : geoIndexRegistry.get(payload.indexId).search(payload.query)
+    }
+    case 'getGeoIndexStats': {
+      const indexId = request.payload as string
+      const diskIndex = activeDiskSegmentedIndex(indexId)
+      return diskIndex ? diskIndex.stats() : geoIndexRegistry.get(indexId).stats()
+    }
     case 'getSearchIndexStats':
       return store.getSearchIndexStats()
-    case 'validateGeoIndex':
-      return validateGeoIndex(
-        store,
-        request.payload as { indexId: string; query: GeoSearchQuery },
-      )
+    case 'validateGeoIndex': {
+      const payload = request.payload as { indexId: string; query: GeoSearchQuery }
+      if (isDiskSegmentedEngineId(payload.indexId)) {
+        await store.ensureSearchIndexReady(payload.indexId)
+      }
+      const diskIndex = activeDiskSegmentedIndex(payload.indexId)
+      return diskIndex
+        ? diskIndex.validateAgainstBruteForce(payload.query)
+        : geoIndexRegistry.get(payload.indexId).validateAgainstBruteForce(payload.query)
+    }
     case 'clear':
       return store.clear()
     default:
-      throw new Error(`Unknown catalog request: ${request.type}`)
+      throw new Error(`Unknown catalog worker request: ${request.type}`)
   }
 }
 
-ctx.addEventListener('message', async (event: MessageEvent<WorkerRequest>) => {
-  const receivedAt = performance.now()
+const ctx = self as unknown as {
+  addEventListener(
+    type: 'message',
+    listener: (event: MessageEvent<WorkerRequest>) => void,
+  ): void
+  postMessage(message: unknown): void
+}
+
+function postBackgroundIndexProgress(progress: GeoIndexBuildProgress): void {
+  ctx.postMessage({ type: 'backgroundProgress', progress })
+}
+
+ctx.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
   if (event.data.type === 'cancel') {
-    traceStartup('[startup:worker]', 'cancel request received', {
-      id: event.data.id,
-      elapsedSinceReceiveMs: performance.now() - receivedAt,
-    })
     cancelledRequests.add(event.data.id)
     return
   }
-
-  traceStartup('[startup:worker]', 'request received', {
-    id: event.data.id,
-    type: event.data.type,
-    storageMode: event.data.storageMode,
-    hasPayload: event.data.payload !== undefined,
-  })
-  try {
-    const postProgress = (progress: GeoIndexBuildProgress | ImportProgress) => {
-      traceStartup('[startup:worker]', 'posting progress', {
-        id: event.data.id,
-        type: event.data.type,
-        elapsedMs: performance.now() - receivedAt,
-        progress,
-      })
-      ctx.postMessage({ id: event.data.id, type: 'progress', progress })
-    }
-    const result = await handleRequest(event.data, postProgress)
-    traceStartup('[startup:worker]', 'request complete', {
-      id: event.data.id,
-      type: event.data.type,
-      elapsedMs: performance.now() - receivedAt,
-    })
-    ctx.postMessage({ id: event.data.id, ok: true, result })
-  } catch (error) {
-    traceStartup('[startup:worker]', 'request failed', {
-      id: event.data.id,
-      type: event.data.type,
-      elapsedMs: performance.now() - receivedAt,
-      error: error instanceof Error ? error.message : String(error),
-    })
-    ctx.postMessage({
-      id: event.data.id,
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-    })
-  } finally {
-    cancelledRequests.delete(event.data.id)
+  const postProgress = (progress: GeoIndexBuildProgress | ImportProgress) => {
+    ctx.postMessage({ id: event.data.id, type: 'progress', progress })
   }
+  handleRequest(event.data, postProgress)
+    .then((result) => {
+      ctx.postMessage({ id: event.data.id, ok: true, result })
+    })
+    .catch((caught) => {
+      ctx.postMessage({
+        id: event.data.id,
+        ok: false,
+        error: caught instanceof Error ? caught.message : String(caught),
+      })
+    })
+    .finally(() => {
+      cancelledRequests.delete(event.data.id)
+    })
 })

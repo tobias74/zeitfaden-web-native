@@ -40,6 +40,9 @@ export function useGeoIndexes({
   geoIndexVersion: number
   geoIndexProgress: GeoIndexBuildProgress | undefined
   indexStats: SearchIndexStats
+  allIndexStats: SearchIndexStats[]
+  updateCatalogIndexes(): Promise<void>
+  updateIndex(): Promise<void>
   optimizeIndex(): Promise<void>
   resetIndexState(): void
 } {
@@ -47,19 +50,42 @@ export function useGeoIndexes({
   const [geoIndexVersion, setGeoIndexVersion] = useState(0)
   const [geoIndexProgress, setGeoIndexProgress] =
     useState<GeoIndexBuildProgress>()
+  const [indexStats, setIndexStats] = useState<SearchIndexStats>(defaultStats)
+  const [allIndexStats, setAllIndexStats] = useState<SearchIndexStats[]>([])
 
   const resetIndexState = useCallback(() => {
     setGeoPointCount(0)
     setGeoIndexVersion(0)
     setGeoIndexProgress(undefined)
+    setIndexStats(defaultStats)
+    setAllIndexStats([])
   }, [])
 
+  const refreshIndexStats = useCallback(async () => {
+    const stats = await catalog.getSearchIndexStats()
+    setAllIndexStats(stats)
+    const selectedStats =
+      stats.find((entry) => entry.engineId === selectedIndexId) ??
+      stats.find((entry) => entry.engineId === 'segmented-ball-tree') ??
+      defaultStats
+    setIndexStats(selectedStats)
+    setGeoPointCount(selectedStats.pointCount)
+  }, [catalog, selectedIndexId])
+
   const runIndexBuild = useCallback(
-    async (forceRebuild: boolean, isCancelled: () => boolean = () => false) => {
+    async (
+      forceRebuild: boolean,
+      isCancelled: () => boolean = () => false,
+      indexId = selectedIndexId,
+    ) => {
       if (isCancelled()) return
       const startedAt = performance.now()
       traceStartup('[startup:index-hook]', 'runIndexBuild start', {
-        selectedIndexId,
+        indexId,
+        forceRebuild,
+      })
+      console.log('[geo-index:ui] runIndexBuild start', {
+        indexId,
         forceRebuild,
       })
       setGeoIndexProgress({
@@ -67,15 +93,15 @@ export function useGeoIndexes({
         pointCount: 0,
         builtIndexes: 0,
         totalIndexes: 1,
-        currentIndexId: selectedIndexId,
+        currentIndexId: indexId,
       })
       try {
         const summary = await (forceRebuild
           ? catalog.rebuildSearchIndex
           : catalog.buildSearchIndexes
-        ).call(catalog, selectedIndexId, (progress) => {
+        ).call(catalog, indexId, (progress) => {
           traceStartup('[startup:index-hook]', 'runIndexBuild progress', {
-            selectedIndexId,
+            indexId,
             forceRebuild,
             progress,
           })
@@ -83,24 +109,37 @@ export function useGeoIndexes({
         })
         if (isCancelled()) return
         traceStartup('[startup:index-hook]', 'runIndexBuild complete', {
-          selectedIndexId,
+          indexId,
+          forceRebuild,
+          elapsedMs: performance.now() - startedAt,
+          summary,
+        })
+        console.log('[geo-index:ui] runIndexBuild complete', {
+          indexId,
           forceRebuild,
           elapsedMs: performance.now() - startedAt,
           summary,
         })
         setGeoPointCount(summary.pointCount)
         setGeoIndexVersion((version) => version + 1)
+        await refreshIndexStats()
       } catch (error) {
         traceStartup('[startup:index-hook]', 'runIndexBuild failed', {
-          selectedIndexId,
+          indexId,
           forceRebuild,
           elapsedMs: performance.now() - startedAt,
           error: error instanceof Error ? error.message : String(error),
         })
+        console.error('[geo-index:ui] runIndexBuild failed', {
+          indexId,
+          forceRebuild,
+          elapsedMs: performance.now() - startedAt,
+          error,
+        })
         throw error
       } finally {
         traceStartup('[startup:index-hook]', 'runIndexBuild cleanup', {
-          selectedIndexId,
+          indexId,
           forceRebuild,
           elapsedMs: performance.now() - startedAt,
           cancelled: isCancelled(),
@@ -108,12 +147,41 @@ export function useGeoIndexes({
         if (!isCancelled()) setGeoIndexProgress(undefined)
       }
     },
-    [catalog, selectedIndexId],
+    [catalog, refreshIndexStats, selectedIndexId],
   )
+
+  const updateIndex = useCallback(async () => {
+    await runIndexBuild(false)
+  }, [runIndexBuild])
+
+  const updateCatalogIndexes = useCallback(async () => {
+    console.log('[geo-index:ui] updateCatalogIndexes clicked', {
+      indexId: 'file-time-geo',
+      selectedIndexId,
+    })
+    await runIndexBuild(true, () => false, 'file-time-geo')
+  }, [runIndexBuild, selectedIndexId])
 
   const optimizeIndex = useCallback(async () => {
     await runIndexBuild(true)
   }, [runIndexBuild])
+
+  useEffect(() => {
+    const unsubscribe = catalog.onIndexProgress?.((progress) => {
+      setGeoIndexProgress(progress)
+      if (progress.phase === 'ready') {
+        setGeoPointCount(progress.pointCount)
+        setGeoIndexVersion((version) => version + 1)
+        refreshIndexStats().catch((caught) => {
+          onError(caught instanceof Error ? caught.message : String(caught))
+        })
+        window.setTimeout(() => {
+          setGeoIndexProgress((current) => (current === progress ? undefined : current))
+        }, 1200)
+      }
+    })
+    return unsubscribe
+  }, [catalog, onError, refreshIndexStats])
 
   useEffect(() => {
     if (!catalogInfo) {
@@ -126,17 +194,13 @@ export function useGeoIndexes({
     }
 
     let cancelled = false
-    traceStartup('[startup:index-hook]', 'catalogInfo ready; scheduling index build', {
+    traceStartup('[startup:index-hook]', 'catalogInfo ready; refreshing index status', {
       selectedIndexId,
       catalogRevision,
       catalogInfo,
     })
     const timer = window.setTimeout(() => {
-      traceStartup('[startup:index-hook]', 'scheduled index build timer fired', {
-        selectedIndexId,
-        catalogRevision,
-      })
-      runIndexBuild(false, () => cancelled).catch((caught) => {
+      refreshIndexStats().catch((caught) => {
         if (!cancelled) {
           onError(caught instanceof Error ? caught.message : String(caught))
         }
@@ -145,7 +209,7 @@ export function useGeoIndexes({
 
     return () => {
       cancelled = true
-      traceStartup('[startup:index-hook]', 'index build effect cleanup', {
+      traceStartup('[startup:index-hook]', 'index status effect cleanup', {
         selectedIndexId,
         catalogRevision,
       })
@@ -156,8 +220,8 @@ export function useGeoIndexes({
     catalogInfo,
     catalogRevision,
     onError,
+    refreshIndexStats,
     resetIndexState,
-    runIndexBuild,
     selectedIndexId,
   ])
 
@@ -165,7 +229,10 @@ export function useGeoIndexes({
     geoPointCount,
     geoIndexVersion,
     geoIndexProgress,
-    indexStats: defaultStats,
+    indexStats,
+    allIndexStats,
+    updateCatalogIndexes,
+    updateIndex,
     optimizeIndex,
     resetIndexState,
   }

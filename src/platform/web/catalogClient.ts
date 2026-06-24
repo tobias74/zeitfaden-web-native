@@ -20,7 +20,6 @@ import type {
   ImportSummary,
   SearchIndexBuildSummary,
 } from '../types'
-import type { WebCatalogStorageMode } from './storageMode'
 import { traceStartup } from '../../lib/startupTrace'
 
 type ImportFolderPayload = {
@@ -39,6 +38,7 @@ type WorkerResponse<T> =
   | { id: number; ok: true; result: T }
   | { id: number; ok: false; error: string }
   | { id: number; type: 'progress'; progress: unknown }
+  | { type: 'backgroundProgress'; progress: unknown }
 
 type PendingRequest<T> = {
   resolve: (value: T) => void
@@ -53,13 +53,12 @@ export class CatalogClient {
   private worker: Worker | undefined
   private nextId = 1
   private readonly pending = new Map<number, PendingRequest<unknown>>()
-  private readonly storageMode: WebCatalogStorageMode
+  private readonly indexProgressListeners = new Set<
+    (progress: GeoIndexBuildProgress) => void
+  >()
 
-  constructor(storageMode: WebCatalogStorageMode) {
-    this.storageMode = storageMode
-    traceStartup('[startup:catalog-client]', 'CatalogClient constructed', {
-      storageMode,
-    })
+  constructor() {
+    traceStartup('[startup:catalog-client]', 'CatalogClient constructed')
   }
 
   init(): Promise<CatalogInfo> {
@@ -124,6 +123,14 @@ export class CatalogClient {
     )
   }
 
+  onIndexProgress(listener: (progress: GeoIndexBuildProgress) => void): () => void {
+    this.indexProgressListeners.add(listener)
+    this.ensureWorker()
+    return () => {
+      this.indexProgressListeners.delete(listener)
+    }
+  }
+
   getSearchIndexStats(): Promise<SearchIndexStats[]> {
     return this.request('getSearchIndexStats')
   }
@@ -183,24 +190,26 @@ export class CatalogClient {
   private ensureWorker(): Worker {
     if (this.worker) {
       traceStartup('[startup:catalog-client]', 'reusing catalog worker', {
-        storageMode: this.storageMode,
       })
       return this.worker
     }
 
     traceStartup('[startup:catalog-client]', 'creating catalog worker', {
-      storageMode: this.storageMode,
     })
     const worker = new Worker(new URL('./catalog.worker.ts', import.meta.url), {
       type: 'module',
     })
     this.worker = worker
     traceStartup('[startup:catalog-client]', 'catalog worker constructed', {
-      storageMode: this.storageMode,
     })
 
     worker.addEventListener('message', (event: MessageEvent) => {
       const response = event.data as WorkerResponse<unknown>
+      if ('type' in response && response.type === 'backgroundProgress') {
+        const progress = response.progress as GeoIndexBuildProgress
+        for (const listener of this.indexProgressListeners) listener(progress)
+        return
+      }
       const pending = this.pending.get(response.id)
       if (!pending) return
 
@@ -237,7 +246,6 @@ export class CatalogClient {
 
     worker.addEventListener('error', (event) => {
       traceStartup('[startup:catalog-client]', 'catalog worker error', {
-        storageMode: this.storageMode,
         message: event.message,
       })
       event.preventDefault()
@@ -248,7 +256,6 @@ export class CatalogClient {
 
     worker.addEventListener('messageerror', () => {
       traceStartup('[startup:catalog-client]', 'catalog worker messageerror', {
-        storageMode: this.storageMode,
       })
       this.worker = undefined
       worker.terminate()
@@ -277,7 +284,6 @@ export class CatalogClient {
     traceStartup('[startup:catalog-client]', 'request queued', {
       id,
       type,
-      storageMode: this.storageMode,
       hasPayload: payload !== undefined,
     })
 
@@ -307,14 +313,12 @@ export class CatalogClient {
         traceStartup('[startup:catalog-client]', 'posting request to worker', {
           id,
           type,
-          storageMode: this.storageMode,
           elapsedMs: performance.now() - startedAt,
         })
         worker.postMessage({
           id,
           type,
           payload,
-          storageMode: this.storageMode,
         })
         if (signal?.aborted) {
           traceStartup('[startup:catalog-client]', 'signal already aborted', {

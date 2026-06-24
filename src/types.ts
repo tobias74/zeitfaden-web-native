@@ -85,6 +85,7 @@ export type SearchOrder =
   | {
       kind: 'timestamp'
       sort: CatalogSort
+      engineId?: string
     }
   | {
       kind: 'distance'
@@ -95,10 +96,6 @@ export type SearchOrder =
       engineId?: string
     }
 
-export type SearchDiagnostics = {
-  explainSql?: boolean
-}
-
 export type SearchSpec = TimeRange & {
   kind?: KindFilter
   hasGeo?: boolean
@@ -107,7 +104,6 @@ export type SearchSpec = TimeRange & {
   limit?: number
   offset?: number
   purpose: SearchPurpose
-  diagnostics?: SearchDiagnostics
 }
 
 export type GeoIndexBuildStep = {
@@ -133,6 +129,9 @@ export type GeoIndexCapabilities = {
 export type GeoIndexStats = {
   engineId: string
   pointCount: number
+  indexStatus?: 'missing' | 'current' | 'stale' | 'building' | 'pending' | 'indexing' | 'failed'
+  catalogVersion?: number
+  indexCatalogVersion?: number
   indexSizeBytes?: number
   residentBytes?: number
   diskReadBytes?: number
@@ -158,21 +157,9 @@ export type GeoIndexStats = {
   pendingPointCount?: number
   needsOptimization?: boolean
   cellCount?: number
-  sqliteQueryCount?: number
 }
 
-export type SearchStorageMode = 'sqlite' | 'indexeddb' | 'native'
-
-export type SqlExplainPlanRow = {
-  id: number
-  parent: number
-  detail: string
-}
-
-export type SqlExplainPlan = {
-  rows: SqlExplainPlanRow[]
-  usedIndexes: string[]
-}
+export type SearchStorageMode = 'file' | 'native'
 
 export type SearchIndexStats = GeoIndexStats & {
   engineLabel?: string
@@ -185,7 +172,6 @@ export type SearchIndexStats = GeoIndexStats & {
   limit?: number
   offset?: number
   limitReached?: boolean
-  sqlPlan?: SqlExplainPlan
 }
 
 export type SearchResultMetrics = SearchIndexStats

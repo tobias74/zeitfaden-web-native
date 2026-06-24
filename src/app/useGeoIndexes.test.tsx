@@ -5,9 +5,8 @@ import type { CatalogBackend, CatalogInfo } from '../platform/types'
 import type { SearchIndexStats } from '../types'
 
 const catalogInfo: CatalogInfo = {
-  storageMode: 'opfs',
-  sqliteVersion: 'test',
-  filename: ':memory:',
+  storageMode: 'file',
+  filename: 'test-catalog',
 }
 
 const stats: SearchIndexStats = {
@@ -90,7 +89,7 @@ describe('useGeoIndexes', () => {
     cleanup()
   })
 
-  it('prepares the selected index on selection and catalog revision changes', async () => {
+  it('refreshes selected index status on selection and catalog revision changes', async () => {
     const catalog = createCatalog()
     const onError = vi.fn()
     const { rerender } = render(
@@ -103,13 +102,9 @@ describe('useGeoIndexes', () => {
     )
 
     await waitFor(() => {
-      expect(catalog.buildSearchIndexes).toHaveBeenCalledTimes(1)
+      expect(catalog.getSearchIndexStats).toHaveBeenCalledTimes(1)
     })
-    expect(catalog.getSearchIndexStats).not.toHaveBeenCalled()
-    expect(catalog.buildSearchIndexes).toHaveBeenLastCalledWith(
-      'brute-force',
-      expect.any(Function),
-    )
+    expect(catalog.buildSearchIndexes).not.toHaveBeenCalled()
 
     rerender(
       <Harness
@@ -121,12 +116,8 @@ describe('useGeoIndexes', () => {
     )
 
     await waitFor(() => {
-      expect(catalog.buildSearchIndexes).toHaveBeenCalledTimes(2)
+      expect(catalog.getSearchIndexStats).toHaveBeenCalledTimes(2)
     })
-    expect(catalog.buildSearchIndexes).toHaveBeenLastCalledWith(
-      'segmented-ball-tree',
-      expect.any(Function),
-    )
 
     rerender(
       <Harness
@@ -138,11 +129,8 @@ describe('useGeoIndexes', () => {
     )
 
     await waitFor(() => {
-      expect(catalog.buildSearchIndexes).toHaveBeenCalledTimes(3)
+      expect(catalog.getSearchIndexStats).toHaveBeenCalledTimes(3)
     })
-    expect(catalog.buildSearchIndexes).toHaveBeenLastCalledWith(
-      'segmented-ball-tree',
-      expect.any(Function),
-    )
+    expect(catalog.buildSearchIndexes).not.toHaveBeenCalled()
   })
 })

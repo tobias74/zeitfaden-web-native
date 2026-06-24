@@ -15,8 +15,7 @@ import type {
 } from '../types'
 
 export type CatalogInfo = {
-  storageMode: 'opfs' | 'indexeddb' | 'native'
-  sqliteVersion: string
+  storageMode: 'file' | 'native'
   filename: string
 }
 
@@ -89,6 +88,7 @@ export interface CatalogBackend {
     indexId: string,
     onProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<SearchIndexBuildSummary>
+  onIndexProgress?(listener: (progress: GeoIndexBuildProgress) => void): () => void
   getSearchIndexStats(): Promise<SearchIndexStats[]>
   listMedia(query: CatalogQuery): Promise<MediaItem[]>
   getMediaByIds(ids: string[]): Promise<MediaItem[]>

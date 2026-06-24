@@ -60,12 +60,6 @@ import type {
   GeoIndexBuildProgress,
   ImportProgress,
 } from './platform/types'
-import {
-  WEB_CATALOG_STORAGE_MODE_KEY,
-  isWebCatalogStorageMode,
-  storedWebCatalogStorageMode,
-  type WebCatalogStorageMode,
-} from './platform/web/storageMode'
 import { traceStartup } from './lib/startupTrace'
 import type {
   EnrichedSearchResult,
@@ -91,12 +85,17 @@ const MAP_HEIGHT_KEY = 'geo-media-index-lab:map-height'
 const RESULT_DISPLAY_MODE_KEY = 'geo-media-index-lab:result-display-mode'
 const RESULT_THUMBNAIL_SIZE_KEY = 'geo-media-index-lab:result-thumbnail-size'
 const RESULT_METADATA_KEY = 'geo-media-index-lab:result-metadata'
-const EXPLAIN_SQL_KEY = 'geo-media-index-lab:explain-sql'
 const RESULT_PAGE_SIZE_KEY = 'geo-media-index-lab:result-page-size'
 const RESULT_PAGE_SIZE_OPTIONS = [50, 100, 250, 500] as const
 const DEFAULT_RESULT_PAGE_SIZE = 100
 const MAP_POINT_LIMIT = 500
 const DEFAULT_DISTANCE_ENGINE_ID = 'segmented-ball-tree'
+const CATALOG_QUERY_INDEX_KEY = 'geo-media-index-lab:catalog-query-index'
+const DEFAULT_CATALOG_QUERY_INDEX_ID = 'file-time-geo'
+const CATALOG_QUERY_INDEX_IDS = [
+  'file-time-geo',
+  'file-cell-time',
+] as const
 const DISTANCE_ENGINE_IDS = [
   'brute-force',
   'segmented-ball-tree',
@@ -123,6 +122,19 @@ function storedNumber(key: string, fallback: number): number {
 
   const value = Number(stored)
   return Number.isFinite(value) && value > 0 ? value : fallback
+}
+
+type CatalogQueryIndexId = (typeof CATALOG_QUERY_INDEX_IDS)[number]
+
+function isCatalogQueryIndexId(value: string): value is CatalogQueryIndexId {
+  return CATALOG_QUERY_INDEX_IDS.includes(value as CatalogQueryIndexId)
+}
+
+function storedCatalogQueryIndexId(): CatalogQueryIndexId {
+  const stored = window.localStorage.getItem(CATALOG_QUERY_INDEX_KEY)
+  return stored && isCatalogQueryIndexId(stored)
+    ? stored
+    : DEFAULT_CATALOG_QUERY_INDEX_ID
 }
 
 function storedString<T extends string>(
@@ -157,6 +169,17 @@ function filterValueToKind(value: string): KindFilter {
 
 function statsNumber(value: number | undefined, locale: string): string {
   return typeof value === 'number' ? value.toLocaleString(locale) : '0'
+}
+
+function errorToMessage(error: unknown): string {
+  if (!error) return ''
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string') return error
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
+  }
 }
 
 function formatBytes(value: number, locale: string): string {
@@ -310,6 +333,54 @@ function geoIndexProgressDetail(
   })
 }
 
+function indexStatusLabel(
+  status: SearchIndexStats['indexStatus'] | undefined,
+  t: (key: TranslationKey, values?: TranslationValues) => string,
+): string {
+  if (status === 'current') return t('indexStatusCurrent')
+  if (status === 'stale') return t('indexStatusStale')
+  if (status === 'missing') return t('indexStatusMissing')
+  if (status === 'building') return t('indexStatusBuilding')
+  if (status === 'pending') return t('indexStatusPending')
+  if (status === 'indexing') return t('indexStatusIndexing')
+  if (status === 'failed') return t('indexStatusFailed')
+  return t('indexStatusUnknown')
+}
+
+function indexUpdateButtonLabel(
+  status: SearchIndexStats['indexStatus'] | undefined,
+  t: (key: TranslationKey, values?: TranslationValues) => string,
+): string {
+  if (status === 'current') return t('rebuildDistanceIndex')
+  if (status === 'building' || status === 'indexing') return t('updatingDistanceIndex')
+  return t('updateDistanceIndex')
+}
+
+function catalogIndexStatus(
+  timestampStats: SearchIndexStats | undefined,
+  bboxStats: SearchIndexStats | undefined,
+  progress: GeoIndexBuildProgress | undefined,
+): SearchIndexStats['indexStatus'] {
+  if (progress?.currentIndexId?.startsWith('file-')) return 'building'
+  const statuses = [timestampStats?.indexStatus, bboxStats?.indexStatus]
+  if (statuses.some((status) => status === 'failed')) return 'failed'
+  if (statuses.some((status) => status === 'indexing' || status === 'pending')) return 'indexing'
+  if (statuses.every((status) => status === 'current')) return 'current'
+  if (statuses.every((status) => status === 'missing' || status === undefined)) {
+    return 'missing'
+  }
+  return 'stale'
+}
+
+function catalogIndexButtonLabel(
+  status: SearchIndexStats['indexStatus'] | undefined,
+  t: (key: TranslationKey, values?: TranslationValues) => string,
+): string {
+  if (status === 'current') return t('rebuildCatalogIndexes')
+  if (status === 'building' || status === 'indexing' || status === 'pending') return t('updatingCatalogIndexes')
+  return t('updateCatalogIndexes')
+}
+
 function formatDimensions(item: MediaItem): string | undefined {
   if (typeof item.durationMs === 'number') {
     return `${Math.round(item.durationMs / 1_000)} s`
@@ -380,22 +451,14 @@ function ResultSkeletons({
 
 function App() {
   traceStartup('[startup]', 'App render start')
-  const [webCatalogStorageMode, setWebCatalogStorageMode] =
-    useState<WebCatalogStorageMode>(() => storedWebCatalogStorageMode())
-  const platform = useMemo(
-    () => {
-      traceStartup('[startup]', 'creating platform backend', {
-        webCatalogStorageMode,
-      })
-      const created = createPlatformBackend(webCatalogStorageMode)
-      traceStartup('[startup]', 'platform backend created', {
-        platformKind: created.kind,
-        webCatalogStorageMode,
-      })
-      return created
-    },
-    [webCatalogStorageMode],
-  )
+  const platform = useMemo(() => {
+    traceStartup('[startup]', 'creating platform backend')
+    const created = createPlatformBackend()
+    traceStartup('[startup]', 'platform backend created', {
+      platformKind: created.kind,
+    })
+    return created
+  }, [])
   const catalog = platform.catalog
   const [language, setLanguage] = useState<Language>(() => storedLanguage())
   const [activePage, setActivePage] = useState<ActivePage>('app')
@@ -446,6 +509,17 @@ function App() {
     clearSearch: clearSearchState,
   } = search.actions
 
+  const [selectedCatalogQueryIndexId, setSelectedCatalogQueryIndexIdState] =
+    useState<CatalogQueryIndexId>(() => storedCatalogQueryIndexId())
+  const setSelectedCatalogQueryIndexId = useCallback(
+    (indexId: CatalogQueryIndexId) => {
+      setSelectedCatalogQueryIndexIdState(indexId)
+      window.localStorage.setItem(CATALOG_QUERY_INDEX_KEY, indexId)
+      setResultPage(0)
+    },
+    [setResultPage],
+  )
+
   const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>(() => [
     {
       id: 0,
@@ -473,9 +547,6 @@ function App() {
     )
   const [showResultMetadata, setShowResultMetadata] = useState(() =>
     storedBoolean(RESULT_METADATA_KEY, true),
-  )
-  const [explainSqlQueries, setExplainSqlQueries] = useState(() =>
-    storedBoolean(EXPLAIN_SQL_KEY, false),
   )
   const [leftWidth, setLeftWidth] = useState(() =>
     clamp(storedNumber(LEFT_WIDTH_KEY, DEFAULT_LEFT_WIDTH), MIN_LEFT_WIDTH, MAX_LEFT_WIDTH),
@@ -505,8 +576,8 @@ function App() {
       ].slice(0, 30),
     )
   }, [])
-  const reportError = useCallback((message: string) => {
-    setError(message || undefined)
+  const reportError = useCallback((message: unknown) => {
+    setError(errorToMessage(message) || undefined)
   }, [])
   const recordCatalogInitFailure = useCallback(() => {
     recordActivity('activityCatalogFailedToInitialize')
@@ -517,7 +588,6 @@ function App() {
     catalogReady,
     catalogRevision,
     markCatalogChanged,
-    resetCatalogState,
   } = useCatalogLifecycle({
     catalog,
     onError: reportError,
@@ -528,8 +598,10 @@ function App() {
     geoIndexVersion,
     geoIndexProgress,
     indexStats,
+    allIndexStats,
+    updateCatalogIndexes,
+    updateIndex,
     optimizeIndex,
-    resetIndexState,
   } = useGeoIndexes({
     catalog,
     catalogInfo,
@@ -539,12 +611,6 @@ function App() {
   })
   const [indexStatsOverride, setIndexStatsOverride] =
     useState<SearchIndexStats>()
-  const searchDiagnostics = useMemo(
-    () => ({
-      explainSql: explainSqlQueries,
-    }),
-    [explainSqlQueries],
-  )
   const searchOrder = useMemo<SearchSpec['order']>(() => {
     if (distanceSortActive) {
       return {
@@ -557,11 +623,13 @@ function App() {
     return {
       kind: 'timestamp',
       sort: catalogSort,
+      engineId: selectedCatalogQueryIndexId,
     }
   }, [
     catalogSort,
     distanceSortActive,
     queryPoint,
+    selectedCatalogQueryIndexId,
     selectedIndexId,
   ])
   const resultSearchSpec = useMemo<SearchSpec>(
@@ -573,14 +641,12 @@ function App() {
       limit: resultPageSize,
       offset: resultOffset,
       purpose: 'results',
-      diagnostics: searchDiagnostics,
     }),
     [
       geoBounds,
       kindFilter,
       resultOffset,
       resultPageSize,
-      searchDiagnostics,
       searchOrder,
       timeRange,
     ],
@@ -594,9 +660,8 @@ function App() {
       limit: MAP_POINT_LIMIT,
       offset: 0,
       purpose: 'map',
-      diagnostics: searchDiagnostics,
     }),
-    [kindFilter, searchDiagnostics, searchOrder, timeRange],
+    [kindFilter, searchOrder, timeRange],
   )
   const searchWindows = useSearchResults({
     catalog,
@@ -613,6 +678,26 @@ function App() {
   const validation = searchWindows.validation
   const effectiveIndexStats =
     indexStatsOverride ?? searchWindows.resultMetrics ?? indexStats
+  const distanceIndexBuilding =
+    geoIndexProgress?.currentIndexId === selectedIndexId ||
+    geoIndexProgress?.currentIndexId === 'segmented-ball-tree'
+  const selectedIndexStatus = distanceIndexBuilding
+    ? 'building'
+    : (indexStats.indexStatus ?? 'missing')
+  const timeGeoIndexStats = allIndexStats.find(
+    (entry) => entry.engineId === 'file-time-geo',
+  )
+  const cellTimeIndexStats = allIndexStats.find(
+    (entry) => entry.engineId === 'file-cell-time',
+  )
+  const regularIndexStatus = catalogIndexStatus(
+    timeGeoIndexStats,
+    cellTimeIndexStats,
+    geoIndexProgress,
+  )
+  const regularIndexProgress = geoIndexProgress?.currentIndexId?.startsWith('file-')
+    ? geoIndexProgress
+    : undefined
   const handleImported = useCallback(() => {
     setResultPage(0)
     markCatalogChanged()
@@ -637,8 +722,7 @@ function App() {
   const busy = importBusy || catalogBusy
   const canCommitImport =
     Boolean(importProgress) &&
-    activeImportKind === 'geo' &&
-    (platform.kind === 'tauri' || webCatalogStorageMode === 'sqlite')
+    activeImportKind === 'geo'
   const visibleResults = distanceSortActive
   const resultItems = searchWindows.results
   const resultItemsLoading = searchWindows.loading
@@ -692,49 +776,12 @@ function App() {
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, value)
   }, [])
 
-  const changeWebCatalogStorageMode = useCallback(
-    (value: string) => {
-      if (
-        busy ||
-        !isWebCatalogStorageMode(value) ||
-        value === webCatalogStorageMode
-      ) {
-        return
-      }
-
-      window.localStorage.setItem(WEB_CATALOG_STORAGE_MODE_KEY, value)
-      resetCatalogState()
-      resetIndexState()
-      searchWindows.setResults([])
-      searchWindows.clearMap()
-      searchWindows.setValidation(undefined)
-      setIndexStatsOverride(undefined)
-      closeViewer()
-      setError(undefined)
-      setWebCatalogStorageMode(value)
-    },
-    [
-      busy,
-      closeViewer,
-      resetCatalogState,
-      resetIndexState,
-      searchWindows,
-      webCatalogStorageMode,
-    ],
-  )
-
-  const changeExplainSqlQueries = useCallback((checked: boolean) => {
-    setExplainSqlQueries(checked)
-    window.localStorage.setItem(EXPLAIN_SQL_KEY, checked ? 'true' : 'false')
-  }, [])
-
   useEffect(() => {
     traceStartup('[startup]', 'App mounted', {
       platformKind: platform.kind,
-      webCatalogStorageMode,
     })
     return () => platform.dispose()
-  }, [platform, webCatalogStorageMode])
+  }, [platform])
 
   useEffect(() => {
     function closeMenusOnEscape(event: globalThis.KeyboardEvent) {
@@ -787,7 +834,7 @@ function App() {
       markCatalogChanged()
       recordActivity('activityCatalogCleared')
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught))
+      reportError(caught)
     } finally {
       setCatalogBusy(false)
     }
@@ -797,6 +844,7 @@ function App() {
     closeViewer,
     markCatalogChanged,
     recordActivity,
+    reportError,
     searchWindows,
     setResultPage,
   ])
@@ -1140,41 +1188,6 @@ function App() {
                 {t('settings')}
               </summary>
               <div className="display-popover settings-popover">
-                {platform.kind === 'web' && (
-                  <div className="display-section">
-                    <label className="settings-select-row">
-                      <span>{t('catalogDatabase')}</span>
-                      <select
-                        value={webCatalogStorageMode}
-                        onChange={(event) =>
-                          changeWebCatalogStorageMode(event.target.value)
-                        }
-                        disabled={busy}
-                      >
-                        <option value="sqlite">{t('sqliteOpfs')}</option>
-                        <option value="indexeddb">{t('indexedDb')}</option>
-                      </select>
-                    </label>
-                    <p className="settings-hint">
-                      {t('catalogDatabaseDescription')}
-                    </p>
-                  </div>
-                )}
-                <div className="display-section">
-                  <label className="settings-checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={explainSqlQueries}
-                      onChange={(event) =>
-                        changeExplainSqlQueries(event.currentTarget.checked)
-                      }
-                    />
-                    <span>{t('explainSqlQueries')}</span>
-                  </label>
-                  <p className="settings-hint">
-                    {t('explainSqlQueriesDescription')}
-                  </p>
-                </div>
                 <div className="display-section">
                   <span>{t('activityLog')}</span>
                   <div className="activity-log" aria-label={t('activityLog')}>
@@ -1432,6 +1445,21 @@ function App() {
                   </option>
                 </select>
               </label>
+              <label>
+                {t('catalogQueryIndex')}
+                <select
+                  value={selectedCatalogQueryIndexId}
+                  onChange={(event) => {
+                    const nextIndexId = event.target.value
+                    if (isCatalogQueryIndexId(nextIndexId)) {
+                      setSelectedCatalogQueryIndexId(nextIndexId)
+                    }
+                  }}
+                >
+                  <option value="file-time-geo">{t('timeFirstIndex')}</option>
+                  <option value="file-cell-time">{t('locationFirstIndex')}</option>
+                </select>
+              </label>
               {distanceSortActive && (
                 <label>
                   {t('distanceEngine')}
@@ -1448,6 +1476,185 @@ function App() {
               )}
             </section>
 
+            <section className="panel index-panel">
+              <div className="panel-title">
+                <Activity size={17} />
+                <h2>{t('catalogIndexes')}</h2>
+              </div>
+              <div className="index-status-row">
+                <span className={`index-status-badge ${regularIndexStatus}`}>
+                  {indexStatusLabel(regularIndexStatus, t)}
+                </span>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={!catalogInfo || Boolean(geoIndexProgress)}
+                  onClick={() => {
+                    void updateCatalogIndexes().catch(reportError)
+                  }}
+                >
+                  {catalogIndexButtonLabel(regularIndexStatus, t)}
+                </button>
+              </div>
+              {regularIndexProgress && (
+                <div className="index-progress">
+                  <div className="index-progress-copy">
+                    <span>{geoIndexProgressLabel(regularIndexProgress, t)}</span>
+                    <strong>
+                      {geoIndexProgressDetail(regularIndexProgress, t, locale)}
+                    </strong>
+                  </div>
+                  <div
+                    className={`progress-track ${
+                      regularIndexProgress.phase === 'loading' ? 'indeterminate' : ''
+                    }`}
+                    role="progressbar"
+                    aria-label={geoIndexProgressLabel(regularIndexProgress, t)}
+                    aria-valuemax={100}
+                    aria-valuemin={0}
+                    aria-valuenow={
+                      regularIndexProgress.phase === 'loading'
+                        ? undefined
+                        : geoIndexProgressPercent(regularIndexProgress)
+                    }
+                    aria-valuetext={geoIndexProgressDetail(
+                      regularIndexProgress,
+                      t,
+                      locale,
+                    )}
+                  >
+                    <div
+                      className="progress-fill"
+                      style={{
+                        width:
+                          geoIndexProgressPercent(regularIndexProgress) === undefined
+                            ? undefined
+                            : `${geoIndexProgressPercent(regularIndexProgress)}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+              <dl className="index-status-grid">
+                <div>
+                  <dt>{t('timeFirstIndex')}</dt>
+                  <dd>
+                    {indexStatusLabel(timeGeoIndexStats?.indexStatus, t)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t('locationFirstIndex')}</dt>
+                  <dd>{indexStatusLabel(cellTimeIndexStats?.indexStatus, t)}</dd>
+                </div>
+                <div>
+                  <dt>{t('assets')}</dt>
+                  <dd>
+                    {statsNumber(
+                      Math.max(
+                        timeGeoIndexStats?.pointCount ?? 0,
+                        cellTimeIndexStats?.pointCount ?? 0,
+                      ),
+                      locale,
+                    )}
+                  </dd>
+                </div>
+                {(typeof timeGeoIndexStats?.indexSizeBytes === 'number' ||
+                  typeof cellTimeIndexStats?.indexSizeBytes === 'number') && (
+                  <div>
+                    <dt>{t('indexSize')}</dt>
+                    <dd>
+                      {formatBytes(
+                        (timeGeoIndexStats?.indexSizeBytes ?? 0) +
+                          (cellTimeIndexStats?.indexSizeBytes ?? 0),
+                        locale,
+                      )}
+                    </dd>
+                  </div>
+                )}
+                {typeof timeGeoIndexStats?.catalogVersion === 'number' && (
+                  <div>
+                    <dt>{t('catalogVersion')}</dt>
+                    <dd>
+                      {statsNumber(timeGeoIndexStats.catalogVersion, locale)}
+                    </dd>
+                  </div>
+                )}
+                {typeof timeGeoIndexStats?.indexCatalogVersion ===
+                  'number' && (
+                  <div>
+                    <dt>{t('indexVersion')}</dt>
+                    <dd>
+                      {statsNumber(
+                        timeGeoIndexStats.indexCatalogVersion,
+                        locale,
+                      )}
+                    </dd>
+                  </div>
+                )}
+              </dl>
+            </section>
+
+            <section className="panel index-panel">
+              <div className="panel-title">
+                <Activity size={17} />
+                <h2>{t('distanceIndex')}</h2>
+              </div>
+              <div className="index-status-row">
+                <span className={`index-status-badge ${selectedIndexStatus}`}>
+                  {indexStatusLabel(selectedIndexStatus, t)}
+                </span>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={!catalogInfo || Boolean(geoIndexProgress)}
+                  onClick={() => {
+                    void (selectedIndexStatus === 'current'
+                      ? optimizeIndex()
+                      : updateIndex()
+                    ).catch(reportError)
+                  }}
+                >
+                  {indexUpdateButtonLabel(selectedIndexStatus, t)}
+                </button>
+              </div>
+              <dl className="index-status-grid">
+                <div>
+                  <dt>{t('engine')}</dt>
+                  <dd>{indexStats.engineLabel ?? indexStats.engineId}</dd>
+                </div>
+                <div>
+                  <dt>{t('geoPoints')}</dt>
+                  <dd>{statsNumber(indexStats.pointCount, locale)}</dd>
+                </div>
+                {typeof indexStats.catalogVersion === 'number' && (
+                  <div>
+                    <dt>{t('catalogVersion')}</dt>
+                    <dd>{statsNumber(indexStats.catalogVersion, locale)}</dd>
+                  </div>
+                )}
+                {typeof indexStats.indexCatalogVersion === 'number' && (
+                  <div>
+                    <dt>{t('indexVersion')}</dt>
+                    <dd>
+                      {statsNumber(indexStats.indexCatalogVersion, locale)}
+                    </dd>
+                  </div>
+                )}
+                {typeof indexStats.indexSizeBytes === 'number' && (
+                  <div>
+                    <dt>{t('indexSize')}</dt>
+                    <dd>{formatBytes(indexStats.indexSizeBytes, locale)}</dd>
+                  </div>
+                )}
+                {typeof indexStats.segmentCount === 'number' && (
+                  <div>
+                    <dt>{t('segments')}</dt>
+                    <dd>{statsNumber(indexStats.segmentCount, locale)}</dd>
+                  </div>
+                )}
+              </dl>
+            </section>
+
             <section className="panel metrics-panel">
               <div className="panel-title">
                 <Activity size={17} />
@@ -1459,12 +1666,6 @@ function App() {
                   <dd className="metric-text">
                     {effectiveIndexStats.engineLabel ??
                       effectiveIndexStats.engineId}
-                  </dd>
-                </div>
-                <div>
-                  <dt>{t('storage')}</dt>
-                  <dd className="metric-text">
-                    {effectiveIndexStats.storageMode ?? '-'}
                   </dd>
                 </div>
                 <div>
@@ -1561,17 +1762,6 @@ function App() {
                     </dd>
                   </div>
                 )}
-                {typeof effectiveIndexStats.sqliteQueryCount === 'number' && (
-                  <div>
-                    <dt>{t('sqlQueries')}</dt>
-                    <dd>
-                      {statsNumber(
-                        effectiveIndexStats.sqliteQueryCount,
-                        locale,
-                      )}
-                    </dd>
-                  </div>
-                )}
                 {effectiveIndexStats.indexStorage && (
                   <div>
                     <dt>{t('indexStorage')}</dt>
@@ -1627,36 +1817,6 @@ function App() {
                   </div>
                 )}
               </dl>
-              {selectedIndexId === 'segmented-ball-tree' && (
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={() => {
-                    void optimizeIndex().catch(reportError)
-                  }}
-                >
-                  {t('optimizeDistanceIndex')}
-                </button>
-              )}
-              {explainSqlQueries && effectiveIndexStats.sqlPlan && (
-                <div className="sql-plan-panel">
-                  <div>
-                    <span>{t('usedIndexes')}</span>
-                    <strong>
-                      {effectiveIndexStats.sqlPlan.usedIndexes.length > 0
-                        ? effectiveIndexStats.sqlPlan.usedIndexes.join(', ')
-                        : t('none')}
-                    </strong>
-                  </div>
-                  <ol className="sql-plan-list">
-                    {effectiveIndexStats.sqlPlan.rows.map((row) => (
-                      <li key={`${row.id}-${row.parent}-${row.detail}`}>
-                        {row.detail}
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-              )}
               {validation && (
                 <p
                   className={

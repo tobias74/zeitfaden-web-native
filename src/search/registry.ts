@@ -11,7 +11,10 @@ function orderCandidatesForSpec(
 ): SearchIndexEngine[] {
   const candidates = engines.filter((engine) => engine.canHandle(spec))
   if (spec.order.kind !== 'distance') {
-    return candidates
+    const selectedEngineId = spec.order.engineId
+    return selectedEngineId
+      ? candidates.filter((engine) => engine.id === selectedEngineId)
+      : candidates
   }
   const selectedEngineId = spec.order.engineId
   if (!selectedEngineId) {

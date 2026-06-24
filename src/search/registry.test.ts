@@ -58,47 +58,69 @@ function engine(
 }
 
 describe('SearchIndexRegistry', () => {
-  it('chooses the timestamp SQL engine for timestamp-only queries', async () => {
+  it('chooses the time-first file engine for timestamp-only queries', async () => {
     const timestamp = engine(
-      'sqlite-timestamp',
-      (spec) => spec.order.kind === 'timestamp' && !spec.geoBounds,
+      'file-time-geo',
+      (spec) => spec.order.kind === 'timestamp',
     )
     const bbox = engine(
-      'sqlite-bbox-time',
+      'file-cell-time',
       (spec) => spec.order.kind === 'timestamp' && Boolean(spec.geoBounds),
     )
     const registry = new SearchIndexRegistry([timestamp, bbox])
 
     const result = await registry.search({
-      order: { kind: 'timestamp', sort: 'timestamp_desc' },
+      order: { kind: 'timestamp', sort: 'timestamp_desc', engineId: 'file-time-geo' },
       purpose: 'results',
     })
 
-    expect(result.engineId).toBe('sqlite-timestamp')
+    expect(result.engineId).toBe('file-time-geo')
     expect(timestamp.search).toHaveBeenCalledTimes(1)
     expect(bbox.search).not.toHaveBeenCalled()
   })
 
-  it('chooses the bbox SQL engine for rectangle queries', async () => {
+  it('chooses the location-first file engine for selected rectangle queries', async () => {
     const timestamp = engine(
-      'sqlite-timestamp',
-      (spec) => spec.order.kind === 'timestamp' && !spec.geoBounds,
+      'file-time-geo',
+      (spec) => spec.order.kind === 'timestamp',
     )
     const bbox = engine(
-      'sqlite-bbox-time',
+      'file-cell-time',
       (spec) => spec.order.kind === 'timestamp' && Boolean(spec.geoBounds),
     )
     const registry = new SearchIndexRegistry([timestamp, bbox])
 
     const result = await registry.search({
       geoBounds: { minLat: 1, maxLat: 2, minLon: 3, maxLon: 4 },
-      order: { kind: 'timestamp', sort: 'timestamp_asc' },
+      order: { kind: 'timestamp', sort: 'timestamp_asc', engineId: 'file-cell-time' },
       purpose: 'results',
     })
 
-    expect(result.engineId).toBe('sqlite-bbox-time')
+    expect(result.engineId).toBe('file-cell-time')
     expect(timestamp.search).not.toHaveBeenCalled()
     expect(bbox.search).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not fall back when a selected regular file engine cannot handle the query', async () => {
+    const timestamp = engine(
+      'file-time-geo',
+      (spec) => spec.order.kind === 'timestamp',
+    )
+    const bbox = engine(
+      'file-cell-time',
+      (spec) => spec.order.kind === 'timestamp' && Boolean(spec.geoBounds),
+    )
+    const registry = new SearchIndexRegistry([timestamp, bbox])
+
+    await expect(
+      registry.search({
+        order: { kind: 'timestamp', sort: 'timestamp_asc', engineId: 'file-cell-time' },
+        purpose: 'results',
+      }),
+    ).rejects.toThrow('No exact search index engine can handle this query.')
+
+    expect(timestamp.search).not.toHaveBeenCalled()
+    expect(bbox.search).not.toHaveBeenCalled()
   })
 
   it('tries a legacy selected distance engine first and falls back to another exact engine', async () => {

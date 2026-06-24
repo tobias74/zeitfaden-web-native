@@ -36,7 +36,7 @@ const defaultResultMetrics: SearchIndexStats = {
   prunedByGeo: 0,
   prunedByTime: 0,
   queryPurpose: 'results',
-  storageMode: 'sqlite',
+    storageMode: 'file',
   queryTimeMs: 0,
   rowsReturned: 0,
   limit: 0,

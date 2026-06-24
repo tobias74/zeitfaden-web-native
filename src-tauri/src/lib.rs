@@ -3,14 +3,12 @@ use exif::{In, Reader as ExifReader, Tag, Value as ExifValue};
 use image::ImageFormat;
 use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader as XmlReader;
-use rusqlite::types::Value;
-use rusqlite::{params, params_from_iter, Connection, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -21,12 +19,30 @@ use walkdir::WalkDir;
 type AppResult<T> = Result<T, String>;
 
 const IMPORT_BATCH_SIZE: usize = 1000;
-const SQLITE_BIND_CHUNK_LIMIT: usize = 12000;
-const ASSET_BIND_COLUMNS: usize = 9;
-const LOCATION_BIND_COLUMNS: usize = 7;
 const GEO_IMPORT_PREFIX_BYTES: usize = 512 * 1024;
 const PROGRESS_HEARTBEAT_MS: u128 = 1000;
-const CATALOG_EPOCH_KEY: &str = "catalogEpoch";
+const FILE_CATALOG_DIR: &str = "catalog-file-v1";
+const FILE_CATALOG_MANIFEST: &str = "manifest.json";
+const FILE_CATALOG_ASSETS: &str = "assets.bin";
+const FILE_CATALOG_TIME_GEO_INDEX: &str = "time-geo.idx";
+const FILE_CATALOG_CELL_TIME_INDEX: &str = "cell-time.idx";
+const PACKED_INDEX_MAGIC: u32 = 0x5049_5831;
+const BINARY_SCHEMA_VERSION: u32 = 1;
+const PACKED_INDEX_HEADER_SIZE: usize = 96;
+const TIME_GEO_RECORD_SIZE: usize = 20;
+const CELL_TIME_RECORD_SIZE: usize = 28;
+const PACKED_SCAN_RECORDS: usize = 8192;
+const INDEX_KIND_TIME_GEO: u32 = 1;
+const INDEX_KIND_CELL_TIME: u32 = 2;
+const CELL_SIZE_E7: i64 = 1000;
+const LAT_OFFSET_E7: i64 = 900_000_000;
+const LON_OFFSET_E7: i64 = 1_800_000_000;
+const LAT_CELL_COUNT: u64 = 1_800_000;
+const LON_CELL_COUNT: u64 = 3_600_000;
+const KIND_FLAG_IMAGE: u8 = 0;
+const KIND_FLAG_VIDEO: u8 = 1;
+const KIND_FLAG_GEO_POINT: u8 = 2;
+const KIND_FLAG_HAS_GEO: u8 = 1 << 2;
 const SEGMENTED_BALL_TREE_SEGMENT_LIMIT: usize = 100_000;
 const SEGMENTED_BALL_TREE_DELTA_LIMIT: usize = 50_000;
 const SEGMENTED_BALL_TREE_LEAF_SIZE: usize = 64;
@@ -37,7 +53,6 @@ static IMPORT_COMMIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 #[serde(rename_all = "camelCase")]
 struct CatalogInfo {
     storage_mode: String,
-    sqlite_version: String,
     filename: String,
 }
 
@@ -145,6 +160,9 @@ struct GeoSearchResult {
 struct GeoIndexStats {
     engine_id: String,
     point_count: usize,
+    index_status: Option<String>,
+    catalog_version: Option<i64>,
+    index_catalog_version: Option<i64>,
     index_size_bytes: Option<usize>,
     resident_bytes: Option<usize>,
     disk_read_bytes: Option<usize>,
@@ -170,7 +188,6 @@ struct GeoIndexStats {
     pending_point_count: Option<usize>,
     needs_optimization: Option<bool>,
     cell_count: Option<usize>,
-    sqlite_query_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,12 +208,6 @@ struct SearchOrder {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SearchDiagnostics {
-    explain_sql: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct SearchSpec {
     kind: Option<String>,
     source_id: Option<String>,
@@ -208,22 +219,6 @@ struct SearchSpec {
     purpose: String,
     start_time: Option<i64>,
     end_time: Option<i64>,
-    diagnostics: Option<SearchDiagnostics>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SqlExplainPlanRow {
-    id: i64,
-    parent: i64,
-    detail: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SqlExplainPlan {
-    rows: Vec<SqlExplainPlanRow>,
-    used_indexes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +229,9 @@ struct SearchIndexStats {
     exact: Option<bool>,
     persistent: Option<bool>,
     point_count: usize,
+    index_status: Option<String>,
+    catalog_version: Option<i64>,
+    index_catalog_version: Option<i64>,
     index_size_bytes: Option<usize>,
     resident_bytes: Option<usize>,
     disk_read_bytes: Option<usize>,
@@ -259,7 +257,6 @@ struct SearchIndexStats {
     pending_point_count: Option<usize>,
     needs_optimization: Option<bool>,
     cell_count: Option<usize>,
-    sqlite_query_count: Option<usize>,
     query_purpose: Option<String>,
     storage_mode: Option<String>,
     query_time_ms: Option<f64>,
@@ -267,7 +264,6 @@ struct SearchIndexStats {
     limit: Option<i64>,
     offset: Option<i64>,
     limit_reached: Option<bool>,
-    sql_plan: Option<SqlExplainPlan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -536,6 +532,9 @@ fn empty_geo_index_stats(engine_id: &str, point_count: usize) -> GeoIndexStats {
     GeoIndexStats {
         engine_id: engine_id.to_string(),
         point_count,
+        index_status: None,
+        catalog_version: None,
+        index_catalog_version: None,
         index_size_bytes: None,
         resident_bytes: None,
         disk_read_bytes: None,
@@ -561,7 +560,6 @@ fn empty_geo_index_stats(engine_id: &str, point_count: usize) -> GeoIndexStats {
         pending_point_count: None,
         needs_optimization: None,
         cell_count: None,
-        sqlite_query_count: None,
     }
 }
 
@@ -572,6 +570,9 @@ fn empty_search_index_stats(engine_id: &str, engine_label: &str) -> SearchIndexS
         exact: Some(true),
         persistent: Some(true),
         point_count: 0,
+        index_status: None,
+        catalog_version: None,
+        index_catalog_version: None,
         index_size_bytes: None,
         resident_bytes: None,
         disk_read_bytes: None,
@@ -597,7 +598,6 @@ fn empty_search_index_stats(engine_id: &str, engine_label: &str) -> SearchIndexS
         pending_point_count: None,
         needs_optimization: None,
         cell_count: None,
-        sqlite_query_count: None,
         query_purpose: None,
         storage_mode: None,
         query_time_ms: None,
@@ -605,7 +605,6 @@ fn empty_search_index_stats(engine_id: &str, engine_label: &str) -> SearchIndexS
         limit: None,
         offset: None,
         limit_reached: None,
-        sql_plan: None,
     }
 }
 
@@ -621,6 +620,9 @@ fn search_stats_from_geo(
         exact: Some(exact),
         persistent: Some(persistent),
         point_count: stats.point_count,
+        index_status: stats.index_status,
+        catalog_version: stats.catalog_version,
+        index_catalog_version: stats.index_catalog_version,
         index_size_bytes: stats.index_size_bytes,
         resident_bytes: stats.resident_bytes,
         disk_read_bytes: stats.disk_read_bytes,
@@ -646,7 +648,6 @@ fn search_stats_from_geo(
         pending_point_count: stats.pending_point_count,
         needs_optimization: stats.needs_optimization,
         cell_count: stats.cell_count,
-        sqlite_query_count: stats.sqlite_query_count,
         query_purpose: None,
         storage_mode: None,
         query_time_ms: None,
@@ -654,7 +655,6 @@ fn search_stats_from_geo(
         limit: None,
         offset: None,
         limit_reached: None,
-        sql_plan: None,
     }
 }
 
@@ -667,7 +667,6 @@ fn with_query_metrics(
     limit: i64,
     offset: i64,
     limit_reached: bool,
-    sql_plan: Option<SqlExplainPlan>,
 ) -> SearchIndexStats {
     stats.query_purpose = Some(spec.purpose.clone());
     stats.storage_mode = Some(storage_mode.to_string());
@@ -679,32 +678,7 @@ fn with_query_metrics(
     stats.limit = Some(limit);
     stats.offset = Some(offset);
     stats.limit_reached = Some(limit_reached);
-    stats.sql_plan = sql_plan;
     stats
-}
-
-fn extract_sqlite_used_indexes(details: &[String]) -> Vec<String> {
-    let mut indexes = BTreeSet::<String>::new();
-    for detail in details {
-        for marker in [
-            "USING COVERING INDEX ",
-            "USING INDEX ",
-            "USING AUTOMATIC COVERING INDEX ",
-            "USING AUTOMATIC INDEX ",
-        ] {
-            if let Some(start) = detail.find(marker) {
-                let value = detail[start + marker.len()..]
-                    .split(|ch: char| ch.is_whitespace() || ch == ')')
-                    .next()
-                    .unwrap_or("")
-                    .trim();
-                if !value.is_empty() {
-                    indexes.insert(value.to_string());
-                }
-            }
-        }
-    }
-    indexes.into_iter().collect()
 }
 
 fn to_radians(degrees: f64) -> f64 {
@@ -1831,13 +1805,12 @@ fn build_disk_segmented_ball_tree_index(
     let started = Instant::now();
     let dir = disk_segmented_index_dir(app, "segmented-ball-tree")?;
     reset_directory(&dir)?;
-    let conn = connect(app)?;
     let builder = NativeSegmentedBallTreeIndex::default();
     let mut segments = Vec::<NativeDiskSegmentRef>::new();
     let mut point_count = 0_usize;
 
     for_each_geo_point_batch(
-        &conn,
+        app,
         SEGMENTED_BALL_TREE_SEGMENT_LIMIT,
         |batch, processed_points| {
             let points = batch
@@ -1903,88 +1876,159 @@ fn build_disk_segmented_ball_tree_index(
     Ok(point_count)
 }
 
-fn catalog_path(app: &AppHandle) -> AppResult<PathBuf> {
-    Ok(app_data_dir(app)?.join("catalog-v10.sqlite3"))
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileCatalogSource {
+    id: String,
+    label: String,
+    root_path: Option<String>,
+    generation: i64,
+    active: bool,
+    imported_at: i64,
 }
 
-fn connect(app: &AppHandle) -> AppResult<Connection> {
-    let path = catalog_path(app)?;
-    let conn = Connection::open(path).map_err(|error| error.to_string())?;
-    ensure_schema(&conn)?;
-    Ok(conn)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileCatalogChunk {
+    id: String,
+    source_id: String,
+    generation: i64,
+    count: usize,
+    created_at: i64,
+    active: bool,
 }
 
-fn ensure_schema(conn: &Connection) -> AppResult<()> {
-    conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS media_assets (
-          content_hash TEXT PRIMARY KEY,
-          kind TEXT NOT NULL,
-          mime_type TEXT NOT NULL,
-          size_bytes INTEGER NOT NULL,
-          duration_ms INTEGER,
-          timestamp INTEGER,
-          latitude REAL,
-          longitude REAL,
-          thumbnail_key TEXT
-        );
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileCatalogManifest {
+    schema_version: i64,
+    catalog_version: i64,
+    #[serde(default)]
+    next_asset_id: i64,
+    #[serde(default = "minus_one_i64")]
+    asset_store_version: i64,
+    #[serde(default = "minus_one_i64")]
+    index_applied_version: i64,
+    #[serde(default)]
+    index_job: Option<FileCatalogIndexJob>,
+    next_chunk_id: i64,
+    occurrence_count: usize,
+    asset_count: usize,
+    location_count: usize,
+    materialized_version: i64,
+    sources: HashMap<String, FileCatalogSource>,
+    chunks: Vec<FileCatalogChunk>,
+}
 
-        CREATE TABLE IF NOT EXISTS media_locations (
-          id TEXT PRIMARY KEY,
-          content_hash TEXT NOT NULL,
-          source_id TEXT NOT NULL,
-          source_label TEXT NOT NULL,
-          root_path TEXT,
-          relative_path TEXT,
-          point_index INTEGER
-        );
+fn minus_one_i64() -> i64 {
+    -1
+}
 
-        CREATE TABLE IF NOT EXISTS catalog_metadata (
-          key TEXT PRIMARY KEY,
-          value TEXT NOT NULL
-        );
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileCatalogIndexJob {
+    status: String,
+    pending_since: Option<i64>,
+    started_at: Option<i64>,
+    finished_at: Option<i64>,
+    failed_message: Option<String>,
+}
 
-        CREATE INDEX IF NOT EXISTS idx_media_locations_content_hash
-          ON media_locations(content_hash);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileOccurrence {
+    item: MediaItem,
+    source_id: String,
+    generation: i64,
+}
 
-        CREATE INDEX IF NOT EXISTS idx_assets_timestamp_hash
-          ON media_assets(timestamp, content_hash);
-        CREATE INDEX IF NOT EXISTS idx_assets_kind_timestamp_hash
-          ON media_assets(kind, timestamp, content_hash);
-        CREATE INDEX IF NOT EXISTS idx_assets_lat_lon_timestamp_hash
-          ON media_assets(latitude, longitude, timestamp, content_hash);
-        DROP INDEX IF EXISTS idx_geo_s2_points_cell_time_kind_cover;
-        DROP TABLE IF EXISTS geo_s2_points;
-        DROP TABLE IF EXISTS geo_s2_cells;
-        ",
+fn empty_file_catalog_manifest() -> FileCatalogManifest {
+    FileCatalogManifest {
+        schema_version: 1,
+        catalog_version: 0,
+        next_asset_id: 0,
+        asset_store_version: -1,
+        index_applied_version: -1,
+        index_job: Some(FileCatalogIndexJob {
+            status: "current".to_string(),
+            pending_since: None,
+            started_at: None,
+            finished_at: None,
+            failed_message: None,
+        }),
+        next_chunk_id: 0,
+        occurrence_count: 0,
+        asset_count: 0,
+        location_count: 0,
+        materialized_version: -1,
+        sources: HashMap::new(),
+        chunks: Vec::new(),
+    }
+}
+
+fn catalog_dir(app: &AppHandle) -> AppResult<PathBuf> {
+    Ok(app_data_dir(app)?.join(FILE_CATALOG_DIR))
+}
+
+fn manifest_path(app: &AppHandle) -> AppResult<PathBuf> {
+    Ok(catalog_dir(app)?.join(FILE_CATALOG_MANIFEST))
+}
+
+fn occurrences_dir(app: &AppHandle) -> AppResult<PathBuf> {
+    Ok(catalog_dir(app)?.join("occurrences"))
+}
+
+fn assets_dir(app: &AppHandle) -> AppResult<PathBuf> {
+    Ok(catalog_dir(app)?.join("assets"))
+}
+
+fn catalog_indexes_dir(app: &AppHandle) -> AppResult<PathBuf> {
+    Ok(catalog_dir(app)?.join("indexes"))
+}
+
+fn ensure_file_catalog_dirs(app: &AppHandle) -> AppResult<()> {
+    fs::create_dir_all(occurrences_dir(app)?).map_err(|error| error.to_string())?;
+    fs::create_dir_all(assets_dir(app)?).map_err(|error| error.to_string())?;
+    fs::create_dir_all(catalog_indexes_dir(app)?).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn load_file_catalog_manifest(app: &AppHandle) -> AppResult<FileCatalogManifest> {
+    ensure_file_catalog_dirs(app)?;
+    let path = manifest_path(app)?;
+    if !path.exists() {
+        return Ok(empty_file_catalog_manifest());
+    }
+    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&text).map_err(|error| error.to_string())
+}
+
+fn save_file_catalog_manifest(app: &AppHandle, manifest: &FileCatalogManifest) -> AppResult<()> {
+    ensure_file_catalog_dirs(app)?;
+    fs::write(
+        manifest_path(app)?,
+        serde_json::to_string(manifest).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())
 }
 
-fn catalog_epoch(conn: &Connection) -> AppResult<i64> {
-    let mut stmt = conn
-        .prepare("SELECT value FROM catalog_metadata WHERE key = ?")
-        .map_err(|error| error.to_string())?;
-    let result = stmt.query_row([CATALOG_EPOCH_KEY], |row| row.get::<_, String>(0));
-    match result {
-        Ok(value) => Ok(value.parse::<i64>().unwrap_or(0)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
-        Err(error) => Err(error.to_string()),
-    }
+fn catalog_epoch(app: &AppHandle) -> AppResult<i64> {
+    Ok(load_file_catalog_manifest(app)?.catalog_version)
 }
 
-fn bump_catalog_epoch(conn: &Connection) -> AppResult<i64> {
-    let next_epoch = catalog_epoch(conn)? + 1;
-    conn.execute(
-        "
-        INSERT INTO catalog_metadata (key, value)
-        VALUES (?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-        ",
-        params![CATALOG_EPOCH_KEY, next_epoch.to_string()],
-    )
-    .map_err(|error| error.to_string())?;
-    Ok(next_epoch)
+fn bump_catalog_epoch(app: &AppHandle, manifest: &mut FileCatalogManifest) -> AppResult<i64> {
+    manifest.catalog_version += 1;
+    manifest.materialized_version = -1;
+    manifest.asset_store_version = -1;
+    manifest.index_job = Some(FileCatalogIndexJob {
+        status: "pending".to_string(),
+        pending_since: Some(current_timestamp_millis()),
+        started_at: None,
+        finished_at: None,
+        failed_message: None,
+    });
+    save_file_catalog_manifest(app, manifest)?;
+    Ok(manifest.catalog_version)
 }
 
 fn sha256_string(value: &str) -> String {
@@ -2890,38 +2934,6 @@ fn geo_point_item_from_parsed_point(
     }
 }
 
-fn asset_from_row(row: &Row<'_>) -> rusqlite::Result<MediaItem> {
-    let content_hash: String = row.get("content_hash")?;
-    Ok(MediaItem {
-        id: content_hash.clone(),
-        content_hash,
-        source_id: String::new(),
-        relative_path: String::new(),
-        display_name: String::new(),
-        kind: row.get("kind")?,
-        mime_type: row.get("mime_type")?,
-        size_bytes: row.get("size_bytes")?,
-        duration_ms: row.get("duration_ms")?,
-        timestamp: row.get("timestamp")?,
-        latitude: row.get("latitude")?,
-        longitude: row.get("longitude")?,
-        thumbnail_key: row.get("thumbnail_key")?,
-        locations: Vec::new(),
-    })
-}
-
-fn location_from_row(row: &Row<'_>) -> rusqlite::Result<MediaLocation> {
-    Ok(MediaLocation {
-        id: row.get("id")?,
-        source_id: row.get("source_id")?,
-        source_label: row.get("source_label")?,
-        root_path: row.get("root_path")?,
-        relative_path: row.get("relative_path")?,
-        absolute_path: None,
-        point_index: row.get("point_index")?,
-    })
-}
-
 fn derived_absolute_path(kind: &str, location: &MediaLocation) -> Option<String> {
     let root_path = location.root_path.as_ref()?;
     if kind == "geo_point" {
@@ -2964,358 +2976,804 @@ fn derived_display_name(
         .unwrap_or_else(|| content_hash.to_string())
 }
 
-fn attach_locations(
-    conn: &Connection,
-    items: Vec<MediaItem>,
+fn normalize_media_item(
+    mut item: MediaItem,
+    mut locations: Vec<MediaLocation>,
     preferred_source_id: Option<&str>,
+) -> MediaItem {
+    locations.sort_by(|a, b| {
+        if let Some(source_id) = preferred_source_id {
+            match (a.source_id == source_id, b.source_id == source_id) {
+                (true, false) => return std::cmp::Ordering::Less,
+                (false, true) => return std::cmp::Ordering::Greater,
+                _ => {}
+            }
+        }
+        a.relative_path
+            .cmp(&b.relative_path)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let kind = item.kind.clone();
+    for location in locations.iter_mut() {
+        location.absolute_path = derived_absolute_path(&kind, location);
+    }
+    if let Some(primary) = locations.first() {
+        item.source_id = primary.source_id.clone();
+        item.relative_path = derived_relative_path(Some(primary));
+        item.display_name = derived_display_name(&kind, &item.content_hash, Some(primary));
+    }
+    item.locations = locations;
+    item
+}
+
+fn active_media_items(app: &AppHandle) -> AppResult<Vec<MediaItem>> {
+    let mut manifest = load_file_catalog_manifest(app)?;
+    if manifest.materialized_version == manifest.catalog_version {
+        let path = assets_dir(app)?.join(FILE_CATALOG_ASSETS);
+        if path.exists() {
+            let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+            return serde_json::from_str(&text).map_err(|error| error.to_string());
+        }
+    }
+    materialize_file_catalog(app, &mut manifest)
+}
+
+fn materialize_file_catalog(
+    app: &AppHandle,
+    manifest: &mut FileCatalogManifest,
 ) -> AppResult<Vec<MediaItem>> {
-    if items.is_empty() {
-        return Ok(items);
-    }
+    materialize_file_catalog_with_progress(app, manifest, None)
+}
 
-    let hashes = items
+fn materialize_file_catalog_with_progress(
+    app: &AppHandle,
+    manifest: &mut FileCatalogManifest,
+    mut on_progress: Option<&mut dyn FnMut(usize, usize, &str)>,
+) -> AppResult<Vec<MediaItem>> {
+    let mut assets = HashMap::<String, MediaItem>::new();
+    let mut locations = HashMap::<String, HashMap<String, MediaLocation>>::new();
+    let occurrence_dir = occurrences_dir(app)?;
+    let active_chunks = manifest
+        .chunks
         .iter()
-        .map(|item| item.content_hash.clone())
+        .filter(|chunk| chunk.active)
+        .cloned()
         .collect::<Vec<_>>();
-    let placeholders = hashes.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-    let sql = format!(
-        "
-        SELECT *
-        FROM media_locations
-        WHERE content_hash IN ({placeholders})
-        ORDER BY relative_path ASC, id ASC
-        "
-    );
-    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
-    let rows = stmt
-        .query_map(params_from_iter(hashes.iter()), |row| {
-            Ok((
-                row.get::<_, String>("content_hash")?,
-                location_from_row(row)?,
-            ))
-        })
-        .map_err(|error| error.to_string())?;
-    let mut by_hash = HashMap::<String, Vec<MediaLocation>>::new();
+    let total_occurrences = active_chunks.iter().map(|chunk| chunk.count).sum::<usize>();
+    let mut processed_occurrences = 0_usize;
 
-    for row in rows {
-        let (content_hash, location) = row.map_err(|error| error.to_string())?;
-        by_hash.entry(content_hash).or_default().push(location);
-    }
-
-    Ok(items
-        .into_iter()
-        .map(|mut item| {
-            let mut locations = by_hash.remove(&item.content_hash).unwrap_or_default();
-            locations.sort_by(|a, b| {
-                if let Some(source_id) = preferred_source_id {
-                    match (a.source_id == source_id, b.source_id == source_id) {
-                        (true, false) => return std::cmp::Ordering::Less,
-                        (false, true) => return std::cmp::Ordering::Greater,
-                        _ => {}
-                    }
+    for chunk in active_chunks.iter() {
+        let Some(source) = manifest.sources.get(&chunk.source_id) else {
+            continue;
+        };
+        if !source.active || source.generation != chunk.generation {
+            continue;
+        }
+        let path = occurrence_dir.join(format!("{}.bin", chunk.id));
+        if !path.exists() {
+            continue;
+        }
+        let file = File::open(path).map_err(|error| error.to_string())?;
+        for line in BufReader::new(file).lines() {
+            let line = line.map_err(|error| error.to_string())?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let occurrence: FileOccurrence =
+                serde_json::from_str(&line).map_err(|error| error.to_string())?;
+            processed_occurrences += 1;
+            if occurrence.generation != source.generation || occurrence.source_id != source.id {
+                continue;
+            }
+            let content_hash = occurrence.item.content_hash.clone();
+            assets
+                .entry(content_hash.clone())
+                .or_insert_with(|| occurrence.item.clone());
+            let location_map = locations.entry(content_hash).or_default();
+            for location in occurrence.item.locations {
+                location_map.insert(location.id.clone(), location);
+            }
+            if processed_occurrences % 50_000 == 0 {
+                if let Some(callback) = on_progress.as_mut() {
+                    callback(processed_occurrences, total_occurrences, "reading occurrences");
                 }
-                a.relative_path
-                    .cmp(&b.relative_path)
-                    .then_with(|| a.id.cmp(&b.id))
-            });
-            let kind = item.kind.clone();
-            for location in locations.iter_mut() {
-                location.absolute_path = derived_absolute_path(&kind, location);
             }
-            if let Some(primary) = locations.first() {
-                item.source_id = primary.source_id.clone();
-                item.relative_path = derived_relative_path(Some(primary));
-                item.display_name = derived_display_name(&kind, &item.content_hash, Some(primary));
-            }
-            item.locations = locations;
-            item
+        }
+    }
+
+    if let Some(callback) = on_progress.as_mut() {
+        callback(processed_occurrences, total_occurrences, "normalizing assets");
+    }
+    let mut items = assets
+        .into_values()
+        .map(|item| {
+            let item_locations = locations
+                .remove(&item.content_hash)
+                .map(|locations| locations.into_values().collect())
+                .unwrap_or_default();
+            normalize_media_item(item, item_locations, None)
         })
-        .collect())
+        .collect::<Vec<_>>();
+    items.sort_by(|a, b| a.content_hash.cmp(&b.content_hash));
+    manifest.asset_count = items.len();
+    manifest.location_count = items.iter().map(|item| item.locations.len()).sum();
+    manifest.materialized_version = manifest.catalog_version;
+    manifest.asset_store_version = manifest.catalog_version;
+    manifest.next_asset_id = manifest.next_asset_id.max(items.len() as i64);
+    fs::create_dir_all(assets_dir(app)?).map_err(|error| error.to_string())?;
+    fs::create_dir_all(catalog_indexes_dir(app)?).map_err(|error| error.to_string())?;
+    fs::write(
+        assets_dir(app)?.join(FILE_CATALOG_ASSETS),
+        serde_json::to_string(&items).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    save_file_catalog_manifest(app, manifest)?;
+    Ok(items)
 }
 
-fn upsert_source_tx(_conn: &Connection, _source: &MediaSource) -> AppResult<()> {
-    Ok(())
-}
-
-fn value_text(value: &str) -> Value {
-    Value::Text(value.to_string())
-}
-
-fn value_optional_text(value: &Option<String>) -> Value {
-    value
-        .as_ref()
-        .map(|value| Value::Text(value.clone()))
-        .unwrap_or(Value::Null)
-}
-
-fn value_optional_i64(value: Option<i64>) -> Value {
-    value.map(Value::Integer).unwrap_or(Value::Null)
-}
-
-fn value_optional_f64(value: Option<f64>) -> Value {
-    value.map(Value::Real).unwrap_or(Value::Null)
-}
-
-fn sql_placeholders(row_count: usize, column_count: usize) -> String {
-    let row = format!("({})", vec!["?"; column_count].join(", "));
-    vec![row; row_count].join(", ")
-}
-
-fn exec_multi_row_upsert(
-    conn: &Connection,
-    insert_prefix: &str,
-    conflict_clause: &str,
-    rows: &[Vec<Value>],
-    column_count: usize,
+fn write_file_catalog_indexes(
+    app: &AppHandle,
+    manifest: &FileCatalogManifest,
 ) -> AppResult<()> {
-    if rows.is_empty() {
-        return Ok(());
+    let indexes_dir = catalog_indexes_dir(app)?;
+    let items = active_media_items(app)?;
+    let mut time_records = Vec::<NativePackedIndexRecord>::new();
+    let mut cell_records = Vec::<NativePackedIndexRecord>::new();
+    for (asset_id, item) in items.iter().enumerate() {
+        if let Some(timestamp) = item.timestamp {
+            let has_geo = item.latitude.is_some() && item.longitude.is_some();
+            let record = NativePackedIndexRecord {
+                timestamp_sec: timestamp_seconds(timestamp),
+                lat_e7: item.latitude.map(lat_e7).unwrap_or(0),
+                lon_e7: item.longitude.map(lon_e7).unwrap_or(0),
+                asset_id,
+                kind_flags: kind_flags(item),
+                cell_id: 0,
+            };
+            time_records.push(record);
+            if has_geo {
+                cell_records.push(NativePackedIndexRecord {
+                    cell_id: geo_cell_id(record.lat_e7, record.lon_e7),
+                    ..record
+                });
+            }
+        }
     }
-
-    let max_rows = (SQLITE_BIND_CHUNK_LIMIT / column_count).max(1);
-    for chunk in rows.chunks(max_rows) {
-        let sql = format!(
-            "{insert_prefix} VALUES {} {conflict_clause}",
-            sql_placeholders(chunk.len(), column_count)
-        );
-        let bind = chunk
-            .iter()
-            .flat_map(|row| row.iter().cloned())
-            .collect::<Vec<_>>();
-        conn.execute(&sql, params_from_iter(bind.iter()))
-            .map_err(|error| error.to_string())?;
-    }
-
+    write_packed_index_file(
+        &indexes_dir.join(FILE_CATALOG_TIME_GEO_INDEX),
+        INDEX_KIND_TIME_GEO,
+        manifest,
+        &mut time_records,
+    )?;
+    write_packed_index_file(
+        &indexes_dir.join(FILE_CATALOG_CELL_TIME_INDEX),
+        INDEX_KIND_CELL_TIME,
+        manifest,
+        &mut cell_records,
+    )?;
     Ok(())
 }
 
-fn asset_row(item: &MediaItem) -> Vec<Value> {
-    vec![
-        value_text(&item.content_hash),
-        value_text(&item.kind),
-        value_text(&item.mime_type),
-        Value::Integer(item.size_bytes),
-        value_optional_i64(item.duration_ms),
-        value_optional_i64(item.timestamp),
-        value_optional_f64(item.latitude),
-        value_optional_f64(item.longitude),
-        value_optional_text(&item.thumbnail_key),
-    ]
+fn prepare_import_source(app: &AppHandle, source: &MediaSource) -> AppResult<i64> {
+    let mut manifest = load_file_catalog_manifest(app)?;
+    let generation = manifest
+        .sources
+        .get(&source.id)
+        .map(|source| source.generation + 1)
+        .unwrap_or(1);
+    manifest.sources.insert(
+        source.id.clone(),
+        FileCatalogSource {
+            id: source.id.clone(),
+            label: source.label.clone(),
+            root_path: source.root_path.clone(),
+            generation,
+            active: true,
+            imported_at: current_timestamp_millis(),
+        },
+    );
+    for chunk in manifest.chunks.iter_mut() {
+        if chunk.source_id == source.id {
+            chunk.active = false;
+        }
+    }
+    bump_catalog_epoch(app, &mut manifest)?;
+    Ok(generation)
 }
 
-fn location_rows(item: &MediaItem) -> Vec<Vec<Value>> {
-    item.locations
-        .iter()
-        .map(|location| {
-            vec![
-                value_text(&location.id),
-                value_text(&item.content_hash),
-                value_text(&location.source_id),
-                value_text(&location.source_label),
-                value_optional_text(&location.root_path),
-                value_optional_text(&location.relative_path),
-                value_optional_i64(location.point_index),
-            ]
-        })
-        .collect()
-}
-
-fn upsert_media_rows(conn: &mut Connection, items: &[MediaItem]) -> AppResult<usize> {
+fn append_media_items(
+    app: &AppHandle,
+    source_id: &str,
+    generation: i64,
+    items: &[MediaItem],
+) -> AppResult<usize> {
     if items.is_empty() {
         return Ok(0);
     }
-
-    let asset_rows = items.iter().map(asset_row).collect::<Vec<_>>();
-    exec_multi_row_upsert(
-        conn,
-        "
-        INSERT INTO media_assets (
-          content_hash, kind, mime_type, size_bytes, duration_ms,
-          timestamp, latitude, longitude, thumbnail_key
+    let mut manifest = load_file_catalog_manifest(app)?;
+    let chunk_id = format!("chunk-{:06}", manifest.next_chunk_id);
+    manifest.next_chunk_id += 1;
+    let path = occurrences_dir(app)?.join(format!("{chunk_id}.bin"));
+    let mut file = File::create(path).map_err(|error| error.to_string())?;
+    for item in items {
+        let occurrence = FileOccurrence {
+            item: item.clone(),
+            source_id: source_id.to_string(),
+            generation,
+        };
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&occurrence).map_err(|error| error.to_string())?
         )
-        ",
-        "
-        ON CONFLICT(content_hash) DO NOTHING
-        ",
-        &asset_rows,
-        ASSET_BIND_COLUMNS,
-    )?;
-
-    let location_rows = items.iter().flat_map(location_rows).collect::<Vec<_>>();
-    exec_multi_row_upsert(
-        conn,
-        "
-        INSERT INTO media_locations (
-          id, content_hash, source_id, source_label, root_path, relative_path,
-          point_index
-        )
-        ",
-        "
-        ON CONFLICT(id) DO NOTHING
-        ",
-        &location_rows,
-        LOCATION_BIND_COLUMNS,
-    )?;
+        .map_err(|error| error.to_string())?;
+    }
+    manifest.chunks.push(FileCatalogChunk {
+        id: chunk_id,
+        source_id: source_id.to_string(),
+        generation,
+        count: items.len(),
+        created_at: current_timestamp_millis(),
+        active: true,
+    });
+    manifest.occurrence_count += items.len();
+    bump_catalog_epoch(app, &mut manifest)?;
     Ok(items.len())
 }
 
 #[tauri::command]
 fn init_catalog(app: AppHandle) -> AppResult<CatalogInfo> {
-    let conn = connect(&app)?;
-    let sqlite_version: String = conn
-        .query_row("SELECT sqlite_version()", [], |row| row.get(0))
-        .map_err(|error| error.to_string())?;
+    ensure_file_catalog_dirs(&app)?;
+    let manifest = load_file_catalog_manifest(&app)?;
+    save_file_catalog_manifest(&app, &manifest)?;
     Ok(CatalogInfo {
         storage_mode: "native".to_string(),
-        sqlite_version,
-        filename: catalog_path(&app)?.to_string_lossy().to_string(),
+        filename: catalog_dir(&app)?.to_string_lossy().to_string(),
     })
 }
 
 #[tauri::command]
 fn upsert_source(app: AppHandle, source: MediaSource) -> AppResult<()> {
-    let conn = connect(&app)?;
-    upsert_source_tx(&conn, &source)
+    let mut manifest = load_file_catalog_manifest(&app)?;
+    let generation = manifest
+        .sources
+        .get(&source.id)
+        .map(|existing| existing.generation)
+        .unwrap_or(1);
+    manifest.sources.insert(
+        source.id.clone(),
+        FileCatalogSource {
+            id: source.id,
+            label: source.label,
+            root_path: source.root_path,
+            generation,
+            active: true,
+            imported_at: current_timestamp_millis(),
+        },
+    );
+    save_file_catalog_manifest(&app, &manifest)
 }
 
 #[tauri::command]
 fn upsert_media(app: AppHandle, items: Vec<MediaItem>) -> AppResult<usize> {
-    let mut conn = connect(&app)?;
-    let written = upsert_media_rows(&mut conn, &items)?;
-    if written > 0 {
-        bump_catalog_epoch(&conn)?;
+    if items.is_empty() {
+        return Ok(0);
     }
+    let source = MediaSource {
+        id: items[0].source_id.clone(),
+        label: items[0].source_id.clone(),
+        root_path: items
+            .iter()
+            .flat_map(|item| item.locations.iter())
+            .find_map(|location| location.root_path.clone()),
+    };
+    let generation = prepare_import_source(&app, &source)?;
+    let written = append_media_items(&app, &source.id, generation, &items)?;
+    let mut manifest = load_file_catalog_manifest(&app)?;
+    materialize_file_catalog(&app, &mut manifest)?;
     Ok(written)
 }
 
 #[tauri::command]
 fn list_media(app: AppHandle, query: CatalogQuery) -> AppResult<Vec<MediaItem>> {
-    Ok(list_media_with_plan(app, query, false)?.0)
+    let mut items = active_media_items(&app)?
+        .into_iter()
+        .filter(|item| item_matches_catalog_query(item, &query))
+        .map(|item| normalize_media_item(item.clone(), filtered_locations(&item, &query), query.source_id.as_deref()))
+        .collect::<Vec<_>>();
+    sort_media_items(&mut items, &query.sort);
+    let offset = query.offset.unwrap_or(0).max(0) as usize;
+    let limit = query.limit.unwrap_or(500).clamp(1, 10_000) as usize;
+    Ok(items.into_iter().skip(offset).take(limit).collect())
 }
 
-fn explain_query_plan(conn: &Connection, sql: &str, bind: &[Value]) -> AppResult<SqlExplainPlan> {
-    let explain_sql = format!("EXPLAIN QUERY PLAN {sql}");
-    let mut stmt = conn
-        .prepare(&explain_sql)
-        .map_err(|error| error.to_string())?;
-    let rows = stmt
-        .query_map(params_from_iter(bind.iter()), |row| {
-            Ok(SqlExplainPlanRow {
-                id: row.get(0)?,
-                parent: row.get(1)?,
-                detail: row.get(3)?,
-            })
-        })
-        .map_err(|error| error.to_string())?;
-    let mut plan_rows = Vec::new();
-    for row in rows {
-        plan_rows.push(row.map_err(|error| error.to_string())?);
+fn item_matches_catalog_query(item: &MediaItem, query: &CatalogQuery) -> bool {
+    match query.kind.as_deref() {
+        None | Some("all") => {}
+        Some("media") if matches!(item.kind.as_str(), "image" | "video") => {}
+        Some(kind) if item.kind == kind => {}
+        _ => return false,
     }
-    let details = plan_rows
-        .iter()
-        .map(|row| row.detail.clone())
-        .collect::<Vec<_>>();
-    Ok(SqlExplainPlan {
-        rows: plan_rows,
-        used_indexes: extract_sqlite_used_indexes(&details),
+    if let Some(source_id) = query.source_id.as_ref() {
+        if !item.locations.iter().any(|location| &location.source_id == source_id) {
+            return false;
+        }
+    }
+    if let Some(has_geo) = query.has_geo {
+        let item_has_geo = item.latitude.is_some() && item.longitude.is_some();
+        if item_has_geo != has_geo {
+            return false;
+        }
+    }
+    if let Some(bounds) = query.geo_bounds.as_ref() {
+        let Some(lat) = item.latitude else {
+            return false;
+        };
+        let Some(lon) = item.longitude else {
+            return false;
+        };
+        if lat < bounds.min_lat || lat > bounds.max_lat || lon < bounds.min_lon || lon > bounds.max_lon {
+            return false;
+        }
+    }
+    if let Some(start_time) = query.start_time {
+        if item.timestamp.is_none_or(|timestamp| timestamp < start_time) {
+            return false;
+        }
+    }
+    if let Some(end_time) = query.end_time {
+        if item.timestamp.is_none_or(|timestamp| timestamp > end_time) {
+            return false;
+        }
+    }
+    item.timestamp.is_some()
+}
+
+fn filtered_locations(item: &MediaItem, query: &CatalogQuery) -> Vec<MediaLocation> {
+    if let Some(source_id) = query.source_id.as_ref() {
+        let locations = item
+            .locations
+            .iter()
+            .filter(|location| &location.source_id == source_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !locations.is_empty() {
+            return locations;
+        }
+    }
+    item.locations.clone()
+}
+
+fn sort_media_items(items: &mut [MediaItem], sort: &str) {
+    items.sort_by(|a, b| {
+        let time_order = match sort {
+            "timestamp_asc" => a.timestamp.cmp(&b.timestamp),
+            _ => b.timestamp.cmp(&a.timestamp),
+        };
+        time_order.then_with(|| a.content_hash.cmp(&b.content_hash))
+    });
+}
+
+#[derive(Clone, Copy)]
+struct NativePackedIndexRecord {
+    timestamp_sec: u32,
+    lat_e7: i32,
+    lon_e7: i32,
+    asset_id: usize,
+    kind_flags: u8,
+    cell_id: u64,
+}
+
+struct NativePackedIndexHeader {
+    catalog_version: i64,
+    entry_count: usize,
+    index_size_bytes: usize,
+}
+
+fn ceil_div(value: usize, divisor: usize) -> usize {
+    if value == 0 {
+        0
+    } else {
+        1 + (value - 1) / divisor
+    }
+}
+
+fn write_u32_le(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_f64_le(bytes: &mut [u8], offset: usize, value: f64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_i32_le(bytes: &mut [u8], offset: usize, value: i32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_u64_le(bytes: &mut [u8], offset: usize, value: u64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
+    let slice = bytes.get(offset..offset + 4)?;
+    Some(u32::from_le_bytes(slice.try_into().ok()?))
+}
+
+fn read_i32_le(bytes: &[u8], offset: usize) -> Option<i32> {
+    let slice = bytes.get(offset..offset + 4)?;
+    Some(i32::from_le_bytes(slice.try_into().ok()?))
+}
+
+fn read_f64_le(bytes: &[u8], offset: usize) -> Option<f64> {
+    let slice = bytes.get(offset..offset + 8)?;
+    Some(f64::from_le_bytes(slice.try_into().ok()?))
+}
+
+fn read_u64_le(bytes: &[u8], offset: usize) -> Option<u64> {
+    let slice = bytes.get(offset..offset + 8)?;
+    Some(u64::from_le_bytes(slice.try_into().ok()?))
+}
+
+fn timestamp_seconds(value: i64) -> u32 {
+    (value / 1000).clamp(0, u32::MAX as i64) as u32
+}
+
+fn lat_e7(value: f64) -> i32 {
+    (value.clamp(-90.0, 90.0) * 10_000_000.0).round() as i32
+}
+
+fn lon_e7(value: f64) -> i32 {
+    (value.clamp(-180.0, 180.0) * 10_000_000.0).round() as i32
+}
+
+fn coordinate_from_e7(value: i32) -> f64 {
+    value as f64 / 10_000_000.0
+}
+
+fn kind_flags(item: &MediaItem) -> u8 {
+    let kind = match item.kind.as_str() {
+        "video" => KIND_FLAG_VIDEO,
+        "geo_point" => KIND_FLAG_GEO_POINT,
+        _ => KIND_FLAG_IMAGE,
+    };
+    kind | if item.latitude.is_some() && item.longitude.is_some() {
+        KIND_FLAG_HAS_GEO
+    } else {
+        0
+    }
+}
+
+fn kind_matches_flags(flags: u8, kind: Option<&str>) -> bool {
+    let Some(kind) = kind else {
+        return true;
+    };
+    if kind == "all" {
+        return true;
+    }
+    let encoded = flags & 0b11;
+    match kind {
+        "media" => matches!(encoded, KIND_FLAG_IMAGE | KIND_FLAG_VIDEO),
+        "image" => encoded == KIND_FLAG_IMAGE,
+        "video" => encoded == KIND_FLAG_VIDEO,
+        "geo_point" => encoded == KIND_FLAG_GEO_POINT,
+        _ => false,
+    }
+}
+
+fn geo_cell_id(lat_value_e7: i32, lon_value_e7: i32) -> u64 {
+    let lat_cell = ((lat_value_e7 as i64 + LAT_OFFSET_E7) / CELL_SIZE_E7)
+        .clamp(0, LAT_CELL_COUNT as i64 - 1) as u64;
+    let lon_cell = ((lon_value_e7 as i64 + LON_OFFSET_E7) / CELL_SIZE_E7)
+        .clamp(0, LON_CELL_COUNT as i64 - 1) as u64;
+    lat_cell * LON_CELL_COUNT + lon_cell
+}
+
+fn bbox_cell_ranges(bounds: &GeoBounds) -> Vec<(u64, u64)> {
+    let min_lat_cell = ((lat_e7(bounds.min_lat) as i64 + LAT_OFFSET_E7) / CELL_SIZE_E7)
+        .clamp(0, LAT_CELL_COUNT as i64 - 1) as u64;
+    let max_lat_cell = ((lat_e7(bounds.max_lat) as i64 + LAT_OFFSET_E7) / CELL_SIZE_E7)
+        .clamp(0, LAT_CELL_COUNT as i64 - 1) as u64;
+    let min_lon_cell = ((lon_e7(bounds.min_lon) as i64 + LON_OFFSET_E7) / CELL_SIZE_E7)
+        .clamp(0, LON_CELL_COUNT as i64 - 1) as u64;
+    let max_lon_cell = ((lon_e7(bounds.max_lon) as i64 + LON_OFFSET_E7) / CELL_SIZE_E7)
+        .clamp(0, LON_CELL_COUNT as i64 - 1) as u64;
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    for lat_cell in min_lat_cell..=max_lat_cell {
+        let base = lat_cell * LON_CELL_COUNT;
+        let next_range = (base + min_lon_cell, base + max_lon_cell);
+        if let Some(previous) = ranges.last_mut() {
+            if previous.1 + 1 >= next_range.0 {
+                previous.1 = previous.1.max(next_range.1);
+                continue;
+            }
+        }
+        ranges.push(next_range);
+    }
+    ranges
+}
+
+fn packed_record_matches_query(record: NativePackedIndexRecord, query: &CatalogQuery) -> bool {
+    if !kind_matches_flags(record.kind_flags, query.kind.as_deref()) {
+        return false;
+    }
+    let has_geo = record.kind_flags & KIND_FLAG_HAS_GEO != 0;
+    if let Some(required) = query.has_geo {
+        if required != has_geo {
+            return false;
+        }
+    }
+    if let Some(bounds) = query.geo_bounds.as_ref() {
+        if !has_geo {
+            return false;
+        }
+        let lat = coordinate_from_e7(record.lat_e7);
+        let lon = coordinate_from_e7(record.lon_e7);
+        if lat < bounds.min_lat || lat > bounds.max_lat || lon < bounds.min_lon || lon > bounds.max_lon {
+            return false;
+        }
+    }
+    true
+}
+
+fn packed_index_header(path: &Path, expected_kind: u32) -> Option<NativePackedIndexHeader> {
+    let bytes = fs::read(path).ok()?;
+    if bytes.len() < PACKED_INDEX_HEADER_SIZE {
+        return None;
+    }
+    if read_u32_le(&bytes, 0)? != PACKED_INDEX_MAGIC {
+        return None;
+    }
+    if read_u32_le(&bytes, 4)? != BINARY_SCHEMA_VERSION {
+        return None;
+    }
+    if read_u32_le(&bytes, 40)? != expected_kind {
+        return None;
+    }
+    let expected_record_size = if expected_kind == INDEX_KIND_TIME_GEO {
+        TIME_GEO_RECORD_SIZE
+    } else {
+        CELL_TIME_RECORD_SIZE
+    };
+    if read_u32_le(&bytes, 36)? as usize != expected_record_size {
+        return None;
+    }
+    Some(NativePackedIndexHeader {
+        catalog_version: read_f64_le(&bytes, 8)? as i64,
+        entry_count: read_f64_le(&bytes, 24)? as usize,
+        index_size_bytes: bytes.len(),
     })
 }
 
-fn list_media_with_plan(
-    app: AppHandle,
-    query: CatalogQuery,
-    explain_sql: bool,
-) -> AppResult<(Vec<MediaItem>, Option<SqlExplainPlan>)> {
-    let conn = connect(&app)?;
-    let mut where_sql = vec![
-        "EXISTS (SELECT 1 FROM media_locations l WHERE l.content_hash = a.content_hash)"
-            .to_string(),
-    ];
-    let mut bind = Vec::<Value>::new();
-
-    if query.kind.as_deref() == Some("media") {
-        where_sql.push("a.kind IN ('image', 'video')".to_string());
-    } else if let Some(kind) = query.kind.as_ref().filter(|kind| *kind != "all") {
-        where_sql.push("a.kind = ?".to_string());
-        bind.push(Value::Text(kind.clone()));
-    }
-    if let Some(source_id) = query.source_id.as_ref() {
-        where_sql.push(
-            "EXISTS (SELECT 1 FROM media_locations ls WHERE ls.content_hash = a.content_hash AND ls.source_id = ?)".to_string(),
-        );
-        bind.push(Value::Text(source_id.clone()));
-    }
-    if let Some(has_geo) = query.has_geo {
-        where_sql.push(if has_geo {
-            "a.latitude IS NOT NULL AND a.longitude IS NOT NULL".to_string()
-        } else {
-            "(a.latitude IS NULL OR a.longitude IS NULL)".to_string()
+fn read_packed_index_records(
+    path: &Path,
+    expected_kind: u32,
+) -> AppResult<(NativePackedIndexHeader, Vec<NativePackedIndexRecord>)> {
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let header = packed_index_header(path, expected_kind)
+        .ok_or_else(|| "Catalog index file is missing or invalid.".to_string())?;
+    let record_size = if expected_kind == INDEX_KIND_TIME_GEO {
+        TIME_GEO_RECORD_SIZE
+    } else {
+        CELL_TIME_RECORD_SIZE
+    };
+    let mut entries = Vec::with_capacity(header.entry_count);
+    for index in 0..header.entry_count {
+        let offset = PACKED_INDEX_HEADER_SIZE + index * record_size;
+        if expected_kind == INDEX_KIND_CELL_TIME {
+            let Some(cell_id) = read_u64_le(&bytes, offset) else {
+                break;
+            };
+            let Some(timestamp_sec) = read_u32_le(&bytes, offset + 8) else {
+                break;
+            };
+            let Some(lat_e7) = read_i32_le(&bytes, offset + 12) else {
+                break;
+            };
+            let Some(lon_e7) = read_i32_le(&bytes, offset + 16) else {
+                break;
+            };
+            let Some(asset_id) = read_u32_le(&bytes, offset + 20) else {
+                break;
+            };
+            let Some(kind_flags) = bytes.get(offset + 24).copied() else {
+                break;
+            };
+            entries.push(NativePackedIndexRecord {
+                timestamp_sec,
+                lat_e7,
+                lon_e7,
+                asset_id: asset_id as usize,
+                kind_flags,
+                cell_id,
+            });
+            continue;
+        }
+        let Some(timestamp_sec) = read_u32_le(&bytes, offset) else {
+            break;
+        };
+        let Some(lat_e7) = read_i32_le(&bytes, offset + 4) else {
+            break;
+        };
+        let Some(lon_e7) = read_i32_le(&bytes, offset + 8) else {
+            break;
+        };
+        let Some(asset_id) = read_u32_le(&bytes, offset + 12) else {
+            break;
+        };
+        let Some(kind_flags) = bytes.get(offset + 16).copied() else {
+            break;
+        };
+        entries.push(NativePackedIndexRecord {
+            timestamp_sec,
+            lat_e7,
+            lon_e7,
+            asset_id: asset_id as usize,
+            kind_flags,
+            cell_id: 0,
         });
     }
-    if let Some(bounds) = query.geo_bounds.as_ref() {
-        where_sql.push("a.latitude BETWEEN ? AND ?".to_string());
-        bind.push(Value::Real(bounds.min_lat));
-        bind.push(Value::Real(bounds.max_lat));
-        where_sql.push("a.longitude BETWEEN ? AND ?".to_string());
-        bind.push(Value::Real(bounds.min_lon));
-        bind.push(Value::Real(bounds.max_lon));
-    }
-    if let Some(start_time) = query.start_time {
-        where_sql.push("a.timestamp >= ?".to_string());
-        bind.push(Value::Integer(start_time));
-    }
-    if let Some(end_time) = query.end_time {
-        where_sql.push("a.timestamp <= ?".to_string());
-        bind.push(Value::Integer(end_time));
-    }
-
-    where_sql.push("a.timestamp IS NOT NULL".to_string());
-    let order = if query.sort == "timestamp_asc" {
-        "a.timestamp ASC, a.content_hash ASC"
-    } else {
-        "a.timestamp DESC, a.content_hash DESC"
-    };
-    let limit = query.limit.unwrap_or(500).clamp(1, 10_000);
-    let offset = query.offset.unwrap_or(0).max(0);
-    bind.push(Value::Integer(limit));
-    bind.push(Value::Integer(offset));
-
-    let sql = format!(
-        "
-        SELECT a.*
-        FROM media_assets a
-        WHERE {}
-        ORDER BY {order}
-        LIMIT ? OFFSET ?
-        ",
-        where_sql.join(" AND ")
-    );
-    let sql_plan = if explain_sql {
-        Some(explain_query_plan(&conn, &sql, &bind)?)
-    } else {
-        None
-    };
-    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
-    let rows = stmt
-        .query_map(params_from_iter(bind.iter()), asset_from_row)
-        .map_err(|error| error.to_string())?;
-    let mut items = Vec::new();
-    for row in rows {
-        items.push(row.map_err(|error| error.to_string())?);
-    }
-
-    Ok((
-        attach_locations(&conn, items, query.source_id.as_deref())?,
-        sql_plan,
-    ))
+    Ok((header, entries))
 }
 
-fn sql_search_engine(spec: &SearchSpec) -> (&'static str, &'static str) {
-    if spec.geo_bounds.is_some() {
-        ("sqlite-bbox-time", "SQLite bbox/time B-tree")
+fn write_packed_index_file(
+    path: &Path,
+    kind: u32,
+    manifest: &FileCatalogManifest,
+    records: &mut [NativePackedIndexRecord],
+) -> AppResult<()> {
+    if kind == INDEX_KIND_CELL_TIME {
+        records.sort_by(|a, b| {
+            a.cell_id
+                .cmp(&b.cell_id)
+                .then_with(|| a.timestamp_sec.cmp(&b.timestamp_sec))
+                .then_with(|| a.asset_id.cmp(&b.asset_id))
+        });
     } else {
-        ("sqlite-timestamp", "SQLite timestamp B-tree")
+        records.sort_by(|a, b| {
+            a.timestamp_sec
+                .cmp(&b.timestamp_sec)
+                .then_with(|| a.asset_id.cmp(&b.asset_id))
+        });
     }
+    let record_size = if kind == INDEX_KIND_TIME_GEO {
+        TIME_GEO_RECORD_SIZE
+    } else {
+        CELL_TIME_RECORD_SIZE
+    };
+    let mut bytes = Vec::with_capacity(
+        PACKED_INDEX_HEADER_SIZE + records.len() * record_size,
+    );
+    let mut header = vec![0_u8; PACKED_INDEX_HEADER_SIZE];
+    write_u32_le(&mut header, 0, PACKED_INDEX_MAGIC);
+    write_u32_le(&mut header, 4, BINARY_SCHEMA_VERSION);
+    write_f64_le(&mut header, 8, manifest.catalog_version as f64);
+    write_f64_le(&mut header, 16, manifest.asset_count as f64);
+    write_f64_le(&mut header, 24, records.len() as f64);
+    write_u32_le(&mut header, 32, CELL_SIZE_E7 as u32);
+    write_u32_le(&mut header, 36, record_size as u32);
+    write_u32_le(&mut header, 40, kind);
+    write_u32_le(&mut header, 44, LAT_CELL_COUNT as u32);
+    write_u32_le(&mut header, 48, LON_CELL_COUNT as u32);
+    write_f64_le(&mut header, 56, PACKED_INDEX_HEADER_SIZE as f64);
+    write_f64_le(&mut header, 80, manifest.index_applied_version as f64);
+    bytes.extend_from_slice(&header);
+    for record in records.iter() {
+        let mut entry_bytes = vec![0_u8; record_size];
+        if kind == INDEX_KIND_CELL_TIME {
+            write_u64_le(&mut entry_bytes, 0, record.cell_id);
+            write_u32_le(&mut entry_bytes, 8, record.timestamp_sec);
+            write_i32_le(&mut entry_bytes, 12, record.lat_e7);
+            write_i32_le(&mut entry_bytes, 16, record.lon_e7);
+            write_u32_le(&mut entry_bytes, 20, record.asset_id as u32);
+            entry_bytes[24] = record.kind_flags;
+        } else {
+            write_u32_le(&mut entry_bytes, 0, record.timestamp_sec);
+            write_i32_le(&mut entry_bytes, 4, record.lat_e7);
+            write_i32_le(&mut entry_bytes, 8, record.lon_e7);
+            write_u32_le(&mut entry_bytes, 12, record.asset_id as u32);
+            entry_bytes[16] = record.kind_flags;
+        }
+        bytes.extend_from_slice(&entry_bytes);
+    }
+    fs::write(path, bytes).map_err(|error| error.to_string())
+}
+
+fn file_search_engine(spec: &SearchSpec) -> AppResult<(&'static str, &'static str)> {
+    let selected = spec.order.engine_id.as_deref().unwrap_or("file-time-geo");
+    match selected {
+        "file-time-geo" => Ok(("file-time-geo", "Time-first packed index")),
+        "file-cell-time" if spec.geo_bounds.is_some() => {
+            Ok(("file-cell-time", "Location-first packed index"))
+        }
+        "file-cell-time" => Err("Location-first catalog index requires a bounding box query.".to_string()),
+        _ => Err(format!("Search index \"{selected}\" is not available.")),
+    }
+}
+
+fn search_file_catalog_index(
+    app: &AppHandle,
+    spec: &SearchSpec,
+    query: &CatalogQuery,
+) -> AppResult<(Vec<MediaItem>, usize, usize, usize)> {
+    let items = active_media_items(app)?;
+    let indexes_dir = catalog_indexes_dir(app)?;
+    let limit = query.limit.unwrap_or(500).clamp(1, 10_000) as usize;
+    let offset = query.offset.unwrap_or(0).max(0) as usize;
+    let selected = spec.order.engine_id.as_deref().unwrap_or("file-time-geo");
+    let min_time = query.start_time.map(timestamp_seconds).unwrap_or(0);
+    let max_time = query.end_time.map(timestamp_seconds).unwrap_or(u32::MAX);
+    if selected == "file-cell-time" {
+        let bounds = spec
+            .geo_bounds
+            .as_ref()
+            .ok_or_else(|| "Location-first catalog index requires a bounding box query.".to_string())?;
+        let cell_ranges = bbox_cell_ranges(bounds);
+        let (header, entries) = read_packed_index_records(
+            &indexes_dir.join(FILE_CATALOG_CELL_TIME_INDEX),
+            INDEX_KIND_CELL_TIME,
+        )?;
+        let mut candidates = HashMap::<String, MediaItem>::new();
+        let mut inspected = 0_usize;
+        for record in entries.iter().copied() {
+            if !cell_ranges.iter().any(|(min_cell, max_cell)| {
+                record.cell_id >= *min_cell && record.cell_id <= *max_cell
+            }) {
+                continue;
+            }
+            if record.timestamp_sec < min_time || record.timestamp_sec > max_time {
+                continue;
+            }
+            inspected += 1;
+            if !packed_record_matches_query(record, query) {
+                continue;
+            }
+            let Some(item) = items.get(record.asset_id) else {
+                continue;
+            };
+            if item_matches_catalog_query(item, query) {
+                candidates.insert(item.id.clone(), item.clone());
+            }
+        }
+        let mut rows = candidates.into_values().collect::<Vec<_>>();
+        sort_media_items(&mut rows, query.sort.as_str());
+        let rows = rows.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
+        let pages_read = ceil_div(header.entry_count, PACKED_SCAN_RECORDS);
+        return Ok((rows, pages_read, header.index_size_bytes, inspected));
+    }
+
+    let (header, mut entries) = read_packed_index_records(
+        &indexes_dir.join(FILE_CATALOG_TIME_GEO_INDEX),
+        INDEX_KIND_TIME_GEO,
+    )?;
+    if query.sort != "timestamp_asc" {
+        entries.reverse();
+    }
+    let mut rows = Vec::<MediaItem>::new();
+    let mut matched = 0_usize;
+    let mut inspected = 0_usize;
+    for record in entries.iter().copied() {
+        if record.timestamp_sec < min_time || record.timestamp_sec > max_time {
+            continue;
+        }
+        inspected += 1;
+        if !packed_record_matches_query(record, query) {
+            continue;
+        }
+        let Some(item) = items.get(record.asset_id) else {
+            continue;
+        };
+        if item_matches_catalog_query(item, query) {
+            if matched >= offset && rows.len() < limit {
+                rows.push(item.clone());
+            }
+            matched += 1;
+        }
+        if rows.len() >= limit {
+            break;
+        }
+    }
+    let pages_read = ceil_div(header.entry_count, PACKED_SCAN_RECORDS);
+    Ok((rows, pages_read, header.index_size_bytes, inspected))
 }
 
 fn search_spec_to_catalog_query(spec: &SearchSpec, limit: i64) -> CatalogQuery {
@@ -3392,6 +3850,9 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
             "brute-force" | "segmented-ball-tree" => engine_id,
             _ => "segmented-ball-tree".to_string(),
         };
+        if engine_id == "segmented-ball-tree" {
+            require_search_index_current(&app, "segmented-ball-tree", "Segmented ball tree")?;
+        }
         let query = GeoSearchQuery {
             lat: point.lat,
             lon: point.lon,
@@ -3402,7 +3863,7 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
             start_time: spec.start_time,
             end_time: spec.end_time,
         };
-        let results = search_geo_index(engine_id.clone(), query)?;
+        let results = search_geo_index(app.clone(), engine_id.clone(), query)?;
         let geo_stats = get_geo_index_stats(app.clone(), engine_id.clone())?;
         let distance_limit_reached = (offset + limit) < geo_stats.point_count as i64;
         let ids = results
@@ -3425,7 +3886,6 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
             limit,
             offset,
             distance_limit_reached,
-            None,
         );
 
         return Ok(SearchPage {
@@ -3437,15 +3897,14 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
         });
     }
 
-    let (engine_id, engine_label) = sql_search_engine(&spec);
-    let (rows, sql_plan) = list_media_with_plan(
-        app,
-        search_spec_to_catalog_query(&spec, limit.saturating_add(1)),
-        spec.diagnostics
-            .as_ref()
-            .and_then(|diagnostics| diagnostics.explain_sql)
-            .unwrap_or(false),
-    )?;
+    let (engine_id, engine_label) = file_search_engine(&spec)?;
+    let mut index_stats = require_search_index_current(&app, engine_id, engine_label)?;
+    let query = search_spec_to_catalog_query(&spec, limit.saturating_add(1));
+    let (rows, pages_read, disk_read_bytes, candidates_inspected) =
+        search_file_catalog_index(&app, &spec, &query)?;
+    index_stats.pages_read = Some(pages_read);
+    index_stats.disk_read_bytes = Some(disk_read_bytes);
+    index_stats.candidates_inspected = Some(candidates_inspected);
     let limit_reached = rows.len() > limit as usize;
     let items = rows.into_iter().take(limit as usize).collect::<Vec<_>>();
     let rows_returned = items.len();
@@ -3453,7 +3912,7 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
     Ok(SearchPage {
         items: media_items_to_search_rows(items),
         result_metrics: with_query_metrics(
-            empty_search_index_stats(engine_id, engine_label),
+            index_stats,
             &spec,
             "native",
             started_at.elapsed().as_secs_f64() * 1000.0,
@@ -3461,7 +3920,6 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
             limit,
             offset,
             limit_reached,
-            sql_plan,
         ),
         engine_id: engine_id.to_string(),
         engine_label: engine_label.to_string(),
@@ -3474,22 +3932,10 @@ fn get_media_by_ids(app: AppHandle, ids: Vec<String>) -> AppResult<Vec<MediaItem
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-
-    let conn = connect(&app)?;
-    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-    let sql = format!("SELECT * FROM media_assets WHERE content_hash IN ({placeholders})");
-    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
-    let rows = stmt
-        .query_map(params_from_iter(ids.iter()), asset_from_row)
-        .map_err(|error| error.to_string())?;
-    let mut items = Vec::new();
-    for row in rows {
-        items.push(row.map_err(|error| error.to_string())?);
-    }
-    let by_id = attach_locations(&conn, items, None)?
+    let by_id = active_media_items(&app)?
         .into_iter()
         .map(|item| (item.id.clone(), item))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<HashMap<_, _>>();
     Ok(ids
         .into_iter()
         .filter_map(|id| by_id.get(&id).cloned())
@@ -3498,108 +3944,53 @@ fn get_media_by_ids(app: AppHandle, ids: Vec<String>) -> AppResult<Vec<MediaItem
 
 #[tauri::command]
 fn get_geo_points(app: AppHandle, range: TimeRange) -> AppResult<Vec<GeoIndexPoint>> {
-    let conn = connect(&app)?;
-    let mut where_sql = vec![
-        "a.latitude IS NOT NULL".to_string(),
-        "a.longitude IS NOT NULL".to_string(),
-        "EXISTS (SELECT 1 FROM media_locations l WHERE l.content_hash = a.content_hash)"
-            .to_string(),
-    ];
-    let mut bind = Vec::<Value>::new();
-
-    if let Some(start_time) = range.start_time {
-        where_sql.push("a.timestamp >= ?".to_string());
-        bind.push(Value::Integer(start_time));
-    }
-    if let Some(end_time) = range.end_time {
-        where_sql.push("a.timestamp <= ?".to_string());
-        bind.push(Value::Integer(end_time));
-    }
-
-    let sql = format!(
-        "
-        SELECT a.content_hash, a.kind, a.latitude, a.longitude, a.timestamp
-        FROM media_assets a
-        WHERE {}
-        ORDER BY a.content_hash ASC
-        ",
-        where_sql.join(" AND ")
-    );
-    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
-    let rows = stmt
-        .query_map(params_from_iter(bind.iter()), |row| {
-            Ok(GeoIndexPoint {
-                media_id: row.get("content_hash")?,
-                kind: row.get("kind")?,
-                lat: row.get("latitude")?,
-                lon: row.get("longitude")?,
-                timestamp: row.get("timestamp")?,
-            })
-        })
-        .map_err(|error| error.to_string())?;
     let mut points = Vec::new();
-    for row in rows {
-        points.push(row.map_err(|error| error.to_string())?);
+    for item in active_media_items(&app)? {
+        let Some(lat) = item.latitude else {
+            continue;
+        };
+        let Some(lon) = item.longitude else {
+            continue;
+        };
+        if let Some(start_time) = range.start_time {
+            if item.timestamp.is_none_or(|timestamp| timestamp < start_time) {
+                continue;
+            }
+        }
+        if let Some(end_time) = range.end_time {
+            if item.timestamp.is_none_or(|timestamp| timestamp > end_time) {
+                continue;
+            }
+        }
+        points.push(GeoIndexPoint {
+            media_id: item.id,
+            kind: Some(item.kind),
+            lat,
+            lon,
+            timestamp: item.timestamp,
+        });
     }
+    points.sort_by(|a, b| a.media_id.cmp(&b.media_id));
     Ok(points)
 }
 
 fn for_each_geo_point_batch(
-    conn: &Connection,
+    app: &AppHandle,
     batch_size: usize,
     mut on_batch: impl FnMut(Vec<GeoIndexPoint>, usize) -> AppResult<()>,
 ) -> AppResult<usize> {
-    let mut last_hash = String::new();
     let mut processed = 0_usize;
-
-    loop {
-        let mut stmt = conn
-            .prepare(
-                "
-                SELECT a.content_hash, a.kind, a.latitude, a.longitude, a.timestamp
-                FROM media_assets a
-                WHERE a.content_hash > ?
-                  AND a.latitude IS NOT NULL
-                  AND a.longitude IS NOT NULL
-                  AND EXISTS (
-                    SELECT 1 FROM media_locations l
-                    WHERE l.content_hash = a.content_hash
-                  )
-                ORDER BY a.content_hash ASC
-                LIMIT ?
-                ",
-            )
-            .map_err(|error| error.to_string())?;
-        let rows = stmt
-            .query_map(params![last_hash, batch_size as i64], |row| {
-                Ok(GeoIndexPoint {
-                    media_id: row.get("content_hash")?,
-                    kind: row.get("kind")?,
-                    lat: row.get("latitude")?,
-                    lon: row.get("longitude")?,
-                    timestamp: row.get("timestamp")?,
-                })
-            })
-            .map_err(|error| error.to_string())?;
-        let mut batch = Vec::new();
-        for row in rows {
-            batch.push(row.map_err(|error| error.to_string())?);
-        }
-        if batch.is_empty() {
-            break;
-        }
+    let points = get_geo_points(
+        app.clone(),
+        TimeRange {
+            start_time: None,
+            end_time: None,
+        },
+    )?;
+    for batch in points.chunks(batch_size.max(1)) {
         processed += batch.len();
-        last_hash = batch
-            .last()
-            .map(|point| point.media_id.clone())
-            .unwrap_or(last_hash);
-        let is_final = batch.len() < batch_size;
-        on_batch(batch, processed)?;
-        if is_final {
-            break;
-        }
+        on_batch(batch.to_vec(), processed)?;
     }
-
     Ok(processed)
 }
 
@@ -3693,6 +4084,9 @@ fn build_search_indexes(
     force_rebuild: Option<bool>,
 ) -> AppResult<SearchIndexBuildSummary> {
     let started = Instant::now();
+    if matches!(index_id.as_str(), "file-time-geo" | "file-cell-time") {
+        return build_file_catalog_indexes(&app, &window, &index_id, started);
+    }
     let total_indexes = 1_usize;
     let selected_index_id = match index_id.as_str() {
         "brute-force" => "brute-force",
@@ -3719,8 +4113,7 @@ fn build_search_indexes(
     );
 
     let epoch = if selected_index_id == "segmented-ball-tree" {
-        let conn = connect(&app)?;
-        Some(catalog_epoch(&conn)?)
+        Some(catalog_epoch(&app)?)
     } else {
         None
     };
@@ -3865,8 +4258,108 @@ fn build_search_indexes(
     })
 }
 
+fn build_file_catalog_indexes(
+    app: &AppHandle,
+    window: &Window,
+    index_id: &str,
+    started: Instant,
+) -> AppResult<SearchIndexBuildSummary> {
+    let label = "Catalog packed indexes";
+    emit_geo_index_progress(
+        window,
+        GeoIndexBuildProgress {
+            phase: "building".to_string(),
+            point_count: 0,
+            built_indexes: 0,
+            total_indexes: 2,
+            current_index_id: Some(index_id.to_string()),
+            current_index_label: Some(label.to_string()),
+            current_index_processed_points: None,
+            current_index_total_points: None,
+        },
+    );
+    let mut manifest = load_file_catalog_manifest(app)?;
+    if manifest.materialized_version != manifest.catalog_version {
+        emit_geo_index_progress(
+            window,
+            GeoIndexBuildProgress {
+                phase: "building".to_string(),
+                point_count: manifest.asset_count.max(manifest.occurrence_count),
+                built_indexes: 0,
+                total_indexes: 2,
+                current_index_id: Some(index_id.to_string()),
+                current_index_label: Some(format!("{label}: materializing catalog")),
+                current_index_processed_points: Some(0),
+                current_index_total_points: Some(
+                    manifest.asset_count.max(manifest.occurrence_count),
+                ),
+            },
+        );
+        let mut progress_callback = |processed: usize, total: usize, phase_label: &str| {
+            emit_geo_index_progress(
+                window,
+                GeoIndexBuildProgress {
+                    phase: "building".to_string(),
+                    point_count: total,
+                    built_indexes: 0,
+                    total_indexes: 2,
+                    current_index_id: Some(index_id.to_string()),
+                    current_index_label: Some(format!("{label}: materializing catalog: {phase_label}")),
+                    current_index_processed_points: Some(processed),
+                    current_index_total_points: Some(total),
+                },
+            );
+        };
+        materialize_file_catalog_with_progress(app, &mut manifest, Some(&mut progress_callback))?;
+    }
+    manifest.index_applied_version = -1;
+    manifest.index_job = Some(FileCatalogIndexJob {
+        status: "indexing".to_string(),
+        pending_since: manifest.index_job.as_ref().and_then(|job| job.pending_since).or(Some(current_timestamp_millis())),
+        started_at: Some(current_timestamp_millis()),
+        finished_at: None,
+        failed_message: None,
+    });
+    save_file_catalog_manifest(app, &manifest)?;
+    write_file_catalog_indexes(app, &manifest)?;
+    manifest.index_applied_version = manifest.catalog_version;
+    manifest.index_job = Some(FileCatalogIndexJob {
+        status: "current".to_string(),
+        pending_since: manifest.index_job.as_ref().and_then(|job| job.pending_since),
+        started_at: manifest.index_job.as_ref().and_then(|job| job.started_at),
+        finished_at: Some(current_timestamp_millis()),
+        failed_message: None,
+    });
+    save_file_catalog_manifest(app, &manifest)?;
+    emit_geo_index_progress(
+        window,
+        GeoIndexBuildProgress {
+            phase: "ready".to_string(),
+            point_count: manifest.asset_count,
+            built_indexes: 2,
+            total_indexes: 2,
+            current_index_id: Some(index_id.to_string()),
+            current_index_label: Some(label.to_string()),
+            current_index_processed_points: Some(manifest.asset_count),
+            current_index_total_points: Some(manifest.asset_count),
+        },
+    );
+    Ok(SearchIndexBuildSummary {
+        point_count: manifest.asset_count,
+        build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
+        engine_count: 2,
+    })
+}
+
 #[tauri::command]
-fn search_geo_index(index_id: String, query: GeoSearchQuery) -> AppResult<Vec<GeoSearchResult>> {
+fn search_geo_index(
+    app: AppHandle,
+    index_id: String,
+    query: GeoSearchQuery,
+) -> AppResult<Vec<GeoSearchResult>> {
+    if index_id == "segmented-ball-tree" {
+        require_search_index_current(&app, "segmented-ball-tree", "Segmented ball tree")?;
+    }
     let mut registry = geo_index_registry()
         .lock()
         .map_err(|error| error.to_string())?;
@@ -3891,30 +4384,173 @@ fn get_geo_index_stats(_app: AppHandle, index_id: String) -> AppResult<GeoIndexS
 }
 
 #[tauri::command]
-fn get_search_index_stats(_app: AppHandle) -> AppResult<Vec<SearchIndexStats>> {
+fn get_search_index_stats(app: AppHandle) -> AppResult<Vec<SearchIndexStats>> {
     let registry = geo_index_registry()
         .lock()
         .map_err(|error| error.to_string())?;
+    let brute_force_stats = search_stats_from_geo(
+        registry.brute_force.last_stats.clone(),
+        "Brute force oracle",
+        true,
+        false,
+    );
+    drop(registry);
     Ok(vec![
-        empty_search_index_stats("sqlite-timestamp", "SQLite timestamp B-tree"),
-        empty_search_index_stats("sqlite-bbox-time", "SQLite bbox/time B-tree"),
-        search_stats_from_geo(
-            registry.brute_force.last_stats.clone(),
-            "Brute force oracle",
-            true,
-            false,
-        ),
-        search_stats_from_geo(
-            registry.segmented_ball_tree.last_stats.clone(),
-            "Segmented ball tree",
-            true,
-            true,
-        ),
+        file_catalog_index_status_stats(&app, "file-time-geo", "Time-first packed index")?,
+        file_catalog_index_status_stats(&app, "file-cell-time", "Location-first packed index")?,
+        brute_force_stats,
+        segmented_ball_tree_status_stats(&app)?,
     ])
 }
 
+fn file_catalog_index_status_stats(
+    app: &AppHandle,
+    engine_id: &str,
+    engine_label: &str,
+) -> AppResult<SearchIndexStats> {
+    let manifest = load_file_catalog_manifest(app)?;
+    let required_file = if engine_id == "file-time-geo" {
+        (FILE_CATALOG_TIME_GEO_INDEX, INDEX_KIND_TIME_GEO)
+    } else {
+        (FILE_CATALOG_CELL_TIME_INDEX, INDEX_KIND_CELL_TIME)
+    };
+    let indexes_dir = catalog_indexes_dir(app)?;
+    let path = indexes_dir.join(required_file.0);
+    let header = packed_index_header(&path, required_file.1);
+    let existing_file = path.is_file();
+    let index_catalog_version = header.as_ref().map(|header| header.catalog_version);
+    let index_size_bytes = header.as_ref().map(|header| header.index_size_bytes);
+    let is_current =
+        header.is_some()
+            && manifest.materialized_version == manifest.catalog_version
+            && manifest.index_applied_version == manifest.catalog_version
+            && index_catalog_version == Some(manifest.catalog_version);
+    let file_exists = existing_file || header.is_some();
+    let mut stats = empty_search_index_stats(engine_id, engine_label);
+    stats.point_count = manifest.asset_count;
+    stats.index_size_bytes = index_size_bytes;
+    stats.index_storage = Some("disk".to_string());
+    stats.index_status = Some(
+        if is_current {
+            "current"
+        } else if manifest.index_job.as_ref().map(|job| job.status.as_str()) == Some("indexing") {
+            "indexing"
+        } else if manifest.index_job.as_ref().map(|job| job.status.as_str()) == Some("pending") {
+            "pending"
+        } else if manifest.index_job.as_ref().map(|job| job.status.as_str()) == Some("failed") {
+            "failed"
+        } else if file_exists {
+            "stale"
+        } else {
+            "missing"
+        }
+        .to_string(),
+    );
+    stats.catalog_version = Some(manifest.catalog_version);
+    stats.index_catalog_version = index_catalog_version;
+    Ok(stats)
+}
+
+fn require_search_index_current(
+    app: &AppHandle,
+    engine_id: &str,
+    engine_label: &str,
+) -> AppResult<SearchIndexStats> {
+    let stats = match engine_id {
+        "file-time-geo" | "file-cell-time" => {
+            file_catalog_index_status_stats(app, engine_id, engine_label)?
+        }
+        "segmented-ball-tree" => segmented_ball_tree_status_stats(app)?,
+        _ => empty_search_index_stats(engine_id, engine_label),
+    };
+    if stats.index_status.as_deref() != Some("current") {
+        return Err(format!(
+            "{} index is {}. Update the index before querying.",
+            stats.engine_label.as_deref().unwrap_or(engine_label),
+            stats.index_status.as_deref().unwrap_or("not ready")
+        ));
+    }
+    Ok(stats)
+}
+fn segmented_ball_tree_status_stats(app: &AppHandle) -> AppResult<SearchIndexStats> {
+    let catalog_version = catalog_epoch(app)?;
+    let dir = disk_segmented_index_dir(app, "segmented-ball-tree")?;
+    let manifest_path = dir.join("manifest.json");
+    let manifest = if manifest_path.exists() {
+        fs::read_to_string(&manifest_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<NativeDiskSegmentedManifest>(&content).ok())
+    } else {
+        None
+    };
+
+    if let Some(manifest) = manifest {
+        let index_catalog_version = manifest.catalog_epoch;
+        let index_size_bytes = manifest
+            .segments
+            .iter()
+            .map(|segment| segment.byte_len)
+            .sum::<usize>();
+        let is_current =
+            validate_disk_segmented_manifest(&manifest, "segmented-ball-tree", catalog_version)
+                .is_ok()
+                && manifest
+                    .segments
+                    .iter()
+                    .all(|segment| segment_file_path(&dir, &segment.id).exists());
+        if is_current {
+            let _ = load_persisted_segmented_ball_tree_index(app, catalog_version)?;
+            let registry = geo_index_registry()
+                .lock()
+                .map_err(|error| error.to_string())?;
+            let mut stats = search_stats_from_geo(
+                registry.segmented_ball_tree.last_stats.clone(),
+                "Segmented ball tree",
+                true,
+                true,
+            );
+            stats.index_status = Some("current".to_string());
+            stats.catalog_version = Some(catalog_version);
+            stats.index_catalog_version = Some(index_catalog_version);
+            return Ok(stats);
+        }
+
+        {
+            let mut registry = geo_index_registry()
+                .lock()
+                .map_err(|error| error.to_string())?;
+            registry.segmented_ball_tree = NativeSegmentedBallTreeIndex::default();
+        }
+        let mut stats = empty_search_index_stats("segmented-ball-tree", "Segmented ball tree");
+        stats.point_count = manifest.point_count;
+        stats.index_size_bytes = Some(index_size_bytes);
+        stats.index_storage = Some("disk".to_string());
+        stats.segment_count = Some(manifest.segment_count);
+        stats.index_status = Some("stale".to_string());
+        stats.catalog_version = Some(catalog_version);
+        stats.index_catalog_version = Some(index_catalog_version);
+        return Ok(stats);
+    }
+
+    {
+        let mut registry = geo_index_registry()
+            .lock()
+            .map_err(|error| error.to_string())?;
+        registry.segmented_ball_tree = NativeSegmentedBallTreeIndex::default();
+    }
+    let mut stats = empty_search_index_stats("segmented-ball-tree", "Segmented ball tree");
+    stats.index_storage = Some("disk".to_string());
+    stats.index_status = Some("missing".to_string());
+    stats.catalog_version = Some(catalog_version);
+    Ok(stats)
+}
+
 #[tauri::command]
-fn validate_geo_index(index_id: String, query: GeoSearchQuery) -> AppResult<ValidationReport> {
+fn validate_geo_index(
+    app: AppHandle,
+    index_id: String,
+    query: GeoSearchQuery,
+) -> AppResult<ValidationReport> {
     if index_id == "brute-force" {
         return Ok(ValidationReport {
             checked: true,
@@ -3922,6 +4558,9 @@ fn validate_geo_index(index_id: String, query: GeoSearchQuery) -> AppResult<Vali
             compared_with: "brute-force".to_string(),
             message: "Brute force is the comparison baseline.".to_string(),
         });
+    }
+    if index_id == "segmented-ball-tree" {
+        require_search_index_current(&app, "segmented-ball-tree", "Segmented ball tree")?;
     }
 
     let mut registry = geo_index_registry()
@@ -3956,30 +4595,18 @@ fn validate_geo_index(index_id: String, query: GeoSearchQuery) -> AppResult<Vali
 
 #[tauri::command]
 fn list_sources(app: AppHandle) -> AppResult<Vec<MediaSource>> {
-    let conn = connect(&app)?;
-    let mut stmt = conn
-        .prepare(
-            "
-            SELECT source_id, source_label, root_path
-            FROM media_locations
-            GROUP BY source_id, source_label, root_path
-            ORDER BY source_label ASC
-            ",
-        )
-        .map_err(|error| error.to_string())?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(MediaSource {
-                id: row.get("source_id")?,
-                label: row.get("source_label")?,
-                root_path: row.get("root_path")?,
-            })
+    let manifest = load_file_catalog_manifest(&app)?;
+    let mut sources = manifest
+        .sources
+        .into_values()
+        .filter(|source| source.active)
+        .map(|source| MediaSource {
+            id: source.id,
+            label: source.label,
+            root_path: source.root_path,
         })
-        .map_err(|error| error.to_string())?;
-    let mut sources = Vec::new();
-    for row in rows {
-        sources.push(row.map_err(|error| error.to_string())?);
-    }
+        .collect::<Vec<_>>();
+    sources.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id)));
     Ok(sources)
 }
 
@@ -3988,79 +4615,43 @@ fn remove_sources(app: AppHandle, source_ids: Vec<String>) -> AppResult<()> {
     if source_ids.is_empty() {
         return Ok(());
     }
-    let conn = connect(&app)?;
-    let placeholders = source_ids
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(", ");
-    conn.execute(
-        &format!("DELETE FROM media_locations WHERE source_id IN ({placeholders})"),
-        params_from_iter(source_ids.iter()),
-    )
-    .map_err(|error| error.to_string())?;
-    let mut stmt = conn
-        .prepare(
-            "
-            SELECT content_hash
-            FROM media_assets
-            WHERE NOT EXISTS (
-              SELECT 1 FROM media_locations l
-              WHERE l.content_hash = media_assets.content_hash
-            )
-            ",
-        )
-        .map_err(|error| error.to_string())?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|error| error.to_string())?;
-    let mut orphan_hashes = Vec::new();
-    for row in rows {
-        orphan_hashes.push(row.map_err(|error| error.to_string())?);
+    let removing = source_ids.into_iter().collect::<HashSet<_>>();
+    let mut manifest = load_file_catalog_manifest(&app)?;
+    let mut changed = false;
+    for source in manifest.sources.values_mut() {
+        if removing.contains(&source.id) && source.active {
+            source.active = false;
+            changed = true;
+        }
     }
-    drop(stmt);
-
-    for chunk in orphan_hashes.chunks(900) {
-        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-        conn.execute(
-            &format!("DELETE FROM media_assets WHERE content_hash IN ({placeholders})"),
-            params_from_iter(chunk.iter()),
-        )
-        .map_err(|error| error.to_string())?;
+    for chunk in manifest.chunks.iter_mut() {
+        if removing.contains(&chunk.source_id) && chunk.active {
+            chunk.active = false;
+            changed = true;
+        }
     }
-    bump_catalog_epoch(&conn)?;
+    if changed {
+        bump_catalog_epoch(&app, &mut manifest)?;
+        materialize_file_catalog(&app, &mut manifest)?;
+    } else {
+        save_file_catalog_manifest(&app, &manifest)?;
+    }
     Ok(())
 }
 
 #[tauri::command]
 fn count_media(app: AppHandle) -> AppResult<i64> {
-    let conn = connect(&app)?;
-    conn.query_row(
-        "
-        SELECT COUNT(*)
-        FROM media_assets a
-        WHERE EXISTS (
-            SELECT 1 FROM media_locations l
-            WHERE l.content_hash = a.content_hash
-          )
-        ",
-        [],
-        |row| row.get(0),
-    )
-    .map_err(|error| error.to_string())
+    Ok(active_media_items(&app)?.len() as i64)
 }
 
 #[tauri::command]
 fn clear_catalog(app: AppHandle) -> AppResult<()> {
-    let conn = connect(&app)?;
-    conn.execute_batch(
-        "
-        DELETE FROM media_locations;
-        DELETE FROM media_assets;
-        ",
-    )
-    .map_err(|error| error.to_string())?;
-    bump_catalog_epoch(&conn)?;
+    let dir = catalog_dir(&app)?;
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(|error| error.to_string())?;
+    }
+    ensure_file_catalog_dirs(&app)?;
+    save_file_catalog_manifest(&app, &empty_file_catalog_manifest())?;
     Ok(())
 }
 
@@ -4143,40 +4734,36 @@ fn import_progress_bytes(
     }
 }
 
-fn flush_media_batch(conn: &mut Connection, batch: &mut Vec<MediaItem>) -> AppResult<usize> {
+struct NativeImportSession {
+    source_id: String,
+    generation: i64,
+}
+
+fn flush_media_batch(
+    app: &AppHandle,
+    session: &NativeImportSession,
+    batch: &mut Vec<MediaItem>,
+) -> AppResult<usize> {
     if batch.is_empty() {
         return Ok(0);
     }
-    let written = upsert_media_rows(conn, batch)?;
+    let written = append_media_items(app, &session.source_id, session.generation, batch)?;
     batch.clear();
     Ok(written)
 }
 
-fn begin_geo_import_transaction(conn: &Connection) -> AppResult<()> {
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .map_err(|error| error.to_string())
-}
-
-fn commit_geo_import_transaction(conn: &Connection) -> AppResult<()> {
-    conn.execute_batch("COMMIT")
-        .map_err(|error| error.to_string())
-}
-
-fn rollback_geo_import_transaction(conn: &Connection) {
-    let _ = conn.execute_batch("ROLLBACK");
-}
-
 fn flush_and_commit_geo_import_if_requested(
-    conn: &mut Connection,
+    app: &AppHandle,
+    session: &NativeImportSession,
     batch: &mut Vec<MediaItem>,
 ) -> AppResult<()> {
     if !take_import_commit_requested() {
         return Ok(());
     }
-    flush_media_batch(conn, batch)?;
-    bump_catalog_epoch(conn)?;
-    conn.execute_batch("COMMIT; BEGIN IMMEDIATE")
-        .map_err(|error| error.to_string())
+    flush_media_batch(app, session, batch)?;
+    let mut manifest = load_file_catalog_manifest(app)?;
+    materialize_file_catalog(app, &mut manifest)?;
+    Ok(())
 }
 
 fn read_file_prefix(path: &Path) -> AppResult<String> {
@@ -4216,11 +4803,12 @@ fn maybe_emit_byte_progress(
 }
 
 fn import_google_takeout_streaming(
+    app: &AppHandle,
     path: &Path,
     source: &MediaSource,
+    session: &NativeImportSession,
     absolute_path: &str,
     total_bytes: i64,
-    conn: &mut Connection,
     window: &Window,
 ) -> AppResult<(i64, i64, bool)> {
     let source_label = source.label.clone();
@@ -4273,8 +4861,8 @@ fn import_google_takeout_streaming(
                         total_bytes,
                     ),
                 );
-                flush_media_batch(conn, &mut batch)?;
-                flush_and_commit_geo_import_if_requested(conn, &mut batch)?;
+                flush_media_batch(app, session, &mut batch)?;
+                flush_and_commit_geo_import_if_requested(app, session, &mut batch)?;
                 if import_cancelled() {
                     cancelled = true;
                     break;
@@ -4307,7 +4895,7 @@ fn import_google_takeout_streaming(
             scanned_bytes,
             total_bytes,
         );
-        flush_and_commit_geo_import_if_requested(conn, &mut batch)?;
+        flush_and_commit_geo_import_if_requested(app, session, &mut batch)?;
     }
 
     if !cancelled {
@@ -4325,17 +4913,18 @@ fn import_google_takeout_streaming(
             total_bytes,
         ),
     );
-    flush_media_batch(conn, &mut batch)?;
-    flush_and_commit_geo_import_if_requested(conn, &mut batch)?;
+    flush_media_batch(app, session, &mut batch)?;
+    flush_and_commit_geo_import_if_requested(app, session, &mut batch)?;
     Ok((accepted_media, parser.skipped_points, cancelled))
 }
 
 fn import_gpx_streaming(
+    app: &AppHandle,
     path: &Path,
     source: &MediaSource,
+    session: &NativeImportSession,
     absolute_path: &str,
     total_bytes: i64,
-    conn: &mut Connection,
     window: &Window,
 ) -> AppResult<(i64, i64, bool)> {
     let source_label = source.label.clone();
@@ -4372,8 +4961,8 @@ fn import_gpx_streaming(
                             total_bytes,
                         ),
                     );
-                    flush_media_batch(conn, &mut batch)?;
-                    flush_and_commit_geo_import_if_requested(conn, &mut batch)?;
+                    flush_media_batch(app, session, &mut batch)?;
+                    flush_and_commit_geo_import_if_requested(app, session, &mut batch)?;
                     if import_cancelled() {
                         cancelled = true;
                         return Err("Import cancelled".to_string());
@@ -4401,7 +4990,7 @@ fn import_gpx_streaming(
                     position as i64,
                     total_bytes,
                 );
-                flush_and_commit_geo_import_if_requested(conn, &mut batch)?;
+                flush_and_commit_geo_import_if_requested(app, session, &mut batch)?;
             }
             GpxStreamEvent::Skipped(count, position) => {
                 skipped_files = count;
@@ -4415,7 +5004,7 @@ fn import_gpx_streaming(
                     position as i64,
                     total_bytes,
                 );
-                flush_and_commit_geo_import_if_requested(conn, &mut batch)?;
+                flush_and_commit_geo_import_if_requested(app, session, &mut batch)?;
             }
         }
         Ok(())
@@ -4442,8 +5031,8 @@ fn import_gpx_streaming(
             total_bytes,
         ),
     );
-    flush_media_batch(conn, &mut batch)?;
-    flush_and_commit_geo_import_if_requested(conn, &mut batch)?;
+    flush_media_batch(app, session, &mut batch)?;
+    flush_and_commit_geo_import_if_requested(app, session, &mut batch)?;
     Ok((accepted_media, skipped_files, cancelled))
 }
 
@@ -4479,8 +5068,11 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
         }
     }
 
-    let mut conn = connect(&app)?;
-    upsert_source_tx(&conn, &source)?;
+    let generation = prepare_import_source(&app, &source)?;
+    let session = NativeImportSession {
+        source_id: source.id.clone(),
+        generation,
+    };
 
     let mut batch = Vec::<MediaItem>::new();
     let mut errors = Vec::<String>::new();
@@ -4539,7 +5131,7 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
                                 Some(current_path.clone()),
                             ),
                         );
-                        flush_media_batch(&mut conn, &mut batch)?;
+                        flush_media_batch(&app, &session, &mut batch)?;
                         if import_cancelled() {
                             cancelled = true;
                             break;
@@ -4596,9 +5188,10 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
             None,
         ),
     );
-    flush_media_batch(&mut conn, &mut batch)?;
+    flush_media_batch(&app, &session, &mut batch)?;
     if accepted_media > 0 {
-        bump_catalog_epoch(&conn)?;
+        let mut manifest = load_file_catalog_manifest(&app)?;
+        materialize_file_catalog(&app, &mut manifest)?;
     }
 
     Ok(ImportSummary {
@@ -4647,42 +5240,43 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
         .unwrap_or(0);
     let prefix = read_file_prefix(&path)?;
     let format = detect_geo_file_format_from_prefix(&path, &prefix)?;
-    let mut conn = connect(&app)?;
-    upsert_source_tx(&conn, &source)?;
+    let generation = prepare_import_source(&app, &source)?;
+    let session = NativeImportSession {
+        source_id: source.id.clone(),
+        generation,
+    };
     let (accepted_media, skipped_files, cancelled) = if import_cancelled() {
         (0, 0, true)
     } else {
-        begin_geo_import_transaction(&conn)?;
         let result = match format {
             GeoFileFormat::GoogleTakeoutJson => import_google_takeout_streaming(
+                &app,
                 &path,
                 &source,
+                &session,
                 &absolute_path,
                 total_bytes,
-                &mut conn,
                 &window,
             ),
             GeoFileFormat::Gpx => import_gpx_streaming(
+                &app,
                 &path,
                 &source,
+                &session,
                 &absolute_path,
                 total_bytes,
-                &mut conn,
                 &window,
             ),
         };
         match result {
             Ok(summary) => {
                 if summary.0 > 0 {
-                    bump_catalog_epoch(&conn)?;
+                    let mut manifest = load_file_catalog_manifest(&app)?;
+                    materialize_file_catalog(&app, &mut manifest)?;
                 }
-                commit_geo_import_transaction(&conn)?;
                 summary
             }
-            Err(error) => {
-                rollback_geo_import_transaction(&conn);
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         }
     };
 
@@ -4784,21 +5378,6 @@ mod tests {
         assert_eq!(
             sha256_string("abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-    }
-
-    #[test]
-    fn extracts_sqlite_index_names_from_explain_details() {
-        assert_eq!(
-            extract_sqlite_used_indexes(&[
-                "SEARCH a USING COVERING INDEX idx_assets_kind_timestamp_hash (kind=?)".to_string(),
-                "SEARCH l USING INDEX idx_locations_content_hash (content_hash=?)".to_string(),
-                "SCAN media_assets".to_string(),
-            ]),
-            vec![
-                "idx_assets_kind_timestamp_hash".to_string(),
-                "idx_locations_content_hash".to_string(),
-            ]
         );
     }
 
@@ -5220,125 +5799,18 @@ mod tests {
     }
 
     #[test]
-    fn upsert_allows_many_geo_points_from_one_source_path() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        ensure_schema(&conn).unwrap();
+    fn normalizes_one_asset_with_many_locations() {
+        let first = test_item("same-hash", "source-a", "a/photo.jpg");
+        let second = test_item("same-hash", "source-b", "b/photo-copy.jpg");
+        let normalized = normalize_media_item(
+            first.clone(),
+            vec![first.locations[0].clone(), second.locations[0].clone()],
+            Some("source-b"),
+        );
 
-        let source = MediaSource {
-            id: "gpx-source".to_string(),
-            label: "track.gpx".to_string(),
-            root_path: Some("/tmp/track.gpx".to_string()),
-        };
-        let first = ParsedGeoPoint {
-            index: 1,
-            latitude: 48.1,
-            longitude: 11.5,
-            timestamp: 1_782_036_000_000,
-        };
-        let second = ParsedGeoPoint {
-            index: 2,
-            latitude: 48.2,
-            longitude: 11.6,
-            timestamp: 1_782_036_060_000,
-        };
-        let items = vec![
-            geo_point_item_from_parsed_point(
-                &source,
-                "/tmp/track.gpx",
-                "application/gpx+xml",
-                &first,
-            ),
-            geo_point_item_from_parsed_point(
-                &source,
-                "/tmp/track.gpx",
-                "application/gpx+xml",
-                &second,
-            ),
-        ];
-
-        upsert_source_tx(&conn, &source).unwrap();
-        upsert_media_rows(&mut conn, &items).unwrap();
-        upsert_media_rows(&mut conn, &items).unwrap();
-
-        let asset_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM media_assets", [], |row| row.get(0))
-            .unwrap();
-        let location_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM media_locations", [], |row| row.get(0))
-            .unwrap();
-
-        assert_eq!(asset_count, 2);
-        assert_eq!(location_count, 2);
-    }
-
-    #[test]
-    fn fresh_schema_has_two_tables_and_no_legacy_columns() {
-        let conn = Connection::open_in_memory().unwrap();
-        ensure_schema(&conn).unwrap();
-
-        let source_table_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'media_sources'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let asset_sql: String = conn
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_assets'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let location_sql: String = conn
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_locations'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        assert_eq!(source_table_count, 0);
-        assert!(!asset_sql.contains("deleted_at"));
-        assert!(!asset_sql.contains("last_seen_at"));
-        assert!(!asset_sql.contains("timestamp_source"));
-        assert!(!asset_sql.contains("geo_source"));
-        assert!(!asset_sql.contains("width"));
-        assert!(!asset_sql.contains("height"));
-        assert!(!location_sql.contains("deleted_at"));
-        assert!(!location_sql.contains("source_added_at"));
-        assert!(!location_sql.contains("last_seen_at"));
-        assert!(location_sql.contains("source_id"));
-        assert!(location_sql.contains("source_label"));
-        assert!(location_sql.contains("root_path"));
-        assert!(location_sql.contains("point_index"));
-    }
-
-    #[test]
-    fn upsert_keeps_one_asset_with_many_locations() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        ensure_schema(&conn).unwrap();
-
-        let source = MediaSource {
-            id: "source".to_string(),
-            label: "Source".to_string(),
-            root_path: Some("/tmp/source".to_string()),
-        };
-        upsert_source_tx(&conn, &source).unwrap();
-
-        let first = test_item("same-hash", "source", "a/photo.jpg");
-        let second = test_item("same-hash", "source", "b/photo-copy.jpg");
-        upsert_media_rows(&mut conn, &[first.clone(), second]).unwrap();
-        upsert_media_rows(&mut conn, &[first]).unwrap();
-
-        let asset_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM media_assets", [], |row| row.get(0))
-            .unwrap();
-        let location_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM media_locations", [], |row| row.get(0))
-            .unwrap();
-
-        assert_eq!(asset_count, 1);
-        assert_eq!(location_count, 2);
+        assert_eq!(normalized.content_hash, "same-hash");
+        assert_eq!(normalized.locations.len(), 2);
+        assert_eq!(normalized.source_id, "source-b");
+        assert_eq!(normalized.relative_path, "b/photo-copy.jpg");
     }
 }

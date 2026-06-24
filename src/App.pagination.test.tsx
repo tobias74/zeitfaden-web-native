@@ -52,8 +52,8 @@ function createSearchPage(items: MediaItem[], limitReached = false): SearchPage 
       item: mediaItem,
     })),
     resultMetrics: {
-      engineId: 'sqlite-timestamp',
-      engineLabel: 'SQLite timestamp B-tree',
+      engineId: 'file-time-geo',
+      engineLabel: 'Time-first packed index',
       exact: true,
       persistent: true,
       pointCount: 0,
@@ -64,8 +64,8 @@ function createSearchPage(items: MediaItem[], limitReached = false): SearchPage 
       prunedByGeo: 0,
       prunedByTime: 0,
     },
-    engineId: 'sqlite-timestamp',
-    engineLabel: 'SQLite timestamp B-tree',
+    engineId: 'file-time-geo',
+    engineLabel: 'Time-first packed index',
     limitReached,
   }
 }
@@ -74,9 +74,8 @@ function createPlatform(): PlatformBackend {
   searchMediaCalls = []
   const catalog: CatalogBackend = {
     init: vi.fn(async (): Promise<CatalogInfo> => ({
-      storageMode: 'opfs',
-      sqliteVersion: 'test',
-      filename: ':memory:',
+      storageMode: 'file',
+      filename: 'test-catalog',
     })),
     upsertSource: vi.fn(),
     upsertMedia: vi.fn(),
@@ -99,8 +98,8 @@ function createPlatform(): PlatformBackend {
     })),
     getSearchIndexStats: vi.fn(async () => [
       {
-        engineId: 'sqlite-timestamp',
-        engineLabel: 'SQLite timestamp B-tree',
+        engineId: 'file-time-geo',
+        engineLabel: 'Time-first packed index',
         exact: true,
         persistent: true,
         pointCount: 0,
@@ -204,24 +203,4 @@ describe('App pagination', () => {
     })
   })
 
-  it('passes the explain setting into catalog search specs', async () => {
-    const { default: App } = await import('./App')
-
-    render(<App />)
-
-    expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
-
-    fireEvent.click(screen.getByText('Settings'))
-    fireEvent.click(screen.getByLabelText('Explain SQLite queries'))
-
-    await waitFor(() => {
-      expect(
-        searchMediaCalls.some(
-          (query) =>
-            query.purpose === 'results' &&
-            query.diagnostics?.explainSql === true,
-        ),
-      ).toBe(true)
-    })
-  })
 })
