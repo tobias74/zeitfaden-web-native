@@ -63,11 +63,7 @@ describe('SearchIndexRegistry', () => {
       'file-time-geo',
       (spec) => spec.order.kind === 'timestamp',
     )
-    const bbox = engine(
-      'file-cell-time',
-      (spec) => spec.order.kind === 'timestamp' && Boolean(spec.geoBounds),
-    )
-    const registry = new SearchIndexRegistry([timestamp, bbox])
+    const registry = new SearchIndexRegistry([timestamp])
 
     const result = await registry.search({
       order: { kind: 'timestamp', sort: 'timestamp_desc', engineId: 'file-time-geo' },
@@ -76,51 +72,23 @@ describe('SearchIndexRegistry', () => {
 
     expect(result.engineId).toBe('file-time-geo')
     expect(timestamp.search).toHaveBeenCalledTimes(1)
-    expect(bbox.search).not.toHaveBeenCalled()
   })
 
-  it('chooses the location-first file engine for selected rectangle queries', async () => {
+  it('uses the time-first file engine for selected rectangle queries', async () => {
     const timestamp = engine(
       'file-time-geo',
       (spec) => spec.order.kind === 'timestamp',
     )
-    const bbox = engine(
-      'file-cell-time',
-      (spec) => spec.order.kind === 'timestamp' && Boolean(spec.geoBounds),
-    )
-    const registry = new SearchIndexRegistry([timestamp, bbox])
+    const registry = new SearchIndexRegistry([timestamp])
 
     const result = await registry.search({
       geoBounds: { minLat: 1, maxLat: 2, minLon: 3, maxLon: 4 },
-      order: { kind: 'timestamp', sort: 'timestamp_asc', engineId: 'file-cell-time' },
+      order: { kind: 'timestamp', sort: 'timestamp_asc', engineId: 'file-time-geo' },
       purpose: 'results',
     })
 
-    expect(result.engineId).toBe('file-cell-time')
-    expect(timestamp.search).not.toHaveBeenCalled()
-    expect(bbox.search).toHaveBeenCalledTimes(1)
-  })
-
-  it('does not fall back when a selected regular file engine cannot handle the query', async () => {
-    const timestamp = engine(
-      'file-time-geo',
-      (spec) => spec.order.kind === 'timestamp',
-    )
-    const bbox = engine(
-      'file-cell-time',
-      (spec) => spec.order.kind === 'timestamp' && Boolean(spec.geoBounds),
-    )
-    const registry = new SearchIndexRegistry([timestamp, bbox])
-
-    await expect(
-      registry.search({
-        order: { kind: 'timestamp', sort: 'timestamp_asc', engineId: 'file-cell-time' },
-        purpose: 'results',
-      }),
-    ).rejects.toThrow('No exact search index engine can handle this query.')
-
-    expect(timestamp.search).not.toHaveBeenCalled()
-    expect(bbox.search).not.toHaveBeenCalled()
+    expect(result.engineId).toBe('file-time-geo')
+    expect(timestamp.search).toHaveBeenCalledTimes(1)
   })
 
   it('tries a legacy selected distance engine first and falls back to another exact engine', async () => {

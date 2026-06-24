@@ -19,7 +19,6 @@ import { SearchIndexRegistry as SearchIndexEngineRegistry } from '../../search/r
 import type {
   CatalogQuery,
   GeoIndexPoint,
-  GeoBounds,
   GeoSearchQuery,
   GeoSearchResult,
   KindFilter,
@@ -179,7 +178,6 @@ const ASSET_CHUNK_EXTENSION = '.jsonl'
 const ASSET_BINARY_CHUNK_EXTENSION = '.bin'
 const ASSET_CHUNK_SIZE = 10_000
 const TIME_GEO_INDEX_FILE = 'time-geo.idx'
-const CELL_TIME_INDEX_FILE = 'cell-time.idx'
 const ASSET_TABLE_MAGIC = 0x41535431
 const ASSET_ID_MAP_MAGIC = 0x41494431
 const PACKED_INDEX_MAGIC = 0x50495831
@@ -190,15 +188,8 @@ const ASSET_ID_MAP_HEADER_SIZE = 32
 const ASSET_ID_MAP_ENTRY_SIZE = 72
 const PACKED_INDEX_HEADER_SIZE = 96
 const TIME_GEO_RECORD_SIZE = 20
-const CELL_TIME_RECORD_SIZE = 28
 const PACKED_SCAN_RECORDS = 8192
 const INDEX_KIND_TIME_GEO = 1
-const INDEX_KIND_CELL_TIME = 2
-const CELL_SIZE_E7 = 1000
-const LAT_OFFSET_E7 = 900_000_000
-const LON_OFFSET_E7 = 1_800_000_000
-const LAT_CELL_COUNT = Math.ceil((180 * 10_000_000) / CELL_SIZE_E7)
-const LON_CELL_COUNT = Math.ceil((360 * 10_000_000) / CELL_SIZE_E7)
 const KIND_FLAG_IMAGE = 0
 const KIND_FLAG_VIDEO = 1
 const KIND_FLAG_GEO_POINT = 2
@@ -416,52 +407,6 @@ function kindMatchesFlags(flags: number, kind: KindFilter | undefined): boolean 
   if (kind === 'image') return encoded === KIND_FLAG_IMAGE
   if (kind === 'video') return encoded === KIND_FLAG_VIDEO
   return encoded === KIND_FLAG_GEO_POINT
-}
-
-function geoCellId(latValueE7: number, lonValueE7: number): number {
-  const latCell = Math.max(
-    0,
-    Math.min(LAT_CELL_COUNT - 1, Math.floor((latValueE7 + LAT_OFFSET_E7) / CELL_SIZE_E7)),
-  )
-  const lonCell = Math.max(
-    0,
-    Math.min(LON_CELL_COUNT - 1, Math.floor((lonValueE7 + LON_OFFSET_E7) / CELL_SIZE_E7)),
-  )
-  return latCell * LON_CELL_COUNT + lonCell
-}
-
-function bboxCellRanges(bounds: GeoBounds): Array<{ minCellId: number; maxCellId: number }> {
-  const minLatCell = Math.max(
-    0,
-    Math.min(LAT_CELL_COUNT - 1, Math.floor((latE7(bounds.minLat) + LAT_OFFSET_E7) / CELL_SIZE_E7)),
-  )
-  const maxLatCell = Math.max(
-    0,
-    Math.min(LAT_CELL_COUNT - 1, Math.floor((latE7(bounds.maxLat) + LAT_OFFSET_E7) / CELL_SIZE_E7)),
-  )
-  const minLonCell = Math.max(
-    0,
-    Math.min(LON_CELL_COUNT - 1, Math.floor((lonE7(bounds.minLon) + LON_OFFSET_E7) / CELL_SIZE_E7)),
-  )
-  const maxLonCell = Math.max(
-    0,
-    Math.min(LON_CELL_COUNT - 1, Math.floor((lonE7(bounds.maxLon) + LON_OFFSET_E7) / CELL_SIZE_E7)),
-  )
-  const ranges: Array<{ minCellId: number; maxCellId: number }> = []
-  for (let latCell = minLatCell; latCell <= maxLatCell; latCell += 1) {
-    const base = latCell * LON_CELL_COUNT
-    const range = {
-      minCellId: base + minLonCell,
-      maxCellId: base + maxLonCell,
-    }
-    const previous = ranges.at(-1)
-    if (previous && previous.maxCellId + 1 >= range.minCellId) {
-      previous.maxCellId = Math.max(previous.maxCellId, range.maxCellId)
-    } else {
-      ranges.push(range)
-    }
-  }
-  return ranges
 }
 
 function packedRecordMatchesQuery(record: PackedIndexRecord, query: CatalogQuery): boolean {
@@ -683,13 +628,6 @@ function itemMatchesQuery(item: MediaItem, query: CatalogQuery): boolean {
   return true
 }
 
-function compareByTimestamp(sort: CatalogQuery['sort'], a: MediaItem, b: MediaItem): number {
-  const aTime = a.timestamp ?? 0
-  const bTime = b.timestamp ?? 0
-  const delta = sort === 'timestamp_asc' ? aTime - bTime : bTime - aTime
-  return delta || a.contentHash.localeCompare(b.contentHash)
-}
-
 function defaultSearchStats(engineId: string, engineLabel: string): SearchIndexStats {
   return {
     engineId,
@@ -706,28 +644,22 @@ function defaultSearchStats(engineId: string, engineLabel: string): SearchIndexS
   }
 }
 
-type FileCatalogIndexId = 'file-time-geo' | 'file-cell-time'
+type FileCatalogIndexId = 'file-time-geo'
 
 function isFileCatalogIndexId(indexId: string): indexId is FileCatalogIndexId {
-  return indexId === 'file-time-geo' || indexId === 'file-cell-time'
+  return indexId === 'file-time-geo'
 }
 
-function fileCatalogIndexSpec(indexId: FileCatalogIndexId): {
+function fileCatalogIndexSpec(): {
   fileName: string
   kind: number
   label: string
 } {
-  return indexId === 'file-time-geo'
-    ? {
-        fileName: TIME_GEO_INDEX_FILE,
-        kind: INDEX_KIND_TIME_GEO,
-        label: 'Time-first packed index',
-      }
-    : {
-        fileName: CELL_TIME_INDEX_FILE,
-        kind: INDEX_KIND_CELL_TIME,
-        label: 'Location-first packed index',
-      }
+  return {
+    fileName: TIME_GEO_INDEX_FILE,
+    kind: INDEX_KIND_TIME_GEO,
+    label: 'Time-first packed index',
+  }
 }
 
 async function diskSegmentedStatusStats(
@@ -849,7 +781,6 @@ function createFileSearchEngine(
     canHandle(spec) {
       if (spec.order.kind !== 'timestamp') return false
       if (spec.order.engineId && spec.order.engineId !== engineId) return false
-      if (engineId === 'file-cell-time' && !spec.geoBounds) return false
       return true
     },
     async search(spec) {
@@ -1013,12 +944,6 @@ function createSearchRegistry(
       searchRowsFn,
       ensureIndexReadyFn,
     ),
-    createFileSearchEngine(
-      'file-cell-time',
-      'Location-first packed index',
-      searchRowsFn,
-      ensureIndexReadyFn,
-    ),
     ...geoIndexRegistry.indexes.map((index) =>
       createDistanceSearchEngine(index, getMediaByIdsFn, ensureIndexReadyFn),
     ),
@@ -1036,17 +961,13 @@ type PackedIndexRecord = {
   lonE7: number
   assetId: number
   kindFlags: number
-  cellId?: number
 }
 
 type PackedIndexMetrics = {
   pagesRead: number
   diskReadBytes: number
   candidatesInspected: number
-  cellsScanned?: number
 }
-
-type PackedIndexBuildRecord = PackedIndexRecord & { cellId: number }
 
 type PackedIndexHeader = {
   catalogVersion: number
@@ -1228,7 +1149,7 @@ class AssetIdMap {
 }
 
 function expectedPackedRecordSize(kind: number): number {
-  return kind === INDEX_KIND_TIME_GEO ? TIME_GEO_RECORD_SIZE : CELL_TIME_RECORD_SIZE
+  return kind === INDEX_KIND_TIME_GEO ? TIME_GEO_RECORD_SIZE : 0
 }
 
 function parsePackedIndexHeader(
@@ -1303,16 +1224,6 @@ class ResidentPackedGeoIndex {
   }
 
   private readRecord(offset: number): PackedIndexRecord {
-    if (this.kind === INDEX_KIND_CELL_TIME) {
-      return {
-        cellId: Number(this.view.getBigUint64(offset, true)),
-        timestampSec: this.view.getUint32(offset + 8, true),
-        latE7: this.view.getInt32(offset + 12, true),
-        lonE7: this.view.getInt32(offset + 16, true),
-        assetId: this.view.getUint32(offset + 20, true),
-        kindFlags: this.view.getUint8(offset + 24),
-      }
-    }
     return {
       timestampSec: this.view.getUint32(offset, true),
       latE7: this.view.getInt32(offset + 4, true),
@@ -1347,32 +1258,6 @@ class ResidentPackedGeoIndex {
     const start = this.lowerBound((record) => record.timestampSec < minTimestampSec)
     const end = this.lowerBound((record) => record.timestampSec <= maxTimestampSec)
     return this.scanRecordRange(start, end, direction, onRecord)
-  }
-
-  async scanCellRanges(
-    ranges: Array<{ minCellId: number; maxCellId: number }>,
-    onRecord: (record: PackedIndexRecord) => Promise<boolean>,
-  ): Promise<PackedIndexMetrics> {
-    const metrics: PackedIndexMetrics = {
-      pagesRead: 0,
-      diskReadBytes: 0,
-      candidatesInspected: 0,
-      cellsScanned: 0,
-    }
-    for (const range of ranges) {
-      metrics.cellsScanned = (metrics.cellsScanned ?? 0) + Math.max(0, range.maxCellId - range.minCellId + 1)
-      const start = this.lowerBound((record) =>
-        (record.cellId ?? -1) < range.minCellId,
-      )
-      const end = this.lowerBound((record) =>
-        (record.cellId ?? -1) <= range.maxCellId,
-      )
-      const rangeMetrics = await this.scanRecordRange(start, end, 'asc', onRecord)
-      metrics.pagesRead += rangeMetrics.pagesRead
-      metrics.diskReadBytes += rangeMetrics.diskReadBytes
-      metrics.candidatesInspected += rangeMetrics.candidatesInspected
-    }
-    return metrics
   }
 
   private async scanRecordRange(
@@ -1675,7 +1560,6 @@ class FileCatalogStore implements CatalogStore {
     )
     const stats = await registry.stats()
     const timeGeoStats = await this.fileCatalogIndexStats('file-time-geo')
-    const cellTimeStats = await this.fileCatalogIndexStats('file-cell-time')
     const segmentedStats = await diskSegmentedStatusStats(
       this,
       'segmented-ball-tree',
@@ -1683,9 +1567,7 @@ class FileCatalogStore implements CatalogStore {
     return stats.map((entry) =>
       entry.engineId === 'file-time-geo'
         ? timeGeoStats
-        : entry.engineId === 'file-cell-time'
-          ? cellTimeStats
-          : entry.engineId === 'segmented-ball-tree'
+        : entry.engineId === 'segmented-ball-tree'
             ? segmentedStats
             : entry,
     )
@@ -1719,10 +1601,8 @@ class FileCatalogStore implements CatalogStore {
     this.residentPackedIndexLoadError = undefined
   }
 
-  private async readPackedIndexHeader(
-    indexId: FileCatalogIndexId,
-  ): Promise<PackedIndexHeader | undefined> {
-    const spec = fileCatalogIndexSpec(indexId)
+  private async readPackedIndexHeader(): Promise<PackedIndexHeader | undefined> {
+    const spec = fileCatalogIndexSpec()
     const indexesDir = await childDirectory(await rootDirectory(), 'indexes')
     const file = await readFile(indexesDir, spec.fileName)
     if (!file) return undefined
@@ -1731,10 +1611,9 @@ class FileCatalogStore implements CatalogStore {
   }
 
   private async loadResidentPackedIndex(
-    indexId: FileCatalogIndexId,
     catalogVersion: number,
   ): Promise<ResidentPackedGeoIndex> {
-    const spec = fileCatalogIndexSpec(indexId)
+    const spec = fileCatalogIndexSpec()
     const indexesDir = await childDirectory(await rootDirectory(), 'indexes')
     const file = await readFile(indexesDir, spec.fileName)
     if (!file) {
@@ -1752,10 +1631,7 @@ class FileCatalogStore implements CatalogStore {
   }
 
   private residentIndexesCurrent(catalogVersion: number): boolean {
-    return (
-      this.residentPackedIndexes.get('file-time-geo')?.catalogVersion === catalogVersion &&
-      this.residentPackedIndexes.get('file-cell-time')?.catalogVersion === catalogVersion
-    )
+    return this.residentPackedIndexes.get('file-time-geo')?.catalogVersion === catalogVersion
   }
 
   private async ensureResidentPackedIndexes(): Promise<void> {
@@ -1797,16 +1673,12 @@ class FileCatalogStore implements CatalogStore {
       console.log('[geo-index:worker] loading packed catalog indexes into memory', {
         catalogVersion,
       })
-      const [timeIndex, cellIndex] = await Promise.all([
-        this.loadResidentPackedIndex('file-time-geo', catalogVersion),
-        this.loadResidentPackedIndex('file-cell-time', catalogVersion),
-      ])
+      const timeIndex = await this.loadResidentPackedIndex(catalogVersion)
       this.residentPackedIndexes.set('file-time-geo', timeIndex)
-      this.residentPackedIndexes.set('file-cell-time', cellIndex)
       this.residentPackedIndexLoadError = undefined
       console.log('[geo-index:worker] packed catalog indexes loaded into memory', {
         catalogVersion,
-        residentBytes: timeIndex.indexSizeBytes + cellIndex.indexSizeBytes,
+        residentBytes: timeIndex.indexSizeBytes,
       })
     } catch (caught) {
       console.error('[geo-index:worker] failed to load packed catalog indexes into memory', caught)
@@ -1835,9 +1707,6 @@ class FileCatalogStore implements CatalogStore {
     const assetTable = await this.openAssetTable()
     if (!assetTable) {
       throw new Error('Catalog asset table is missing. Finish the import before querying.')
-    }
-    if (indexId === 'file-cell-time') {
-      return this.searchCellTimeRows(assetTable, index, query)
     }
     return this.searchTimeGeoRows(assetTable, index, query)
   }
@@ -1880,50 +1749,6 @@ class FileCatalogStore implements CatalogStore {
         candidatesInspected: indexMetrics.candidatesInspected,
         indexStorage: 'memory',
         residentBytes: timeIndex.indexSizeBytes,
-      },
-    }
-  }
-
-  private async searchCellTimeRows(
-    assetTable: AssetTable,
-    cellIndex: ResidentPackedGeoIndex,
-    query: CatalogQuery,
-  ): Promise<MediaSearchRows> {
-    if (!query.geoBounds) {
-      throw new Error('Location-first catalog index requires a bounding box query.')
-    }
-    const minTime = query.startTime === undefined ? 0 : timestampSeconds(query.startTime)
-    const maxTime = query.endTime === undefined ? 0xffffffff : timestampSeconds(query.endTime)
-    const cellRanges = bboxCellRanges(query.geoBounds)
-    const candidates = new Map<string, MediaItem>()
-    let assetDiskReadBytes = 0
-    let assetDiskReadCount = 0
-    const indexMetrics = await cellIndex.scanCellRanges(cellRanges, async (record) => {
-      if (record.timestampSec < minTime || record.timestampSec > maxTime) return true
-      if (!packedRecordMatchesQuery(record, query)) return true
-      const result = await assetTable.read(record.assetId)
-      assetDiskReadBytes += result.metrics.diskReadBytes
-      assetDiskReadCount += result.metrics.diskReadCount
-      if (result.item && itemMatchesQuery(result.item, query)) {
-        candidates.set(result.item.id, result.item)
-      }
-      return true
-    })
-    const limit = Math.max(1, Math.min(query.limit ?? 500, 10_000))
-    const offset = Math.max(0, query.offset ?? 0)
-    const items = Array.from(candidates.values())
-      .sort((a, b) => compareByTimestamp(query.sort, a, b))
-      .slice(offset, offset + limit + 1)
-    return {
-      items,
-      metrics: {
-        pagesRead: indexMetrics.pagesRead,
-        diskReadBytes: assetDiskReadBytes,
-        diskReadCount: assetDiskReadCount,
-        candidatesInspected: indexMetrics.candidatesInspected,
-        cellCount: indexMetrics.cellsScanned,
-        indexStorage: 'memory',
-        residentBytes: cellIndex.indexSizeBytes,
       },
     }
   }
@@ -2425,7 +2250,6 @@ class FileCatalogStore implements CatalogStore {
       throw new Error('Catalog asset table is missing or stale. Finish the import before rebuilding indexes.')
     }
     const timeRecords: PackedIndexRecord[] = []
-    const cellRecords: PackedIndexBuildRecord[] = []
     let processed = 0
     for await (const { assetId, item } of assetTable.scan()) {
       if (item.timestamp !== undefined) {
@@ -2438,12 +2262,6 @@ class FileCatalogStore implements CatalogStore {
           kindFlags: kindFlags(item),
         }
         timeRecords.push(record)
-        if (hasGeo) {
-          cellRecords.push({
-            ...record,
-            cellId: geoCellId(record.latE7, record.lonE7),
-          })
-        }
       }
       processed += 1
       if (processed % 50_000 === 0) {
@@ -2455,7 +2273,7 @@ class FileCatalogStore implements CatalogStore {
           phase: 'building',
           pointCount: manifest.assetCount,
           builtIndexes: 0,
-          totalIndexes: 2,
+          totalIndexes: 1,
           currentIndexId: 'file-time-geo',
           currentIndexLabel: `${currentIndexLabel}: scanning asset table`,
           currentIndexProcessedPoints: processed,
@@ -2465,9 +2283,9 @@ class FileCatalogStore implements CatalogStore {
       }
     }
     const indexesDir = await childDirectory(await rootDirectory(), 'indexes')
+    await indexesDir.removeEntry('cell-time.idx').catch(() => undefined)
     console.log('[geo-index:worker] writing packed file catalog index files', {
       timeRecords: timeRecords.length,
-      cellRecords: cellRecords.length,
     })
     await this.writePackedIndex(
       indexesDir,
@@ -2479,20 +2297,9 @@ class FileCatalogStore implements CatalogStore {
       0,
       'time-first index',
     )
-    await this.writePackedIndex(
-      indexesDir,
-      CELL_TIME_INDEX_FILE,
-      INDEX_KIND_CELL_TIME,
-      cellRecords,
-      postProgress,
-      currentIndexLabel,
-      1,
-      'location-first index',
-    )
     console.log('[geo-index:worker] write packed file catalog indexes complete', {
       catalogVersion: manifest.catalogVersion,
       timeRecords: timeRecords.length,
-      cellRecords: cellRecords.length,
     })
   }
 
@@ -2510,34 +2317,26 @@ class FileCatalogStore implements CatalogStore {
       phase: 'building',
       pointCount: records.length,
       builtIndexes,
-      totalIndexes: 2,
-      currentIndexId: kind === INDEX_KIND_TIME_GEO ? 'file-time-geo' : 'file-cell-time',
+      totalIndexes: 1,
+      currentIndexId: 'file-time-geo',
       currentIndexLabel: `${currentIndexLabel}: sorting ${indexLabel}`,
       currentIndexProcessedPoints: 0,
       currentIndexTotalPoints: records.length,
     })
     await yieldToEventLoop()
-    if (kind === INDEX_KIND_CELL_TIME) {
-      records.sort((a, b) =>
-        (a.cellId ?? 0) - (b.cellId ?? 0) ||
-        a.timestampSec - b.timestampSec ||
-        a.assetId - b.assetId,
-      )
-    } else {
-      records.sort((a, b) => a.timestampSec - b.timestampSec || a.assetId - b.assetId)
-    }
+    records.sort((a, b) => a.timestampSec - b.timestampSec || a.assetId - b.assetId)
     postProgress?.({
       phase: 'building',
       pointCount: records.length,
       builtIndexes,
-      totalIndexes: 2,
-      currentIndexId: kind === INDEX_KIND_TIME_GEO ? 'file-time-geo' : 'file-cell-time',
+      totalIndexes: 1,
+      currentIndexId: 'file-time-geo',
       currentIndexLabel: `${currentIndexLabel}: encoding ${indexLabel}`,
       currentIndexProcessedPoints: 0,
       currentIndexTotalPoints: records.length,
     })
     await yieldToEventLoop()
-    const recordSize = kind === INDEX_KIND_TIME_GEO ? TIME_GEO_RECORD_SIZE : CELL_TIME_RECORD_SIZE
+    const recordSize = TIME_GEO_RECORD_SIZE
     const header = new Uint8Array(PACKED_INDEX_HEADER_SIZE)
     const headerView = new DataView(header.buffer)
     const manifest = await this.ensureManifest()
@@ -2546,11 +2345,11 @@ class FileCatalogStore implements CatalogStore {
     headerView.setFloat64(8, manifest.catalogVersion, true)
     headerView.setFloat64(16, manifest.assetCount, true)
     headerView.setFloat64(24, records.length, true)
-    headerView.setUint32(32, CELL_SIZE_E7, true)
+    headerView.setUint32(32, 0, true)
     headerView.setUint32(36, recordSize, true)
     headerView.setUint32(40, kind, true)
-    headerView.setUint32(44, LAT_CELL_COUNT, true)
-    headerView.setUint32(48, LON_CELL_COUNT, true)
+    headerView.setUint32(44, 0, true)
+    headerView.setUint32(48, 0, true)
     headerView.setFloat64(56, PACKED_INDEX_HEADER_SIZE, true)
     headerView.setFloat64(80, manifest.indexAppliedVersion, true)
     const parts: BlobPart[] = [header]
@@ -2561,20 +2360,11 @@ class FileCatalogStore implements CatalogStore {
       for (let index = 0; index < chunk.length; index += 1) {
         const record = chunk[index]
         const recordOffset = index * recordSize
-        if (kind === INDEX_KIND_CELL_TIME) {
-          view.setBigUint64(recordOffset, BigInt(record.cellId ?? 0), true)
-          view.setUint32(recordOffset + 8, record.timestampSec, true)
-          view.setInt32(recordOffset + 12, record.latE7, true)
-          view.setInt32(recordOffset + 16, record.lonE7, true)
-          view.setUint32(recordOffset + 20, record.assetId, true)
-          view.setUint8(recordOffset + 24, record.kindFlags)
-        } else {
-          view.setUint32(recordOffset, record.timestampSec, true)
-          view.setInt32(recordOffset + 4, record.latE7, true)
-          view.setInt32(recordOffset + 8, record.lonE7, true)
-          view.setUint32(recordOffset + 12, record.assetId, true)
-          view.setUint8(recordOffset + 16, record.kindFlags)
-        }
+        view.setUint32(recordOffset, record.timestampSec, true)
+        view.setInt32(recordOffset + 4, record.latE7, true)
+        view.setInt32(recordOffset + 8, record.lonE7, true)
+        view.setUint32(recordOffset + 12, record.assetId, true)
+        view.setUint8(recordOffset + 16, record.kindFlags)
       }
       parts.push(bytes)
       const processed = Math.min(records.length, offset + chunk.length)
@@ -2583,8 +2373,8 @@ class FileCatalogStore implements CatalogStore {
           phase: 'building',
           pointCount: records.length,
           builtIndexes,
-          totalIndexes: 2,
-          currentIndexId: kind === INDEX_KIND_TIME_GEO ? 'file-time-geo' : 'file-cell-time',
+          totalIndexes: 1,
+          currentIndexId: 'file-time-geo',
           currentIndexLabel: `${currentIndexLabel}: encoding ${indexLabel}`,
           currentIndexProcessedPoints: processed,
           currentIndexTotalPoints: records.length,
@@ -2596,8 +2386,8 @@ class FileCatalogStore implements CatalogStore {
       phase: 'building',
       pointCount: records.length,
       builtIndexes,
-      totalIndexes: 2,
-      currentIndexId: kind === INDEX_KIND_TIME_GEO ? 'file-time-geo' : 'file-cell-time',
+      totalIndexes: 1,
+      currentIndexId: 'file-time-geo',
       currentIndexLabel: `${currentIndexLabel}: writing ${indexLabel}`,
       currentIndexProcessedPoints: records.length,
       currentIndexTotalPoints: records.length,
@@ -2607,8 +2397,8 @@ class FileCatalogStore implements CatalogStore {
       phase: 'building',
       pointCount: records.length,
       builtIndexes: builtIndexes + 1,
-      totalIndexes: 2,
-      currentIndexId: kind === INDEX_KIND_TIME_GEO ? 'file-time-geo' : 'file-cell-time',
+      totalIndexes: 1,
+      currentIndexId: 'file-time-geo',
       currentIndexLabel: `${currentIndexLabel}: wrote ${indexLabel}`,
       currentIndexProcessedPoints: records.length,
       currentIndexTotalPoints: records.length,
@@ -2632,7 +2422,7 @@ class FileCatalogStore implements CatalogStore {
       phase: 'building',
       pointCount: 0,
       builtIndexes: 0,
-      totalIndexes: 2,
+      totalIndexes: 1,
       currentIndexId: indexId,
       currentIndexLabel: label,
     })
@@ -2653,7 +2443,7 @@ class FileCatalogStore implements CatalogStore {
         phase: 'building',
         pointCount: manifest.assetCount || manifest.occurrenceCount,
         builtIndexes: 0,
-        totalIndexes: 2,
+        totalIndexes: 1,
         currentIndexId: indexId,
         currentIndexLabel: `${label}: materializing catalog`,
         currentIndexProcessedPoints: 0,
@@ -2680,8 +2470,8 @@ class FileCatalogStore implements CatalogStore {
     postProgress({
       phase: 'ready',
       pointCount: manifest.assetCount,
-      builtIndexes: 2,
-      totalIndexes: 2,
+      builtIndexes: 1,
+      totalIndexes: 1,
       currentIndexId: indexId,
       currentIndexLabel: label,
       currentIndexProcessedPoints: manifest.assetCount,
@@ -2690,7 +2480,7 @@ class FileCatalogStore implements CatalogStore {
     return {
       pointCount: manifest.assetCount,
       buildTimeMs: performance.now() - startedAt,
-      engineCount: 2,
+      engineCount: 1,
     }
   }
 
@@ -2698,7 +2488,7 @@ class FileCatalogStore implements CatalogStore {
     indexId: FileCatalogIndexId,
   ): Promise<SearchIndexStats> {
     const manifest = await this.ensureManifest()
-    const index = await this.readPackedIndexHeader(indexId)
+    const index = await this.readPackedIndexHeader()
     const resident = this.residentPackedIndexes.get(indexId)
     const indexCatalogVersion = index?.catalogVersion
     const isCurrent =
@@ -2717,7 +2507,7 @@ class FileCatalogStore implements CatalogStore {
     return {
       ...defaultSearchStats(
         indexId,
-        fileCatalogIndexSpec(indexId).label,
+        fileCatalogIndexSpec().label,
       ),
       pointCount: manifest.assetCount,
       indexSizeBytes: index?.indexSizeBytes,

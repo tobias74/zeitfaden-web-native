@@ -90,12 +90,7 @@ const RESULT_PAGE_SIZE_OPTIONS = [50, 100, 250, 500] as const
 const DEFAULT_RESULT_PAGE_SIZE = 100
 const MAP_POINT_LIMIT = 500
 const DEFAULT_DISTANCE_ENGINE_ID = 'segmented-ball-tree'
-const CATALOG_QUERY_INDEX_KEY = 'geo-media-index-lab:catalog-query-index'
-const DEFAULT_CATALOG_QUERY_INDEX_ID = 'file-time-geo'
-const CATALOG_QUERY_INDEX_IDS = [
-  'file-time-geo',
-  'file-cell-time',
-] as const
+const CATALOG_QUERY_INDEX_ID = 'file-time-geo'
 const DISTANCE_ENGINE_IDS = [
   'brute-force',
   'segmented-ball-tree',
@@ -122,19 +117,6 @@ function storedNumber(key: string, fallback: number): number {
 
   const value = Number(stored)
   return Number.isFinite(value) && value > 0 ? value : fallback
-}
-
-type CatalogQueryIndexId = (typeof CATALOG_QUERY_INDEX_IDS)[number]
-
-function isCatalogQueryIndexId(value: string): value is CatalogQueryIndexId {
-  return CATALOG_QUERY_INDEX_IDS.includes(value as CatalogQueryIndexId)
-}
-
-function storedCatalogQueryIndexId(): CatalogQueryIndexId {
-  const stored = window.localStorage.getItem(CATALOG_QUERY_INDEX_KEY)
-  return stored && isCatalogQueryIndexId(stored)
-    ? stored
-    : DEFAULT_CATALOG_QUERY_INDEX_ID
 }
 
 function storedString<T extends string>(
@@ -357,19 +339,11 @@ function indexUpdateButtonLabel(
 }
 
 function catalogIndexStatus(
-  timestampStats: SearchIndexStats | undefined,
-  bboxStats: SearchIndexStats | undefined,
+  stats: SearchIndexStats | undefined,
   progress: GeoIndexBuildProgress | undefined,
 ): SearchIndexStats['indexStatus'] {
   if (progress?.currentIndexId?.startsWith('file-')) return 'building'
-  const statuses = [timestampStats?.indexStatus, bboxStats?.indexStatus]
-  if (statuses.some((status) => status === 'failed')) return 'failed'
-  if (statuses.some((status) => status === 'indexing' || status === 'pending')) return 'indexing'
-  if (statuses.every((status) => status === 'current')) return 'current'
-  if (statuses.every((status) => status === 'missing' || status === undefined)) {
-    return 'missing'
-  }
-  return 'stale'
+  return stats?.indexStatus ?? 'missing'
 }
 
 function catalogIndexButtonLabel(
@@ -509,17 +483,6 @@ function App() {
     clearSearch: clearSearchState,
   } = search.actions
 
-  const [selectedCatalogQueryIndexId, setSelectedCatalogQueryIndexIdState] =
-    useState<CatalogQueryIndexId>(() => storedCatalogQueryIndexId())
-  const setSelectedCatalogQueryIndexId = useCallback(
-    (indexId: CatalogQueryIndexId) => {
-      setSelectedCatalogQueryIndexIdState(indexId)
-      window.localStorage.setItem(CATALOG_QUERY_INDEX_KEY, indexId)
-      setResultPage(0)
-    },
-    [setResultPage],
-  )
-
   const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>(() => [
     {
       id: 0,
@@ -623,13 +586,12 @@ function App() {
     return {
       kind: 'timestamp',
       sort: catalogSort,
-      engineId: selectedCatalogQueryIndexId,
+      engineId: CATALOG_QUERY_INDEX_ID,
     }
   }, [
     catalogSort,
     distanceSortActive,
     queryPoint,
-    selectedCatalogQueryIndexId,
     selectedIndexId,
   ])
   const resultSearchSpec = useMemo<SearchSpec>(
@@ -687,12 +649,8 @@ function App() {
   const timeGeoIndexStats = allIndexStats.find(
     (entry) => entry.engineId === 'file-time-geo',
   )
-  const cellTimeIndexStats = allIndexStats.find(
-    (entry) => entry.engineId === 'file-cell-time',
-  )
   const regularIndexStatus = catalogIndexStatus(
     timeGeoIndexStats,
-    cellTimeIndexStats,
     geoIndexProgress,
   )
   const regularIndexProgress = geoIndexProgress?.currentIndexId?.startsWith('file-')
@@ -1445,21 +1403,6 @@ function App() {
                   </option>
                 </select>
               </label>
-              <label>
-                {t('catalogQueryIndex')}
-                <select
-                  value={selectedCatalogQueryIndexId}
-                  onChange={(event) => {
-                    const nextIndexId = event.target.value
-                    if (isCatalogQueryIndexId(nextIndexId)) {
-                      setSelectedCatalogQueryIndexId(nextIndexId)
-                    }
-                  }}
-                >
-                  <option value="file-time-geo">{t('timeFirstIndex')}</option>
-                  <option value="file-cell-time">{t('locationFirstIndex')}</option>
-                </select>
-              </label>
               {distanceSortActive && (
                 <label>
                   {t('distanceEngine')}
@@ -1543,29 +1486,20 @@ function App() {
                   </dd>
                 </div>
                 <div>
-                  <dt>{t('locationFirstIndex')}</dt>
-                  <dd>{indexStatusLabel(cellTimeIndexStats?.indexStatus, t)}</dd>
-                </div>
-                <div>
                   <dt>{t('assets')}</dt>
                   <dd>
                     {statsNumber(
-                      Math.max(
-                        timeGeoIndexStats?.pointCount ?? 0,
-                        cellTimeIndexStats?.pointCount ?? 0,
-                      ),
+                      timeGeoIndexStats?.pointCount ?? 0,
                       locale,
                     )}
                   </dd>
                 </div>
-                {(typeof timeGeoIndexStats?.indexSizeBytes === 'number' ||
-                  typeof cellTimeIndexStats?.indexSizeBytes === 'number') && (
+                {typeof timeGeoIndexStats?.indexSizeBytes === 'number' && (
                   <div>
                     <dt>{t('indexSize')}</dt>
                     <dd>
                       {formatBytes(
-                        (timeGeoIndexStats?.indexSizeBytes ?? 0) +
-                          (cellTimeIndexStats?.indexSizeBytes ?? 0),
+                        timeGeoIndexStats.indexSizeBytes,
                         locale,
                       )}
                     </dd>

@@ -25,20 +25,12 @@ const FILE_CATALOG_DIR: &str = "catalog-file-v1";
 const FILE_CATALOG_MANIFEST: &str = "manifest.json";
 const FILE_CATALOG_ASSETS: &str = "assets.bin";
 const FILE_CATALOG_TIME_GEO_INDEX: &str = "time-geo.idx";
-const FILE_CATALOG_CELL_TIME_INDEX: &str = "cell-time.idx";
 const PACKED_INDEX_MAGIC: u32 = 0x5049_5831;
 const BINARY_SCHEMA_VERSION: u32 = 1;
 const PACKED_INDEX_HEADER_SIZE: usize = 96;
 const TIME_GEO_RECORD_SIZE: usize = 20;
-const CELL_TIME_RECORD_SIZE: usize = 28;
 const PACKED_SCAN_RECORDS: usize = 8192;
 const INDEX_KIND_TIME_GEO: u32 = 1;
-const INDEX_KIND_CELL_TIME: u32 = 2;
-const CELL_SIZE_E7: i64 = 1000;
-const LAT_OFFSET_E7: i64 = 900_000_000;
-const LON_OFFSET_E7: i64 = 1_800_000_000;
-const LAT_CELL_COUNT: u64 = 1_800_000;
-const LON_CELL_COUNT: u64 = 3_600_000;
 const KIND_FLAG_IMAGE: u8 = 0;
 const KIND_FLAG_VIDEO: u8 = 1;
 const KIND_FLAG_GEO_POINT: u8 = 2;
@@ -3118,38 +3110,24 @@ fn write_file_catalog_indexes(
     let indexes_dir = catalog_indexes_dir(app)?;
     let items = active_media_items(app)?;
     let mut time_records = Vec::<NativePackedIndexRecord>::new();
-    let mut cell_records = Vec::<NativePackedIndexRecord>::new();
     for (asset_id, item) in items.iter().enumerate() {
         if let Some(timestamp) = item.timestamp {
-            let has_geo = item.latitude.is_some() && item.longitude.is_some();
             let record = NativePackedIndexRecord {
                 timestamp_sec: timestamp_seconds(timestamp),
                 lat_e7: item.latitude.map(lat_e7).unwrap_or(0),
                 lon_e7: item.longitude.map(lon_e7).unwrap_or(0),
                 asset_id,
                 kind_flags: kind_flags(item),
-                cell_id: 0,
             };
             time_records.push(record);
-            if has_geo {
-                cell_records.push(NativePackedIndexRecord {
-                    cell_id: geo_cell_id(record.lat_e7, record.lon_e7),
-                    ..record
-                });
-            }
         }
     }
+    let _ = fs::remove_file(indexes_dir.join("cell-time.idx"));
     write_packed_index_file(
         &indexes_dir.join(FILE_CATALOG_TIME_GEO_INDEX),
         INDEX_KIND_TIME_GEO,
         manifest,
         &mut time_records,
-    )?;
-    write_packed_index_file(
-        &indexes_dir.join(FILE_CATALOG_CELL_TIME_INDEX),
-        INDEX_KIND_CELL_TIME,
-        manifest,
-        &mut cell_records,
     )?;
     Ok(())
 }
@@ -3361,7 +3339,6 @@ struct NativePackedIndexRecord {
     lon_e7: i32,
     asset_id: usize,
     kind_flags: u8,
-    cell_id: u64,
 }
 
 struct NativePackedIndexHeader {
@@ -3390,10 +3367,6 @@ fn write_i32_le(bytes: &mut [u8], offset: usize, value: i32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-fn write_u64_le(bytes: &mut [u8], offset: usize, value: u64) {
-    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-}
-
 fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
     let slice = bytes.get(offset..offset + 4)?;
     Some(u32::from_le_bytes(slice.try_into().ok()?))
@@ -3407,11 +3380,6 @@ fn read_i32_le(bytes: &[u8], offset: usize) -> Option<i32> {
 fn read_f64_le(bytes: &[u8], offset: usize) -> Option<f64> {
     let slice = bytes.get(offset..offset + 8)?;
     Some(f64::from_le_bytes(slice.try_into().ok()?))
-}
-
-fn read_u64_le(bytes: &[u8], offset: usize) -> Option<u64> {
-    let slice = bytes.get(offset..offset + 8)?;
-    Some(u64::from_le_bytes(slice.try_into().ok()?))
 }
 
 fn timestamp_seconds(value: i64) -> u32 {
@@ -3460,38 +3428,6 @@ fn kind_matches_flags(flags: u8, kind: Option<&str>) -> bool {
     }
 }
 
-fn geo_cell_id(lat_value_e7: i32, lon_value_e7: i32) -> u64 {
-    let lat_cell = ((lat_value_e7 as i64 + LAT_OFFSET_E7) / CELL_SIZE_E7)
-        .clamp(0, LAT_CELL_COUNT as i64 - 1) as u64;
-    let lon_cell = ((lon_value_e7 as i64 + LON_OFFSET_E7) / CELL_SIZE_E7)
-        .clamp(0, LON_CELL_COUNT as i64 - 1) as u64;
-    lat_cell * LON_CELL_COUNT + lon_cell
-}
-
-fn bbox_cell_ranges(bounds: &GeoBounds) -> Vec<(u64, u64)> {
-    let min_lat_cell = ((lat_e7(bounds.min_lat) as i64 + LAT_OFFSET_E7) / CELL_SIZE_E7)
-        .clamp(0, LAT_CELL_COUNT as i64 - 1) as u64;
-    let max_lat_cell = ((lat_e7(bounds.max_lat) as i64 + LAT_OFFSET_E7) / CELL_SIZE_E7)
-        .clamp(0, LAT_CELL_COUNT as i64 - 1) as u64;
-    let min_lon_cell = ((lon_e7(bounds.min_lon) as i64 + LON_OFFSET_E7) / CELL_SIZE_E7)
-        .clamp(0, LON_CELL_COUNT as i64 - 1) as u64;
-    let max_lon_cell = ((lon_e7(bounds.max_lon) as i64 + LON_OFFSET_E7) / CELL_SIZE_E7)
-        .clamp(0, LON_CELL_COUNT as i64 - 1) as u64;
-    let mut ranges: Vec<(u64, u64)> = Vec::new();
-    for lat_cell in min_lat_cell..=max_lat_cell {
-        let base = lat_cell * LON_CELL_COUNT;
-        let next_range = (base + min_lon_cell, base + max_lon_cell);
-        if let Some(previous) = ranges.last_mut() {
-            if previous.1 + 1 >= next_range.0 {
-                previous.1 = previous.1.max(next_range.1);
-                continue;
-            }
-        }
-        ranges.push(next_range);
-    }
-    ranges
-}
-
 fn packed_record_matches_query(record: NativePackedIndexRecord, query: &CatalogQuery) -> bool {
     if !kind_matches_flags(record.kind_flags, query.kind.as_deref()) {
         return false;
@@ -3529,12 +3465,7 @@ fn packed_index_header(path: &Path, expected_kind: u32) -> Option<NativePackedIn
     if read_u32_le(&bytes, 40)? != expected_kind {
         return None;
     }
-    let expected_record_size = if expected_kind == INDEX_KIND_TIME_GEO {
-        TIME_GEO_RECORD_SIZE
-    } else {
-        CELL_TIME_RECORD_SIZE
-    };
-    if read_u32_le(&bytes, 36)? as usize != expected_record_size {
+    if read_u32_le(&bytes, 36)? as usize != TIME_GEO_RECORD_SIZE {
         return None;
     }
     Some(NativePackedIndexHeader {
@@ -3551,43 +3482,10 @@ fn read_packed_index_records(
     let bytes = fs::read(path).map_err(|error| error.to_string())?;
     let header = packed_index_header(path, expected_kind)
         .ok_or_else(|| "Catalog index file is missing or invalid.".to_string())?;
-    let record_size = if expected_kind == INDEX_KIND_TIME_GEO {
-        TIME_GEO_RECORD_SIZE
-    } else {
-        CELL_TIME_RECORD_SIZE
-    };
+    let record_size = TIME_GEO_RECORD_SIZE;
     let mut entries = Vec::with_capacity(header.entry_count);
     for index in 0..header.entry_count {
         let offset = PACKED_INDEX_HEADER_SIZE + index * record_size;
-        if expected_kind == INDEX_KIND_CELL_TIME {
-            let Some(cell_id) = read_u64_le(&bytes, offset) else {
-                break;
-            };
-            let Some(timestamp_sec) = read_u32_le(&bytes, offset + 8) else {
-                break;
-            };
-            let Some(lat_e7) = read_i32_le(&bytes, offset + 12) else {
-                break;
-            };
-            let Some(lon_e7) = read_i32_le(&bytes, offset + 16) else {
-                break;
-            };
-            let Some(asset_id) = read_u32_le(&bytes, offset + 20) else {
-                break;
-            };
-            let Some(kind_flags) = bytes.get(offset + 24).copied() else {
-                break;
-            };
-            entries.push(NativePackedIndexRecord {
-                timestamp_sec,
-                lat_e7,
-                lon_e7,
-                asset_id: asset_id as usize,
-                kind_flags,
-                cell_id,
-            });
-            continue;
-        }
         let Some(timestamp_sec) = read_u32_le(&bytes, offset) else {
             break;
         };
@@ -3609,7 +3507,6 @@ fn read_packed_index_records(
             lon_e7,
             asset_id: asset_id as usize,
             kind_flags,
-            cell_id: 0,
         });
     }
     Ok((header, entries))
@@ -3621,25 +3518,12 @@ fn write_packed_index_file(
     manifest: &FileCatalogManifest,
     records: &mut [NativePackedIndexRecord],
 ) -> AppResult<()> {
-    if kind == INDEX_KIND_CELL_TIME {
-        records.sort_by(|a, b| {
-            a.cell_id
-                .cmp(&b.cell_id)
-                .then_with(|| a.timestamp_sec.cmp(&b.timestamp_sec))
-                .then_with(|| a.asset_id.cmp(&b.asset_id))
-        });
-    } else {
-        records.sort_by(|a, b| {
-            a.timestamp_sec
-                .cmp(&b.timestamp_sec)
-                .then_with(|| a.asset_id.cmp(&b.asset_id))
-        });
-    }
-    let record_size = if kind == INDEX_KIND_TIME_GEO {
-        TIME_GEO_RECORD_SIZE
-    } else {
-        CELL_TIME_RECORD_SIZE
-    };
+    records.sort_by(|a, b| {
+        a.timestamp_sec
+            .cmp(&b.timestamp_sec)
+            .then_with(|| a.asset_id.cmp(&b.asset_id))
+    });
+    let record_size = TIME_GEO_RECORD_SIZE;
     let mut bytes = Vec::with_capacity(
         PACKED_INDEX_HEADER_SIZE + records.len() * record_size,
     );
@@ -3649,30 +3533,21 @@ fn write_packed_index_file(
     write_f64_le(&mut header, 8, manifest.catalog_version as f64);
     write_f64_le(&mut header, 16, manifest.asset_count as f64);
     write_f64_le(&mut header, 24, records.len() as f64);
-    write_u32_le(&mut header, 32, CELL_SIZE_E7 as u32);
+    write_u32_le(&mut header, 32, 0);
     write_u32_le(&mut header, 36, record_size as u32);
     write_u32_le(&mut header, 40, kind);
-    write_u32_le(&mut header, 44, LAT_CELL_COUNT as u32);
-    write_u32_le(&mut header, 48, LON_CELL_COUNT as u32);
+    write_u32_le(&mut header, 44, 0);
+    write_u32_le(&mut header, 48, 0);
     write_f64_le(&mut header, 56, PACKED_INDEX_HEADER_SIZE as f64);
     write_f64_le(&mut header, 80, manifest.index_applied_version as f64);
     bytes.extend_from_slice(&header);
     for record in records.iter() {
         let mut entry_bytes = vec![0_u8; record_size];
-        if kind == INDEX_KIND_CELL_TIME {
-            write_u64_le(&mut entry_bytes, 0, record.cell_id);
-            write_u32_le(&mut entry_bytes, 8, record.timestamp_sec);
-            write_i32_le(&mut entry_bytes, 12, record.lat_e7);
-            write_i32_le(&mut entry_bytes, 16, record.lon_e7);
-            write_u32_le(&mut entry_bytes, 20, record.asset_id as u32);
-            entry_bytes[24] = record.kind_flags;
-        } else {
-            write_u32_le(&mut entry_bytes, 0, record.timestamp_sec);
-            write_i32_le(&mut entry_bytes, 4, record.lat_e7);
-            write_i32_le(&mut entry_bytes, 8, record.lon_e7);
-            write_u32_le(&mut entry_bytes, 12, record.asset_id as u32);
-            entry_bytes[16] = record.kind_flags;
-        }
+        write_u32_le(&mut entry_bytes, 0, record.timestamp_sec);
+        write_i32_le(&mut entry_bytes, 4, record.lat_e7);
+        write_i32_le(&mut entry_bytes, 8, record.lon_e7);
+        write_u32_le(&mut entry_bytes, 12, record.asset_id as u32);
+        entry_bytes[16] = record.kind_flags;
         bytes.extend_from_slice(&entry_bytes);
     }
     fs::write(path, bytes).map_err(|error| error.to_string())
@@ -3682,65 +3557,20 @@ fn file_search_engine(spec: &SearchSpec) -> AppResult<(&'static str, &'static st
     let selected = spec.order.engine_id.as_deref().unwrap_or("file-time-geo");
     match selected {
         "file-time-geo" => Ok(("file-time-geo", "Time-first packed index")),
-        "file-cell-time" if spec.geo_bounds.is_some() => {
-            Ok(("file-cell-time", "Location-first packed index"))
-        }
-        "file-cell-time" => Err("Location-first catalog index requires a bounding box query.".to_string()),
         _ => Err(format!("Search index \"{selected}\" is not available.")),
     }
 }
 
 fn search_file_catalog_index(
     app: &AppHandle,
-    spec: &SearchSpec,
     query: &CatalogQuery,
 ) -> AppResult<(Vec<MediaItem>, usize, usize, usize)> {
     let items = active_media_items(app)?;
     let indexes_dir = catalog_indexes_dir(app)?;
     let limit = query.limit.unwrap_or(500).clamp(1, 10_000) as usize;
     let offset = query.offset.unwrap_or(0).max(0) as usize;
-    let selected = spec.order.engine_id.as_deref().unwrap_or("file-time-geo");
     let min_time = query.start_time.map(timestamp_seconds).unwrap_or(0);
     let max_time = query.end_time.map(timestamp_seconds).unwrap_or(u32::MAX);
-    if selected == "file-cell-time" {
-        let bounds = spec
-            .geo_bounds
-            .as_ref()
-            .ok_or_else(|| "Location-first catalog index requires a bounding box query.".to_string())?;
-        let cell_ranges = bbox_cell_ranges(bounds);
-        let (header, entries) = read_packed_index_records(
-            &indexes_dir.join(FILE_CATALOG_CELL_TIME_INDEX),
-            INDEX_KIND_CELL_TIME,
-        )?;
-        let mut candidates = HashMap::<String, MediaItem>::new();
-        let mut inspected = 0_usize;
-        for record in entries.iter().copied() {
-            if !cell_ranges.iter().any(|(min_cell, max_cell)| {
-                record.cell_id >= *min_cell && record.cell_id <= *max_cell
-            }) {
-                continue;
-            }
-            if record.timestamp_sec < min_time || record.timestamp_sec > max_time {
-                continue;
-            }
-            inspected += 1;
-            if !packed_record_matches_query(record, query) {
-                continue;
-            }
-            let Some(item) = items.get(record.asset_id) else {
-                continue;
-            };
-            if item_matches_catalog_query(item, query) {
-                candidates.insert(item.id.clone(), item.clone());
-            }
-        }
-        let mut rows = candidates.into_values().collect::<Vec<_>>();
-        sort_media_items(&mut rows, query.sort.as_str());
-        let rows = rows.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
-        let pages_read = ceil_div(header.entry_count, PACKED_SCAN_RECORDS);
-        return Ok((rows, pages_read, header.index_size_bytes, inspected));
-    }
-
     let (header, mut entries) = read_packed_index_records(
         &indexes_dir.join(FILE_CATALOG_TIME_GEO_INDEX),
         INDEX_KIND_TIME_GEO,
@@ -3901,7 +3731,7 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
     let mut index_stats = require_search_index_current(&app, engine_id, engine_label)?;
     let query = search_spec_to_catalog_query(&spec, limit.saturating_add(1));
     let (rows, pages_read, disk_read_bytes, candidates_inspected) =
-        search_file_catalog_index(&app, &spec, &query)?;
+        search_file_catalog_index(&app, &query)?;
     index_stats.pages_read = Some(pages_read);
     index_stats.disk_read_bytes = Some(disk_read_bytes);
     index_stats.candidates_inspected = Some(candidates_inspected);
@@ -4084,7 +3914,7 @@ fn build_search_indexes(
     force_rebuild: Option<bool>,
 ) -> AppResult<SearchIndexBuildSummary> {
     let started = Instant::now();
-    if matches!(index_id.as_str(), "file-time-geo" | "file-cell-time") {
+    if index_id == "file-time-geo" {
         return build_file_catalog_indexes(&app, &window, &index_id, started);
     }
     let total_indexes = 1_usize;
@@ -4271,7 +4101,7 @@ fn build_file_catalog_indexes(
             phase: "building".to_string(),
             point_count: 0,
             built_indexes: 0,
-            total_indexes: 2,
+            total_indexes: 1,
             current_index_id: Some(index_id.to_string()),
             current_index_label: Some(label.to_string()),
             current_index_processed_points: None,
@@ -4286,7 +4116,7 @@ fn build_file_catalog_indexes(
                 phase: "building".to_string(),
                 point_count: manifest.asset_count.max(manifest.occurrence_count),
                 built_indexes: 0,
-                total_indexes: 2,
+                total_indexes: 1,
                 current_index_id: Some(index_id.to_string()),
                 current_index_label: Some(format!("{label}: materializing catalog")),
                 current_index_processed_points: Some(0),
@@ -4302,7 +4132,7 @@ fn build_file_catalog_indexes(
                     phase: "building".to_string(),
                     point_count: total,
                     built_indexes: 0,
-                    total_indexes: 2,
+                    total_indexes: 1,
                     current_index_id: Some(index_id.to_string()),
                     current_index_label: Some(format!("{label}: materializing catalog: {phase_label}")),
                     current_index_processed_points: Some(processed),
@@ -4336,8 +4166,8 @@ fn build_file_catalog_indexes(
         GeoIndexBuildProgress {
             phase: "ready".to_string(),
             point_count: manifest.asset_count,
-            built_indexes: 2,
-            total_indexes: 2,
+            built_indexes: 1,
+            total_indexes: 1,
             current_index_id: Some(index_id.to_string()),
             current_index_label: Some(label.to_string()),
             current_index_processed_points: Some(manifest.asset_count),
@@ -4347,7 +4177,7 @@ fn build_file_catalog_indexes(
     Ok(SearchIndexBuildSummary {
         point_count: manifest.asset_count,
         build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
-        engine_count: 2,
+        engine_count: 1,
     })
 }
 
@@ -4397,7 +4227,6 @@ fn get_search_index_stats(app: AppHandle) -> AppResult<Vec<SearchIndexStats>> {
     drop(registry);
     Ok(vec![
         file_catalog_index_status_stats(&app, "file-time-geo", "Time-first packed index")?,
-        file_catalog_index_status_stats(&app, "file-cell-time", "Location-first packed index")?,
         brute_force_stats,
         segmented_ball_tree_status_stats(&app)?,
     ])
@@ -4409,11 +4238,7 @@ fn file_catalog_index_status_stats(
     engine_label: &str,
 ) -> AppResult<SearchIndexStats> {
     let manifest = load_file_catalog_manifest(app)?;
-    let required_file = if engine_id == "file-time-geo" {
-        (FILE_CATALOG_TIME_GEO_INDEX, INDEX_KIND_TIME_GEO)
-    } else {
-        (FILE_CATALOG_CELL_TIME_INDEX, INDEX_KIND_CELL_TIME)
-    };
+    let required_file = (FILE_CATALOG_TIME_GEO_INDEX, INDEX_KIND_TIME_GEO);
     let indexes_dir = catalog_indexes_dir(app)?;
     let path = indexes_dir.join(required_file.0);
     let header = packed_index_header(&path, required_file.1);
@@ -4457,9 +4282,7 @@ fn require_search_index_current(
     engine_label: &str,
 ) -> AppResult<SearchIndexStats> {
     let stats = match engine_id {
-        "file-time-geo" | "file-cell-time" => {
-            file_catalog_index_status_stats(app, engine_id, engine_label)?
-        }
+        "file-time-geo" => file_catalog_index_status_stats(app, engine_id, engine_label)?,
         "segmented-ball-tree" => segmented_ball_tree_status_stats(app)?,
         _ => empty_search_index_stats(engine_id, engine_label),
     };
