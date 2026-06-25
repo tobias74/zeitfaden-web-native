@@ -7,7 +7,7 @@ import type { MediaItem, SearchPage, SearchSpec } from './types'
 vi.mock('./components/MapView', async () => {
   const React = await import('react')
 
-  retun {
+  return {
     MapView: ({
       onQueryPointChange,
       onVisibleBoundsChange,
@@ -29,7 +29,7 @@ vi.mock('./components/MapView', async () => {
         })
       }, [onVisibleBoundsChange])
 
-      retun (
+      return (
         <>
           <button
             type="button"
@@ -79,11 +79,11 @@ let mapSearchSignals: AbortSignal[]
 function abortError(): Error {
   const error = new Error('Catalog request aborted')
   error.name = 'AbortError'
-  retun error
+  return error
 }
 
 function item(id: number): MediaItem {
-  retun {
+  return {
     id: `item-${id}`,
     contentHash: `item-${id}`,
     sourceId: 'source-1',
@@ -105,11 +105,11 @@ function item(id: number): MediaItem {
 }
 
 function createItems(offset: number, limit: number): MediaItem[] {
-  retun Array.from({ length: limit }, (_, index) => item(offset + index))
+  return Array.from({ length: limit }, (_, index) => item(offset + index))
 }
 
 function createSearchPage(items: MediaItem[], limitReached = false): SearchPage {
-  retun {
+  return {
     items: items.map((mediaItem) => ({
       mediaId: mediaItem.id,
       item: mediaItem,
@@ -134,7 +134,7 @@ function createSearchPage(items: MediaItem[], limitReached = false): SearchPage 
 }
 
 function createMapPoints(offset: number, limit: number) {
-  retun Array.from({ length: limit }, (_, index) => ({
+  return Array.from({ length: limit }, (_, index) => ({
     assetId: offset + index,
     kind: 'image' as const,
     lat: 47 + index / 1000,
@@ -172,7 +172,7 @@ function createPlatform(): PlatformBackend {
             })
         })
       }
-      retun createSearchPage(
+      return createSearchPage(
         createItems(spec.offset ?? 0, spec.limit ?? 100),
         spec.purpose === 'results',
       )
@@ -196,7 +196,7 @@ function createPlatform(): PlatformBackend {
             })
         })
       }
-      retun {
+      return {
         points: createMapPoints(spec.offset ?? 0, spec.limit ?? 100),
         limitReached: false,
       }
@@ -227,7 +227,7 @@ function createPlatform(): PlatformBackend {
       },
     ]),
     listMedia: async (query) => {
-      retun createItems(query.offset ?? 0, query.limit ?? 100)
+      return createItems(query.offset ?? 0, query.limit ?? 100)
     },
     getMediaByIds: vi.fn(),
     getGeoPoints: vi.fn(),
@@ -252,7 +252,7 @@ function createPlatform(): PlatformBackend {
     dispose: vi.fn(),
   }
 
-  retun {
+  return {
     kind: 'web',
     capabilities: {
       absolutePaths: false,

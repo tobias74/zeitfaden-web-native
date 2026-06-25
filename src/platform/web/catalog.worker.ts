@@ -224,13 +224,13 @@ const residentDistanceIndexInstances = new Map<string, ResidentPackedDistanceInd
 const cancelledRequests = new Set<number>()
 
 function neverCancelled(): boolean {
-  retun false
+  return false
 }
 
 function abortError(): Error {
   const error = new Error('Catalog request aborted')
   error.name = 'AbortError'
-  retun error
+  return error
 }
 
 function throwIfCancelled(isCancelled: CancellationSignal): void {
@@ -242,40 +242,40 @@ async function yieldToEventLoop(): Promise<void> {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  retun typeof value === 'object' && value !== null
+  return typeof value === 'object' && value !== null
 }
 
 function numeric(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) retun value
+  if (typeof value === 'number' && Number.isFinite(value)) return value
   if (typeof value === 'string' && value.trim() !== '') {
     const parsed = Number(value)
-    retun Number.isFinite(parsed) ? parsed : undefined
+    return Number.isFinite(parsed) ? parsed : undefined
   }
-  retun undefined
+  return undefined
 }
 
 function dateMillis(value: unknown): number | undefined {
   if (value instanceof Date) {
     const time = value.getTime()
-    retun Number.isFinite(time) ? time : undefined
+    return Number.isFinite(time) ? time : undefined
   }
   if (typeof value === 'string' || typeof value === 'number') {
     const parsed = Date.parse(String(value))
-    retun Number.isFinite(parsed) ? parsed : undefined
+    return Number.isFinite(parsed) ? parsed : undefined
   }
-  retun undefined
+  return undefined
 }
 
 async function rootDirectory(): Promise<FileSystemDirectoryHandle> {
   const root = await navigator.storage.getDirectory()
-  retun root.getDirectoryHandle(CATALOG_DIR, { create: true })
+  return root.getDirectoryHandle(CATALOG_DIR, { create: true })
 }
 
 async function childDirectory(
   parent: FileSystemDirectoryHandle,
   name: string,
 ): Promise<FileSystemDirectoryHandle> {
-  retun parent.getDirectoryHandle(name, { create: true })
+  return parent.getDirectoryHandle(name, { create: true })
 }
 
 async function readFile(
@@ -283,9 +283,9 @@ async function readFile(
   name: string,
 ): Promise<File | undefined> {
   try {
-    retun await (await directory.getFileHandle(name)).getFile()
+    return await (await directory.getFileHandle(name)).getFile()
   } catch {
-    retun undefined
+    return undefined
   }
 }
 
@@ -293,7 +293,7 @@ async function readTextFile(
   directory: FileSystemDirectoryHandle,
   name: string,
 ): Promise<string | undefined> {
-  retun (await readFile(directory, name))?.text()
+  return (await readFile(directory, name))?.text()
 }
 
 async function writeFile(
@@ -327,7 +327,7 @@ async function clearDirectory(directory: FileSystemDirectoryHandle): Promise<voi
   const iterable = directory as FileSystemDirectoryHandle & {
     entries?: () => AsyncIterable<[string, FileSystemHandle]>
   }
-  if (!iterable.entries) retun
+  if (!iterable.entries) return
   for await (const [name] of iterable.entries()) {
     await directory.removeEntry(name, { recursive: true })
   }
@@ -339,14 +339,14 @@ async function directoryEntries(
   const iterable = directory as FileSystemDirectoryHandle & {
     entries?: () => AsyncIterable<[string, FileSystemHandle]>
   }
-  if (!iterable.entries) retun []
+  if (!iterable.entries) return []
   const entries: [string, FileSystemHandle][] = []
   for await (const entry of iterable.entries()) entries.push(entry)
-  retun entries
+  return entries
 }
 
 async function readFileRange(file: File, offset: number, length: number): Promise<ArrayBuffer> {
-  retun file.slice(offset, offset + length).arrayBuffer()
+  return file.slice(offset, offset + length).arrayBuffer()
 }
 
 function setUint64(view: DataView, offset: number, value: number): void {
@@ -354,7 +354,7 @@ function setUint64(view: DataView, offset: number, value: number): void {
 }
 
 function getUint64(view: DataView, offset: number): number {
-  retun Number(view.getBigUint64(offset, true))
+  return Number(view.getBigUint64(offset, true))
 }
 
 function encodeHeader(
@@ -370,22 +370,22 @@ function encodeHeader(
   view.setFloat64(8, catalogVersion, true)
   view.setFloat64(16, count, true)
   view.setUint32(24, entrySize, true)
-  retun bytes
+  return bytes
 }
 
 function bytesAsBlobPart(bytes: Uint8Array): BlobPart {
-  retun bytes as unknown as BlobPart
+  return bytes as unknown as BlobPart
 }
 
 function readBinaryHeader(
   bytes: ArrayBuffer,
   expectedMagic: number,
 ): { catalogVersion: number; count: number; entrySize: number } | undefined {
-  if (bytes.byteLength < ASSET_TABLE_HEADER_SIZE) retun undefined
+  if (bytes.byteLength < ASSET_TABLE_HEADER_SIZE) return undefined
   const view = new DataView(bytes)
-  if (view.getUint32(0, true) !== expectedMagic) retun undefined
-  if (view.getUint32(4, true) !== BINARY_SCHEMA_VERSION) retun undefined
-  retun {
+  if (view.getUint32(0, true) !== expectedMagic) return undefined
+  if (view.getUint32(4, true) !== BINARY_SCHEMA_VERSION) return undefined
+  return {
     catalogVersion: view.getFloat64(8, true),
     count: view.getFloat64(16, true),
     entrySize: view.getUint32(24, true),
@@ -396,31 +396,31 @@ function encodeHashKey(hash: string): Uint8Array {
   const bytes = new Uint8Array(64)
   const encoded = textEncoder.encode(hash.toLowerCase())
   bytes.set(encoded.slice(0, bytes.length))
-  retun bytes
+  return bytes
 }
 
 function compareHashBytes(left: Uint8Array, right: Uint8Array): number {
   for (let index = 0; index < left.length; index += 1) {
     const delta = left[index] - right[index]
-    if (delta !== 0) retun delta
+    if (delta !== 0) return delta
   }
-  retun 0
+  return 0
 }
 
 function timestampSeconds(value: number): number {
-  retun Math.max(0, Math.min(0xffffffff, Math.floor(value / 1000)))
+  return Math.max(0, Math.min(0xffffffff, Math.floor(value / 1000)))
 }
 
 function latE7(value: number): number {
-  retun Math.round(Math.max(-90, Math.min(90, value)) * 10_000_000)
+  return Math.round(Math.max(-90, Math.min(90, value)) * 10_000_000)
 }
 
 function lonE7(value: number): number {
-  retun Math.round(Math.max(-180, Math.min(180, value)) * 10_000_000)
+  return Math.round(Math.max(-180, Math.min(180, value)) * 10_000_000)
 }
 
 function coordinateFromE7(value: number): number {
-  retun value / 10_000_000
+  return value / 10_000_000
 }
 
 function kindFlags(item: MediaItem): number {
@@ -430,7 +430,7 @@ function kindFlags(item: MediaItem): number {
       : item.kind === 'geo_point'
         ? KIND_FLAG_GEO_POINT
         : KIND_FLAG_IMAGE
-  retun kind |
+  return kind |
     (item.latitude !== undefined && item.longitude !== undefined
       ? KIND_FLAG_HAS_GEO
       : 0)
@@ -438,13 +438,13 @@ function kindFlags(item: MediaItem): number {
 
 function kindFromFlags(flags: number): MapPoint['kind'] {
   const encoded = flags & 0b11
-  if (encoded === KIND_FLAG_VIDEO) retun 'video'
-  if (encoded === KIND_FLAG_GEO_POINT) retun 'geo_point'
-  retun 'image'
+  if (encoded === KIND_FLAG_VIDEO) return 'video'
+  if (encoded === KIND_FLAG_GEO_POINT) return 'geo_point'
+  return 'image'
 }
 
 function emptyManifest(): CatalogManifest {
-  retun {
+  return {
     schemaVersion: 1,
     catalogVersion: 0,
     nextAssetId: 0,
@@ -462,10 +462,10 @@ function emptyManifest(): CatalogManifest {
 }
 
 function normalizeManifest(value: unknown): CatalogManifest {
-  if (!isRecord(value) || value.schemaVersion !== 1) retun emptyManifest()
+  if (!isRecord(value) || value.schemaVersion !== 1) return emptyManifest()
   const base = emptyManifest()
   const catalogVersion = numeric(value.catalogVersion) ?? base.catalogVersion
-  retun {
+  return {
     ...base,
     ...value,
     catalogVersion,
@@ -498,8 +498,8 @@ function normalizeManifest(value: unknown): CatalogManifest {
 }
 
 function locationFromUnknown(value: unknown): MediaLocation | undefined {
-  if (!isRecord(value)) retun undefined
-  retun {
+  if (!isRecord(value)) return undefined
+  return {
     id: String(value.id ?? ''),
     sourceId: String(value.sourceId ?? ''),
     sourceLabel: String(value.sourceLabel ?? ''),
@@ -513,18 +513,18 @@ function locationFromUnknown(value: unknown): MediaLocation | undefined {
 }
 
 function mediaFromUnknown(value: unknown): MediaItem | undefined {
-  if (!isRecord(value)) retun undefined
+  if (!isRecord(value)) return undefined
   const contentHash = String(value.contentHash ?? value.id ?? '')
   const locations = Array.isArray(value.locations)
     ? value.locations.flatMap((location) => {
         const parsed = locationFromUnknown(location)
-        retun parsed ? [parsed] : []
+        return parsed ? [parsed] : []
       })
     : []
-  if (!contentHash || locations.length === 0) retun undefined
+  if (!contentHash || locations.length === 0) return undefined
   const kind =
     value.kind === 'video' || value.kind === 'geo_point' ? value.kind : 'image'
-  retun {
+  return {
     id: contentHash,
     contentHash,
     sourceId: String(value.sourceId ?? locations[0]?.sourceId ?? ''),
@@ -544,25 +544,25 @@ function mediaFromUnknown(value: unknown): MediaItem | undefined {
 }
 
 function occurrenceFromLine(line: string): FileOccurrence | undefined {
-  if (!line.trim()) retun undefined
+  if (!line.trim()) return undefined
   try {
     const parsed = JSON.parse(line) as unknown
-    if (!isRecord(parsed)) retun undefined
+    if (!isRecord(parsed)) return undefined
     const item = mediaFromUnknown(parsed.item)
-    if (!item) retun undefined
-    retun {
+    if (!item) return undefined
+    return {
       item,
       sourceId: String(parsed.sourceId ?? item.sourceId),
       generation: numeric(parsed.generation) ?? 0,
     }
   } catch {
-    retun undefined
+    return undefined
   }
 }
 
 function itemLocations(item: MediaItem): MediaLocation[] {
-  if (item.locations.length > 0) retun item.locations
-  retun [
+  if (item.locations.length > 0) return item.locations
+  return [
     {
       id: `${item.sourceId}:${item.relativePath}`,
       sourceId: item.sourceId,
@@ -579,15 +579,15 @@ function displayNameForLocation(
 ): string {
   if (kind === 'geo_point') {
     const base = location?.sourceLabel ?? location?.relativePath ?? contentHash
-    retun typeof location?.pointIndex === 'number'
+    return typeof location?.pointIndex === 'number'
       ? `${base} #${location.pointIndex}`
       : base
   }
-  retun pathDisplayName(location?.relativePath ?? contentHash)
+  return pathDisplayName(location?.relativePath ?? contentHash)
 }
 
 function relativePathForLocation(location: MediaLocation | undefined): string {
-  retun location?.relativePath ?? location?.sourceLabel ?? ''
+  return location?.relativePath ?? location?.sourceLabel ?? ''
 }
 
 function normalizeMediaItem(item: MediaItem, locations: MediaLocation[]): MediaItem {
@@ -602,7 +602,7 @@ function normalizeMediaItem(item: MediaItem, locations: MediaLocation[]): MediaI
     sourceLabel: item.sourceId,
     relativePath: item.relativePath,
   }
-  retun {
+  return {
     ...item,
     id: item.contentHash,
     sourceId: primaryLocation.sourceId,
@@ -614,35 +614,35 @@ function normalizeMediaItem(item: MediaItem, locations: MediaLocation[]): MediaI
 
 function itemMatchesQuery(item: MediaItem, query: CatalogQuery): boolean {
   if (query.kind === 'media') {
-    if (item.kind !== 'image' && item.kind !== 'video') retun false
+    if (item.kind !== 'image' && item.kind !== 'video') return false
   } else if (query.kind && query.kind !== 'all' && item.kind !== query.kind) {
-    retun false
+    return false
   }
   if (query.hasGeo === true && (item.latitude === undefined || item.longitude === undefined)) {
-    retun false
+    return false
   }
   if (query.hasGeo === false && item.latitude !== undefined && item.longitude !== undefined) {
-    retun false
+    return false
   }
   if (query.geoBounds) {
-    if (item.latitude === undefined || item.longitude === undefined) retun false
+    if (item.latitude === undefined || item.longitude === undefined) return false
     if (
       item.latitude < query.geoBounds.minLat ||
       item.latitude > query.geoBounds.maxLat ||
       item.longitude < query.geoBounds.minLon ||
       item.longitude > query.geoBounds.maxLon
     ) {
-      retun false
+      return false
     }
   }
-  if (item.timestamp === undefined) retun false
-  if (query.startTime !== undefined && item.timestamp < query.startTime) retun false
-  if (query.endTime !== undefined && item.timestamp > query.endTime) retun false
-  retun true
+  if (item.timestamp === undefined) return false
+  if (query.startTime !== undefined && item.timestamp < query.startTime) return false
+  if (query.endTime !== undefined && item.timestamp > query.endTime) return false
+  return true
 }
 
 function defaultSearchStats(engineId: string, engineLabel: string): SearchIndexStats {
-  retun {
+  return {
     engineId,
     engineLabel,
     exact: true,
@@ -660,7 +660,7 @@ function defaultSearchStats(engineId: string, engineLabel: string): SearchIndexS
 type FileCatalogIndexId = 'file-time-geo'
 
 function isFileCatalogIndexId(indexId: string): indexId is FileCatalogIndexId {
-  retun indexId === 'file-time-geo'
+  return indexId === 'file-time-geo'
 }
 
 function fileCatalogIndexSpec(): {
@@ -668,7 +668,7 @@ function fileCatalogIndexSpec(): {
   kind: number
   label: string
 } {
-  retun {
+  return {
     fileName: TIME_GEO_INDEX_FILE,
     kind: INDEX_KIND_TIME_GEO,
     label: 'Time-first packed index',
@@ -685,7 +685,7 @@ async function residentDistanceStatusStats(
   if (stats.indexStatus === 'current' && stats.indexStorage !== 'memory') {
     distanceIndex.preload(catalogVersion)
   }
-  retun {
+  return {
     ...stats,
     engineLabel: distanceIndex.label,
     exact: distanceIndex.capabilities.exact,
@@ -698,20 +698,20 @@ function withQueryMetrics(
   base: SearchIndexStats,
   spec: SearchSpec,
   queryTimeMs: number,
-  rowsRetuned: number,
+  rowsReturned: number,
   limit: number,
   offset: number,
   limitReached: boolean,
   timings: Partial<SearchIndexStats> = {},
 ): SearchIndexStats {
-  retun {
+  return {
     ...base,
     ...timings,
     queryPurpose: spec.purpose,
     storageMode: 'file',
     queryTimeMs,
     lastQueryTimeMs: base.lastQueryTimeMs ?? queryTimeMs,
-    rowsRetuned,
+    rowsReturned,
     limit,
     offset,
     limitReached,
@@ -719,7 +719,7 @@ function withQueryMetrics(
 }
 
 function searchSpecToCatalogQuery(spec: SearchSpec, limit: number): CatalogQuery {
-  retun {
+  return {
     startTime: spec.startTime,
     endTime: spec.endTime,
     kind: spec.kind,
@@ -732,7 +732,7 @@ function searchSpecToCatalogQuery(spec: SearchSpec, limit: number): CatalogQuery
 }
 
 function mediaItemsToSearchResults(items: MediaItem[]): SearchPage['items'] {
-  retun items.map((item) => ({
+  return items.map((item) => ({
     item,
     mediaId: item.id,
   }))
@@ -747,9 +747,9 @@ async function enrichDistanceAssetResults(
   const itemsByAssetId = new Map(
     items.map((result) => [result.assetId, result.item]),
   )
-  retun results.flatMap((result) => {
+  return results.flatMap((result) => {
     const item = itemsByAssetId.get(result.assetId)
-    retun item
+    return item
       ? [{ mediaId: item.id, distanceMeters: result.distanceMeters, item }]
       : []
   })
@@ -762,9 +762,9 @@ async function enrichDistanceResults(
   const resultIds = Array.from(new Set(results.map((result) => result.mediaId)))
   const items = await getMediaByIdsFn(resultIds)
   const itemsById = new Map(items.map((item) => [item.id, item]))
-  retun results.flatMap((result) => {
+  return results.flatMap((result) => {
     const item = itemsById.get(result.mediaId)
-    retun item ? [{ ...result, item }] : []
+    return item ? [{ ...result, item }] : []
   })
 }
 
@@ -775,7 +775,7 @@ function createFileSearchEngine(
   ensureIndexReadyFn: EnsureSearchIndexReadyFn,
   isCancelled: CancellationSignal,
 ): SearchIndexEngine {
-  retun {
+  return {
     id: engineId,
     label: engineLabel,
     capabilities: {
@@ -789,9 +789,9 @@ function createFileSearchEngine(
       supportsKind: true,
     },
     canHandle(spec) {
-      if (spec.order.kind !== 'timestamp') retun false
-      if (spec.order.engineId && spec.order.engineId !== engineId) retun false
-      retun true
+      if (spec.order.kind !== 'timestamp') return false
+      if (spec.order.engineId && spec.order.engineId !== engineId) return false
+      return true
     },
     async search(spec) {
       throwIfCancelled(isCancelled)
@@ -810,7 +810,7 @@ function createFileSearchEngine(
       throwIfCancelled(isCancelled)
       const limitedRows = rows.items.slice(0, limit)
       const limitReached = rows.items.length > limit
-      retun {
+      return {
         items: mediaItemsToSearchResults(limitedRows),
         resultMetrics: withQueryMetrics(
           {
@@ -834,17 +834,17 @@ function createFileSearchEngine(
       }
     },
     async stats() {
-      retun defaultSearchStats(engineId, engineLabel)
+      return defaultSearchStats(engineId, engineLabel)
     },
   }
 }
 
 function isResidentDistanceEngineId(indexId: string): indexId is ResidentPackedDistanceEngineId {
-  retun indexId === 'segmented-ball-tree'
+  return indexId === 'segmented-ball-tree'
 }
 
 function residentDistanceRuntimeKey(indexId: ResidentPackedDistanceEngineId): string {
-  retun `file:${indexId}`
+  return `file:${indexId}`
 }
 
 function residentDistanceIndex(
@@ -853,15 +853,15 @@ function residentDistanceIndex(
 ): ResidentPackedDistanceIndex {
   const key = residentDistanceRuntimeKey(indexId)
   const existing = residentDistanceIndexInstances.get(key)
-  if (existing) retun existing
+  if (existing) return existing
   const index = new ResidentPackedDistanceIndex(store.residentDistanceIndexStore())
   residentDistanceIndexInstances.set(key, index)
-  retun index
+  return index
 }
 
 function activeResidentDistanceIndex(indexId: string): ResidentPackedDistanceIndex | undefined {
-  if (!isResidentDistanceEngineId(indexId)) retun undefined
-  retun residentDistanceIndexInstances.get(residentDistanceRuntimeKey(indexId))
+  if (!isResidentDistanceEngineId(indexId)) return undefined
+  return residentDistanceIndexInstances.get(residentDistanceRuntimeKey(indexId))
 }
 
 async function clearResidentDistanceIndexCaches(store: CatalogStore): Promise<void> {
@@ -876,7 +876,7 @@ function createDistanceSearchEngine(
   ensureIndexReadyFn: EnsureSearchIndexReadyFn,
   isCancelled: CancellationSignal,
 ): SearchIndexEngine {
-  retun {
+  return {
     id: geoIndex.id,
     label: geoIndex.label,
     capabilities: {
@@ -890,7 +890,7 @@ function createDistanceSearchEngine(
       supportsKind: true,
     },
     canHandle(spec) {
-      retun spec.order.kind === 'distance'
+      return spec.order.kind === 'distance'
     },
     async search(spec) {
       if (spec.order.kind !== 'distance') {
@@ -939,7 +939,7 @@ function createDistanceSearchEngine(
         }
         const limitReached =
           results.length >= limit && resultMetrics.pointCount > offset + limit
-        retun {
+        return {
           items,
           resultMetrics: withQueryMetrics(
             resultMetrics,
@@ -977,7 +977,7 @@ function createDistanceSearchEngine(
       }
       const limitReached =
         results.length >= limit && resultMetrics.pointCount > offset + limit
-      retun {
+      return {
         items,
         resultMetrics: withQueryMetrics(
           resultMetrics,
@@ -999,7 +999,7 @@ function createDistanceSearchEngine(
       }
     },
     async stats() {
-      retun {
+      return {
         ...(await geoIndex.stats()),
         engineLabel: geoIndex.label,
         exact: geoIndex.capabilities.exact,
@@ -1016,7 +1016,7 @@ function createSearchRegistry(
   ensureIndexReadyFn: EnsureSearchIndexReadyFn,
   isCancelled: CancellationSignal = neverCancelled,
 ): SearchIndexEngineRegistry {
-  retun new SearchIndexEngineRegistry([
+  return new SearchIndexEngineRegistry([
     createFileSearchEngine(
       'file-time-geo',
       'Time-first packed index',
@@ -1105,26 +1105,26 @@ export class AssetTable {
     assetsDir: FileSystemDirectoryHandle,
   ): Promise<AssetTable | undefined> {
     const recordIndexFile = await readFile(assetsDir, ASSET_RECORD_INDEX_FILE)
-    if (!recordIndexFile) retun undefined
+    if (!recordIndexFile) return undefined
     const header = readBinaryHeader(
       await readFileRange(recordIndexFile, 0, ASSET_TABLE_HEADER_SIZE),
       ASSET_TABLE_MAGIC,
     )
-    if (!header || header.entrySize !== ASSET_RECORD_INDEX_ENTRY_SIZE) retun undefined
-    retun new AssetTable(assetsDir, header, recordIndexFile)
+    if (!header || header.entrySize !== ASSET_RECORD_INDEX_ENTRY_SIZE) return undefined
+    return new AssetTable(assetsDir, header, recordIndexFile)
   }
 
   get count(): number {
-    retun this.header.count
+    return this.header.count
   }
 
   get catalogVersion(): number {
-    retun this.header.catalogVersion
+    return this.header.catalogVersion
   }
 
   async read(assetId: number): Promise<{ item?: MediaItem; metrics: AssetTableMetrics }> {
     if (assetId < 0 || assetId >= this.header.count) {
-      retun { metrics: { diskReadBytes: 0, diskReadCount: 0 } }
+      return { metrics: { diskReadBytes: 0, diskReadCount: 0 } }
     }
     const indexOffset =
       ASSET_TABLE_HEADER_SIZE + assetId * ASSET_RECORD_INDEX_ENTRY_SIZE
@@ -1138,7 +1138,7 @@ export class AssetTable {
     const recordOffset = entry.getUint32(4, true)
     const recordLength = entry.getUint32(8, true)
     if (recordLength === 0) {
-      retun {
+      return {
         metrics: {
           diskReadBytes: ASSET_RECORD_INDEX_ENTRY_SIZE,
           diskReadCount: 1,
@@ -1148,7 +1148,7 @@ export class AssetTable {
     const chunkName = `${ASSET_CHUNK_PREFIX}${String(chunkId).padStart(6, '0')}${ASSET_BINARY_CHUNK_EXTENSION}`
     const chunkFile = await readFile(this.assetsDir, chunkName)
     if (!chunkFile) {
-      retun {
+      return {
         metrics: {
           diskReadBytes: ASSET_RECORD_INDEX_ENTRY_SIZE,
           diskReadCount: 1,
@@ -1159,7 +1159,7 @@ export class AssetTable {
     const item = mediaFromUnknown(
       JSON.parse(textDecoder.decode(new Uint8Array(payload))) as unknown,
     )
-    retun {
+    return {
       item,
       metrics: {
         diskReadBytes: ASSET_RECORD_INDEX_ENTRY_SIZE + recordLength,
@@ -1173,7 +1173,7 @@ export class AssetTable {
     metrics: AssetTableMetrics
   }> {
     const result = await this.readByAssetIds([...assetIds])
-    retun {
+    return {
       items: result.items.map(({ item }) => item),
       metrics: result.metrics,
     }
@@ -1193,7 +1193,7 @@ export class AssetTable {
         ),
       ),
     ).sort((left, right) => left - right)
-    if (validIds.length === 0) retun { items: [], metrics }
+    if (validIds.length === 0) return { items: [], metrics }
 
     const entries: AssetRecordEntry[] = []
     for (let rangeStartIndex = 0; rangeStartIndex < validIds.length;) {
@@ -1257,10 +1257,10 @@ export class AssetTable {
       }
     }
 
-    retun {
+    return {
       items: assetIds.flatMap((assetId) => {
         const item = itemByAssetId.get(assetId)
-        retun item ? [{ assetId, item }] : []
+        return item ? [{ assetId, item }] : []
       }),
       metrics,
     }
@@ -1305,13 +1305,13 @@ class AssetIdMap {
 
   static async open(assetsDir: FileSystemDirectoryHandle): Promise<AssetIdMap | undefined> {
     const file = await readFile(assetsDir, ASSET_ID_MAP_FILE)
-    if (!file) retun undefined
+    if (!file) return undefined
     const header = readBinaryHeader(
       await readFileRange(file, 0, ASSET_ID_MAP_HEADER_SIZE),
       ASSET_ID_MAP_MAGIC,
     )
-    if (!header || header.entrySize !== ASSET_ID_MAP_ENTRY_SIZE) retun undefined
-    retun new AssetIdMap(header, file)
+    if (!header || header.entrySize !== ASSET_ID_MAP_ENTRY_SIZE) return undefined
+    return new AssetIdMap(header, file)
   }
 
   async findAssetId(contentHash: string): Promise<number | undefined> {
@@ -1325,17 +1325,17 @@ class AssetIdMap {
       const key = bytes.slice(0, 64)
       const comparison = compareHashBytes(key, target)
       if (comparison === 0) {
-        retun getUint64(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), 64)
+        return getUint64(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), 64)
       }
       if (comparison < 0) low = middle + 1
       else high = middle - 1
     }
-    retun undefined
+    return undefined
   }
 }
 
 function expectedPackedRecordSize(kind: number): number {
-  retun kind === INDEX_KIND_TIME_GEO ? TIME_GEO_RECORD_SIZE : 0
+  return kind === INDEX_KIND_TIME_GEO ? TIME_GEO_RECORD_SIZE : 0
 }
 
 export function encodeTimeGeoIndexForTests(
@@ -1370,7 +1370,7 @@ export function encodeTimeGeoIndexForTests(
     view.setUint32(offset + 12, record.assetId, true)
     view.setUint8(offset + 16, record.kindFlags)
   }
-  retun bytes.buffer
+  return bytes.buffer
 }
 
 export const catalogWorkerTestConstants = {
@@ -1401,14 +1401,14 @@ function parsePackedIndexHeader(
   expectedKind: number,
   indexSizeBytes: number,
 ): PackedIndexHeader | undefined {
-  if (bytes.byteLength < PACKED_INDEX_HEADER_SIZE) retun undefined
+  if (bytes.byteLength < PACKED_INDEX_HEADER_SIZE) return undefined
   const header = new DataView(bytes)
-  if (header.getUint32(0, true) !== PACKED_INDEX_MAGIC) retun undefined
-  if (header.getUint32(4, true) !== BINARY_SCHEMA_VERSION) retun undefined
+  if (header.getUint32(0, true) !== PACKED_INDEX_MAGIC) return undefined
+  if (header.getUint32(4, true) !== BINARY_SCHEMA_VERSION) return undefined
   const kind = header.getUint32(40, true)
-  if (kind !== expectedKind) retun undefined
+  if (kind !== expectedKind) return undefined
   const recordSize = header.getUint32(36, true)
-  if (recordSize !== expectedPackedRecordSize(expectedKind)) retun undefined
+  if (recordSize !== expectedPackedRecordSize(expectedKind)) return undefined
   const catalogVersion = header.getFloat64(8, true)
   const assetCount = header.getFloat64(16, true)
   const entryCount = header.getFloat64(24, true)
@@ -1420,11 +1420,11 @@ function parsePackedIndexHeader(
     assetCount < 0 ||
     entryCount < 0
   ) {
-    retun undefined
+    return undefined
   }
   const expectedByteLength = PACKED_INDEX_HEADER_SIZE + entryCount * recordSize
-  if (indexSizeBytes !== expectedByteLength) retun undefined
-  retun {
+  if (indexSizeBytes !== expectedByteLength) return undefined
+  return {
     catalogVersion,
     assetCount,
     entryCount,
@@ -1460,15 +1460,15 @@ export class ResidentPackedGeoIndex {
     expectedKind: number,
   ): ResidentPackedGeoIndex | undefined {
     const header = parsePackedIndexHeader(bytes, expectedKind, bytes.byteLength)
-    retun header ? new ResidentPackedGeoIndex(header, bytes) : undefined
+    return header ? new ResidentPackedGeoIndex(header, bytes) : undefined
   }
 
   private recordOffset(index: number): number {
-    retun PACKED_INDEX_HEADER_SIZE + index * this.recordSize
+    return PACKED_INDEX_HEADER_SIZE + index * this.recordSize
   }
 
   private readRecord(offset: number): PackedIndexRecord {
-    retun {
+    return {
       timestampSec: this.view.getUint32(offset, true),
       latE7: this.view.getInt32(offset + 4, true),
       lonE7: this.view.getInt32(offset + 8, true),
@@ -1478,7 +1478,7 @@ export class ResidentPackedGeoIndex {
   }
 
   private readRecordAt(index: number): PackedIndexRecord {
-    retun this.readRecord(this.recordOffset(index))
+    return this.readRecord(this.recordOffset(index))
   }
 
   private lowerBound(isBeforeTarget: (record: PackedIndexRecord) => boolean): number {
@@ -1490,7 +1490,7 @@ export class ResidentPackedGeoIndex {
       if (isBeforeTarget(record)) low = middle + 1
       else high = middle
     }
-    retun low
+    return low
   }
 
   async scanTimeRange(
@@ -1501,7 +1501,7 @@ export class ResidentPackedGeoIndex {
   ): Promise<PackedIndexMetrics> {
     const start = this.lowerBound((record) => record.timestampSec < minTimestampSec)
     const end = this.lowerBound((record) => record.timestampSec <= maxTimestampSec)
-    retun this.scanRecordRange(start, end, direction, onRecord)
+    return this.scanRecordRange(start, end, direction, onRecord)
   }
 
   async scanMapPoints(
@@ -1518,7 +1518,7 @@ export class ResidentPackedGeoIndex {
     const points: MapPoint[] = []
     const metrics = { pagesRead: 0, diskReadBytes: 0, candidatesInspected: 0 }
     if (end <= start) {
-      retun { points, limitReached: false, metrics }
+      return { points, limitReached: false, metrics }
     }
 
     const acceptedKindMask =
@@ -1588,7 +1588,7 @@ export class ResidentPackedGeoIndex {
               timestamp: view.getUint32(recordOffset, true) * 1000,
             })
             if (points.length >= maxPoints) {
-              retun { points: points.slice(0, limit), limitReached: true, metrics }
+              return { points: points.slice(0, limit), limitReached: true, metrics }
             }
           }
           matched += 1
@@ -1596,7 +1596,7 @@ export class ResidentPackedGeoIndex {
         chunkEnd = chunkStart
         if (chunkEnd > start) await yieldToEventLoop()
       }
-      retun { points, limitReached: false, metrics }
+      return { points, limitReached: false, metrics }
     }
 
     for (let chunkStart = start; chunkStart < end;) {
@@ -1634,7 +1634,7 @@ export class ResidentPackedGeoIndex {
             timestamp: view.getUint32(recordOffset, true) * 1000,
           })
           if (points.length >= maxPoints) {
-            retun { points: points.slice(0, limit), limitReached: true, metrics }
+            return { points: points.slice(0, limit), limitReached: true, metrics }
           }
         }
         matched += 1
@@ -1642,7 +1642,7 @@ export class ResidentPackedGeoIndex {
       chunkStart = chunkEnd
       if (chunkStart < end) await yieldToEventLoop()
     }
-    retun { points, limitReached: false, metrics }
+    return { points, limitReached: false, metrics }
   }
 
   async scanAssetIds(
@@ -1658,7 +1658,7 @@ export class ResidentPackedGeoIndex {
     const metrics = { pagesRead: 0, diskReadBytes: 0, candidatesInspected: 0 }
     const assetIds: number[] = []
     if (end <= start || limit <= 0) {
-      retun { assetIds, limitReached: false, metrics }
+      return { assetIds, limitReached: false, metrics }
     }
 
     const acceptedKindMask =
@@ -1712,7 +1712,7 @@ export class ResidentPackedGeoIndex {
           }
           assetIds.push(view.getUint32(recordOffset + 12, true))
           if (assetIds.length >= maxAssetIds) {
-            retun {
+            return {
               assetIds: assetIds.slice(0, limit),
               limitReached: true,
               metrics,
@@ -1722,7 +1722,7 @@ export class ResidentPackedGeoIndex {
         chunkEnd = chunkStart
         if (chunkEnd > start) await yieldToEventLoop()
       }
-      retun { assetIds, limitReached: false, metrics }
+      return { assetIds, limitReached: false, metrics }
     }
 
     for (let chunkStart = start; chunkStart < end;) {
@@ -1745,7 +1745,7 @@ export class ResidentPackedGeoIndex {
         }
         assetIds.push(view.getUint32(recordOffset + 12, true))
         if (assetIds.length >= maxAssetIds) {
-          retun {
+          return {
             assetIds: assetIds.slice(0, limit),
             limitReached: true,
             metrics,
@@ -1755,7 +1755,7 @@ export class ResidentPackedGeoIndex {
       chunkStart = chunkEnd
       if (chunkStart < end) await yieldToEventLoop()
     }
-    retun { assetIds, limitReached: false, metrics }
+    return { assetIds, limitReached: false, metrics }
   }
 
   private async scanRecordRange(
@@ -1765,7 +1765,7 @@ export class ResidentPackedGeoIndex {
     onRecord: (record: PackedIndexRecord) => Promise<boolean>,
   ): Promise<PackedIndexMetrics> {
     const metrics = { pagesRead: 0, diskReadBytes: 0, candidatesInspected: 0 }
-    if (end <= start) retun metrics
+    if (end <= start) return metrics
     if (direction === 'desc') {
       for (let offset = end; offset > start;) {
         const count = Math.min(PACKED_SCAN_RECORDS, offset - start)
@@ -1776,12 +1776,12 @@ export class ResidentPackedGeoIndex {
           const shouldContinue = await onRecord(
             this.readRecord(this.recordOffset(first + index)),
           )
-          if (!shouldContinue) retun metrics
+          if (!shouldContinue) return metrics
         }
         offset = first
         await yieldToEventLoop()
       }
-      retun metrics
+      return metrics
     }
     for (let offset = start; offset < end; offset += PACKED_SCAN_RECORDS) {
       const count = Math.min(PACKED_SCAN_RECORDS, end - offset)
@@ -1791,11 +1791,11 @@ export class ResidentPackedGeoIndex {
         const shouldContinue = await onRecord(
           this.readRecord(this.recordOffset(offset + index)),
         )
-        if (!shouldContinue) retun metrics
+        if (!shouldContinue) return metrics
       }
       await yieldToEventLoop()
     }
-    retun metrics
+    return metrics
   }
 }
 
@@ -1818,7 +1818,7 @@ class FileCatalogStore implements CatalogStore {
 
   async init(): Promise<InitResult> {
     await this.ensureManifest()
-    retun {
+    return {
       storageMode: 'file',
       filename: `opfs://${CATALOG_DIR}`,
     }
@@ -1837,10 +1837,10 @@ class FileCatalogStore implements CatalogStore {
   }
 
   async upsertMedia(items: MediaItem[]): Promise<number> {
-    if (items.length === 0) retun 0
+    if (items.length === 0) return 0
     await this.writeMediaBatch(items)
     this.scheduleBackgroundCatalogIndexing()
-    retun items.length
+    return items.length
   }
 
   async prepareImportSource(
@@ -1874,7 +1874,7 @@ class FileCatalogStore implements CatalogStore {
   }
 
   async writeMediaBatch(items: MediaItem[]): Promise<MediaBatchWriteResult> {
-    if (items.length === 0) retun { written: 0 }
+    if (items.length === 0) return { written: 0 }
     const manifest = await this.ensureManifest()
     const chunkId = `chunk-${String(manifest.nextChunkId).padStart(6, '0')}`
     manifest.nextChunkId += 1
@@ -1904,7 +1904,7 @@ class FileCatalogStore implements CatalogStore {
     manifest.occurrenceCount += occurrences.length
     await this.markDirty()
     if (this.transactionDepth === 0) this.scheduleBackgroundCatalogIndexing()
-    retun { written: items.length }
+    return { written: items.length }
   }
 
   async commitImport(): Promise<void> {
@@ -1915,7 +1915,7 @@ class FileCatalogStore implements CatalogStore {
     this.transactionDepth += 1
     try {
       const result = await run()
-      retun result
+      return result
     } finally {
       this.transactionDepth -= 1
       if (this.transactionDepth === 0) {
@@ -1926,14 +1926,14 @@ class FileCatalogStore implements CatalogStore {
   }
 
   async listMedia(query: CatalogQuery): Promise<MediaItem[]> {
-    retun (await this.searchRows(query)).items
+    return (await this.searchRows(query)).items
   }
 
   async searchMedia(
     spec: SearchSpec,
     isCancelled: CancellationSignal = neverCancelled,
   ): Promise<SearchPage> {
-    retun createSearchRegistry(
+    return createSearchRegistry(
       (query, indexId, isSearchCancelled) =>
         this.searchRows(query, indexId, isSearchCancelled),
       (ids) => this.getMediaByIds(ids),
@@ -1971,7 +1971,7 @@ class FileCatalogStore implements CatalogStore {
     )
     const queryIndexScanMs = performance.now() - scanStartedAt
     throwIfCancelled(isCancelled)
-    retun {
+    return {
       points: page.points,
       limitReached: page.limitReached,
       resultMetrics: withQueryMetrics(
@@ -1999,14 +1999,14 @@ class FileCatalogStore implements CatalogStore {
   }
 
   async getMediaByIds(ids: string[]): Promise<MediaItem[]> {
-    if (ids.length === 0) retun []
+    if (ids.length === 0) return []
     const assetTable = await this.openAssetTable()
     const idMap = await this.openAssetIdMap()
     if (!assetTable || !idMap) {
       const catalog = await this.ensureMaterialized()
-      retun ids.flatMap((id) => {
+      return ids.flatMap((id) => {
         const item = catalog.byId.get(id)
-        retun item ? [item] : []
+        return item ? [item] : []
       })
     }
     const assetIds: number[] = []
@@ -2014,34 +2014,34 @@ class FileCatalogStore implements CatalogStore {
       const assetId = await idMap.findAssetId(id)
       if (assetId !== undefined) assetIds.push(assetId)
     }
-    retun (await assetTable.readByAssetIds(assetIds)).items.map(({ item }) => item)
+    return (await assetTable.readByAssetIds(assetIds)).items.map(({ item }) => item)
   }
 
   async getMediaByAssetIds(assetIds: number[]): Promise<AssetMediaResult[]> {
-    if (assetIds.length === 0) retun []
+    if (assetIds.length === 0) return []
     const assetTable = await this.openAssetTable()
     if (!assetTable) {
       const catalog = await this.ensureMaterialized()
-      retun assetIds.flatMap((assetId) => {
+      return assetIds.flatMap((assetId) => {
         const item = catalog.assets[assetId]
-        retun item ? [{ assetId, item }] : []
+        return item ? [{ assetId, item }] : []
       })
     }
-    retun (await assetTable.readByAssetIds(assetIds)).items
+    return (await assetTable.readByAssetIds(assetIds)).items
   }
 
   async getGeoPoints(range: TimeRange = {}): Promise<GeoIndexPoint[]> {
     const assetTable = await this.openAssetTable()
     if (!assetTable) {
       const catalog = await this.ensureMaterialized()
-      retun catalog.geoPoints.filter((point) => {
+      return catalog.geoPoints.filter((point) => {
         if (range.startTime !== undefined) {
-          if (point.timestamp === undefined || point.timestamp < range.startTime) retun false
+          if (point.timestamp === undefined || point.timestamp < range.startTime) return false
         }
         if (range.endTime !== undefined) {
-          if (point.timestamp === undefined || point.timestamp > range.endTime) retun false
+          if (point.timestamp === undefined || point.timestamp > range.endTime) return false
         }
-        retun true
+        return true
       })
     }
     const points: GeoIndexPoint[] = []
@@ -2063,7 +2063,7 @@ class FileCatalogStore implements CatalogStore {
       if (range.startTime !== undefined && point.timestamp === undefined) continue
       points.push(point)
     }
-    retun points
+    return points
   }
 
   async forEachGeoPointBatch(
@@ -2092,7 +2092,7 @@ class FileCatalogStore implements CatalogStore {
         }
       }
       if (batch.length > 0) await onBatch(batch, processed)
-      retun processed
+      return processed
     }
     const points = await this.getGeoPoints()
     for (let offset = 0; offset < points.length; offset += batchSize) {
@@ -2100,7 +2100,7 @@ class FileCatalogStore implements CatalogStore {
       await onBatch(batch, Math.min(points.length, offset + batch.length))
       await yieldToEventLoop()
     }
-    retun points.length
+    return points.length
   }
 
   async forEachGeoAssetBatch(
@@ -2135,15 +2135,15 @@ class FileCatalogStore implements CatalogStore {
       }
     }
     if (batch.length > 0) await onBatch(batch, processed)
-    retun processed
+    return processed
   }
 
   residentDistanceIndexStore(): ResidentPackedDistanceStore {
-    retun createOpfsResidentDistanceIndexStore()
+    return createOpfsResidentDistanceIndexStore()
   }
 
   async catalogEpoch(): Promise<number> {
-    retun (await this.ensureManifest()).catalogVersion
+    return (await this.ensureManifest()).catalogVersion
   }
 
   async buildSearchIndexes(
@@ -2152,9 +2152,9 @@ class FileCatalogStore implements CatalogStore {
     postProgress: (progress: GeoIndexBuildProgress) => void,
   ): Promise<GeoIndexBuildSummary & { engineCount: number }> {
     if (isFileCatalogIndexId(indexId)) {
-      retun this.buildFileCatalogIndexes(indexId, postProgress)
+      return this.buildFileCatalogIndexes(indexId, postProgress)
     }
-    retun buildSearchIndexes(this, indexId, forceRebuild, postProgress)
+    return buildSearchIndexes(this, indexId, forceRebuild, postProgress)
   }
 
   async getSearchIndexStats(): Promise<SearchIndexStats[]> {
@@ -2170,7 +2170,7 @@ class FileCatalogStore implements CatalogStore {
       this,
       'segmented-ball-tree',
     )
-    retun stats.map((entry) =>
+    return stats.map((entry) =>
       entry.engineId === 'file-time-geo'
         ? timeGeoStats
         : entry.engineId === 'segmented-ball-tree'
@@ -2180,7 +2180,7 @@ class FileCatalogStore implements CatalogStore {
   }
 
   async countMedia(): Promise<number> {
-    retun (await this.ensureManifest()).assetCount
+    return (await this.ensureManifest()).assetCount
   }
 
   async clear(): Promise<void> {
@@ -2194,11 +2194,11 @@ class FileCatalogStore implements CatalogStore {
   }
 
   private async openAssetTable(): Promise<AssetTable | undefined> {
-    retun AssetTable.open(await childDirectory(await rootDirectory(), 'assets'))
+    return AssetTable.open(await childDirectory(await rootDirectory(), 'assets'))
   }
 
   private async openAssetIdMap(): Promise<AssetIdMap | undefined> {
-    retun AssetIdMap.open(await childDirectory(await rootDirectory(), 'assets'))
+    return AssetIdMap.open(await childDirectory(await rootDirectory(), 'assets'))
   }
 
   private clearResidentPackedIndexes(): void {
@@ -2211,9 +2211,9 @@ class FileCatalogStore implements CatalogStore {
     const spec = fileCatalogIndexSpec()
     const indexesDir = await childDirectory(await rootDirectory(), 'indexes')
     const file = await readFile(indexesDir, spec.fileName)
-    if (!file) retun undefined
+    if (!file) return undefined
     const headerBuffer = await readFileRange(file, 0, PACKED_INDEX_HEADER_SIZE)
-    retun parsePackedIndexHeader(headerBuffer, spec.kind, file.size)
+    return parsePackedIndexHeader(headerBuffer, spec.kind, file.size)
   }
 
   private async loadResidentPackedIndex(
@@ -2233,11 +2233,11 @@ class FileCatalogStore implements CatalogStore {
     if (index.catalogVersion !== catalogVersion) {
       throw new Error(`${spec.label} file is stale.`)
     }
-    retun index
+    return index
   }
 
   private residentIndexesCurrent(catalogVersion: number): boolean {
-    retun this.residentPackedIndexes.get('file-time-geo')?.catalogVersion === catalogVersion
+    return this.residentPackedIndexes.get('file-time-geo')?.catalogVersion === catalogVersion
   }
 
   private async ensureResidentPackedIndexes(): Promise<void> {
@@ -2249,7 +2249,7 @@ class FileCatalogStore implements CatalogStore {
       this.clearResidentPackedIndexes()
       throw new Error('Catalog indexes are not current. Update the indexes before querying.')
     }
-    if (this.residentIndexesCurrent(manifest.catalogVersion)) retun
+    if (this.residentIndexesCurrent(manifest.catalogVersion)) return
     if (this.residentPackedIndexLoadError) {
       throw this.residentPackedIndexLoadError
     }
@@ -2271,7 +2271,7 @@ class FileCatalogStore implements CatalogStore {
         'Catalog indexes could not be loaded into memory. Rebuild indexes or reduce catalog size.',
       )
     }
-    retun index
+    return index
   }
 
   private async loadAllResidentPackedIndexes(catalogVersion: number): Promise<void> {
@@ -2299,7 +2299,7 @@ class FileCatalogStore implements CatalogStore {
   }
 
   private scheduleResidentPackedIndexPreload(): void {
-    if (this.residentPackedIndexLoadPromise || this.residentPackedIndexLoadError) retun
+    if (this.residentPackedIndexLoadPromise || this.residentPackedIndexLoadError) return
     void this.ensureResidentPackedIndexes().catch((caught) => {
       console.error('[geo-index:worker] resident packed index preload failed', caught)
     })
@@ -2318,7 +2318,7 @@ class FileCatalogStore implements CatalogStore {
     if (!assetTable) {
       throw new Error('Catalog asset table is missing. Finish the import before querying.')
     }
-    retun this.searchTimeGeoRows(assetTable, index, query, isCancelled)
+    return this.searchTimeGeoRows(assetTable, index, query, isCancelled)
   }
 
   private async searchTimeGeoRows(
@@ -2378,7 +2378,7 @@ class FileCatalogStore implements CatalogStore {
     }
 
     throwIfCancelled(isCancelled)
-    retun {
+    return {
       items,
       metrics: {
         pagesRead: indexMetrics?.pagesRead ?? 0,
@@ -2413,21 +2413,21 @@ class FileCatalogStore implements CatalogStore {
     }
     if (isFileCatalogIndexId(indexId)) {
       await this.ensureResidentPackedIndexes()
-      retun this.fileCatalogIndexStats(indexId)
+      return this.fileCatalogIndexStats(indexId)
     }
     if (isResidentDistanceEngineId(indexId)) {
       const catalogVersion = await this.catalogEpoch()
       await residentDistanceIndex(this, indexId).ensureResident(catalogVersion)
-      retun residentDistanceStatusStats(this, indexId)
+      return residentDistanceStatusStats(this, indexId)
     }
-    retun stats
+    return stats
   }
 
   private async ensureManifest(): Promise<CatalogManifest> {
-    if (this.manifest) retun this.manifest
+    if (this.manifest) return this.manifest
     const text = await readTextFile(await rootDirectory(), MANIFEST_FILE)
     this.manifest = text ? normalizeManifest(JSON.parse(text)) : emptyManifest()
-    retun this.manifest
+    return this.manifest
   }
 
   private async saveManifest(): Promise<void> {
@@ -2453,7 +2453,7 @@ class FileCatalogStore implements CatalogStore {
   }
 
   private scheduleBackgroundCatalogIndexing(): void {
-    if (this.backgroundIndexPromise) retun
+    if (this.backgroundIndexPromise) return
     this.backgroundIndexPromise = this.applyCatalogIndexJounal(postBackgroundIndexProgress)
       .catch((error) => {
         console.error('[geo-index:worker] background catalog indexing failed', error)
@@ -2467,7 +2467,7 @@ class FileCatalogStore implements CatalogStore {
     postProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<void> {
     const manifest = await this.ensureManifest()
-    if (manifest.indexAppliedVersion === manifest.catalogVersion) retun
+    if (manifest.indexAppliedVersion === manifest.catalogVersion) return
     manifest.indexJob = {
       status: 'indexing',
       pendingSince: manifest.indexJob?.pendingSince,
@@ -2519,16 +2519,16 @@ class FileCatalogStore implements CatalogStore {
       this.materialized.version === manifest.catalogVersion &&
       manifest.materializedVersion === manifest.catalogVersion
     ) {
-      retun this.materialized
+      return this.materialized
     }
     if (manifest.materializedVersion === manifest.catalogVersion) {
       const loaded = await this.loadMaterialized()
       if (loaded) {
         this.materialized = loaded
-        retun loaded
+        return loaded
       }
     }
-    retun this.materialize()
+    return this.materialize()
   }
 
   private async loadMaterialized(): Promise<MaterializedCatalog | undefined> {
@@ -2539,7 +2539,7 @@ class FileCatalogStore implements CatalogStore {
     if (assetTable && assetTable.catalogVersion === manifest.catalogVersion) {
       const assets: MediaItem[] = []
       for await (const { item } of assetTable.scan()) assets.push(item)
-      retun this.createMaterializedCatalog(manifest.catalogVersion, assets)
+      return this.createMaterializedCatalog(manifest.catalogVersion, assets)
     }
     const entries = await directoryEntries(assetsDir)
     const chunkNames = entries
@@ -2566,15 +2566,15 @@ class FileCatalogStore implements CatalogStore {
       }
     } else {
       const text = await readTextFile(assetsDir, ASSETS_FILE)
-      if (!text) retun undefined
+      if (!text) return undefined
       const parsed = JSON.parse(text) as unknown
-      if (!Array.isArray(parsed)) retun undefined
+      if (!Array.isArray(parsed)) return undefined
       for (const value of parsed) {
         const item = mediaFromUnknown(value)
         if (item) assets.push(item)
       }
     }
-    retun this.createMaterializedCatalog(manifest.catalogVersion, assets)
+    return this.createMaterializedCatalog(manifest.catalogVersion, assets)
   }
 
   private async materialize(
@@ -2710,7 +2710,7 @@ class FileCatalogStore implements CatalogStore {
       currentIndexTotalPoints: materialized.assets.length,
     })
     this.materialized = undefined
-    retun materialized
+    return materialized
   }
 
   private async writeMaterializedCatalogFiles(
@@ -3133,7 +3133,7 @@ class FileCatalogStore implements CatalogStore {
       currentIndexProcessedPoints: manifest.assetCount,
       currentIndexTotalPoints: manifest.assetCount,
     })
-    retun {
+    return {
       pointCount: manifest.assetCount,
       buildTimeMs: performance.now() - startedAt,
       engineCount: 1,
@@ -3160,7 +3160,7 @@ class FileCatalogStore implements CatalogStore {
       this.scheduleResidentPackedIndexPreload()
     }
 
-    retun {
+    return {
       ...defaultSearchStats(
         indexId,
         fileCatalogIndexSpec().label,
@@ -3195,8 +3195,8 @@ class FileCatalogStore implements CatalogStore {
       : assets.map((item) => normalizeMediaItem(item, item.locations))
     const byId = new Map(normalized.map((item) => [item.id, item]))
     const geoPoints = normalized.flatMap((item) => {
-      if (item.latitude === undefined || item.longitude === undefined) retun []
-      retun [
+      if (item.latitude === undefined || item.longitude === undefined) return []
+      return [
         {
           mediaId: item.id,
           kind: item.kind,
@@ -3206,7 +3206,7 @@ class FileCatalogStore implements CatalogStore {
         },
       ]
     })
-    retun {
+    return {
       version,
       assets: normalized,
       byId,
@@ -3221,7 +3221,7 @@ async function residentDistanceIndexOpfsDirectory(
   const root = await rootDirectory()
   const indexes = await childDirectory(root, 'indexes')
   const engine = await childDirectory(indexes, engineId)
-  retun childDirectory(engine, 'v3')
+  return childDirectory(engine, 'v3')
 }
 
 async function residentDistanceIndexEngineDirectory(
@@ -3229,16 +3229,16 @@ async function residentDistanceIndexEngineDirectory(
 ): Promise<FileSystemDirectoryHandle> {
   const root = await rootDirectory()
   const indexes = await childDirectory(root, 'indexes')
-  retun childDirectory(indexes, engineId)
+  return childDirectory(indexes, engineId)
 }
 
 function createOpfsResidentDistanceIndexStore(): ResidentPackedDistanceStore {
-  retun {
+  return {
     async readManifest(engineId) {
       const directory = await residentDistanceIndexOpfsDirectory(engineId)
       const file = await readFile(directory, 'manifest.json')
-      if (!file) retun undefined
-      retun JSON.parse(await file.text()) as ResidentPackedDistanceManifest
+      if (!file) return undefined
+      return JSON.parse(await file.text()) as ResidentPackedDistanceManifest
     },
     async writeManifest(engineId, manifest) {
       const directory = await residentDistanceIndexOpfsDirectory(engineId)
@@ -3246,7 +3246,7 @@ function createOpfsResidentDistanceIndexStore(): ResidentPackedDistanceStore {
     },
     async readIndex(engineId) {
       const directory = await residentDistanceIndexOpfsDirectory(engineId)
-      retun (await readFile(directory, 'index.bin'))?.arrayBuffer()
+      return (await readFile(directory, 'index.bin'))?.arrayBuffer()
     },
     async writeIndex(engineId, data) {
       const directory = await residentDistanceIndexOpfsDirectory(engineId)
@@ -3293,7 +3293,7 @@ async function buildSearchIndexes(
         currentIndexId: selectedIndexId,
         currentIndexLabel: distanceIndex.label,
       })
-      retun {
+      return {
         pointCount: stats.pointCount,
         buildTimeMs: performance.now() - startedAt,
         engineCount: 1,
@@ -3325,7 +3325,7 @@ async function buildSearchIndexes(
     currentIndexId: selectedIndexId,
     currentIndexLabel: distanceIndex.label,
   })
-  retun {
+  return {
     pointCount,
     buildTimeMs: performance.now() - startedAt,
     engineCount: 1,
@@ -3334,24 +3334,24 @@ async function buildSearchIndexes(
 
 export async function fileContentHash(file: File): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
-  retun bytesToHex(new Uint8Array(digest))
+  return bytesToHex(new Uint8Array(digest))
 }
 
 function bytesToHex(bytes: Uint8Array): string {
-  retun [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
 async function stableId(...parts: string[]): Promise<string> {
-  retun sha256Hex(new TextEncoder().encode(parts.join('\n')).buffer)
+  return sha256Hex(new TextEncoder().encode(parts.join('\n')).buffer)
 }
 
 async function stableOccurrenceId(sourceId: string, relativePath: string): Promise<string> {
-  retun stableId(sourceId, relativePath)
+  return stableId(sourceId, relativePath)
 }
 
 async function writeThumbnail(id: string, file: File): Promise<string | undefined> {
   if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas === 'undefined') {
-    retun undefined
+    return undefined
   }
   try {
     const bitmap = await createImageBitmap(file)
@@ -3361,7 +3361,7 @@ async function writeThumbnail(id: string, file: File): Promise<string | undefine
     const height = Math.max(1, Math.round(bitmap.height * scale))
     const canvas = new OffscreenCanvas(width, height)
     const context = canvas.getContext('2d')
-    if (!context) retun undefined
+    if (!context) return undefined
     context.drawImage(bitmap, 0, 0, width, height)
     bitmap.close()
     const blob = await canvas.convertToBlob({
@@ -3372,9 +3372,9 @@ async function writeThumbnail(id: string, file: File): Promise<string | undefine
     const thumbs = await childDirectory(root, 'thumbs')
     const key = `${id}.webp`
     await writeFile(thumbs, key, blob)
-    retun `thumbs/${key}`
+    return `thumbs/${key}`
   } catch {
-    retun undefined
+    return undefined
   }
 }
 
@@ -3393,7 +3393,7 @@ async function readImageMetadata(file: File): Promise<{
     })
     .catch(() => undefined)
   const record = isRecord(metadata) ? metadata : {}
-  retun {
+  return {
     latitude: numeric(record.latitude) ?? numeric(record.GPSLatitude),
     longitude: numeric(record.longitude) ?? numeric(record.GPSLongitude),
     timestamp:
@@ -3413,7 +3413,7 @@ async function mediaFromFile(
 ): Promise<MediaItem | undefined> {
   const file = await fileHandle.getFile()
   const kind = detectMediaKind(file)
-  if (!kind || kind === 'geo_point') retun undefined
+  if (!kind || kind === 'geo_point') return undefined
   const contentHash = await fileContentHash(file)
   const locationId = await stableOccurrenceId(sourceId, relativePath)
   const location: MediaLocation = {
@@ -3434,14 +3434,14 @@ async function mediaFromFile(
     locations: [location],
   }
   if (kind === 'video') {
-    retun {
+    return {
       ...base,
       timestamp: file.lastModified || undefined,
     }
   }
   const imageMetadata = await readImageMetadata(file)
   const thumbnailKey = await writeThumbnail(contentHash, file)
-  retun {
+  return {
     ...base,
     ...imageMetadata,
     timestamp: imageMetadata.timestamp ?? file.lastModified ?? undefined,
@@ -3450,7 +3450,7 @@ async function mediaFromFile(
 }
 
 function geoPointLocationId(sourceId: string, contentHash: string): string {
-  retun `geo_point_location:v1:${sourceId}:${contentHash}`
+  return `geo_point_location:v1:${sourceId}:${contentHash}`
 }
 
 function geoPointItemFromParsedPoint(
@@ -3470,7 +3470,7 @@ function geoPointItemFromParsedPoint(
     sourceLabel,
     pointIndex: point.index,
   }
-  retun {
+  return {
     id: contentHash,
     contentHash,
     sourceId,
@@ -3492,7 +3492,7 @@ function geoPointItemsFromParsedPoints(
   mimeType: string,
   points: ParsedGeoPoint[],
 ): MediaItem[] {
-  retun points.map((point) =>
+  return points.map((point) =>
     geoPointItemFromParsedPoint(sourceId, sourceLabel, mimeType, point),
   )
 }
@@ -3525,7 +3525,7 @@ async function importFolderIntoCatalog(
   })
 
   const flushBatch = async (phase: ImportProgress['phase']) => {
-    if (batch.length === 0) retun
+    if (batch.length === 0) return
     const items = batch.splice(0)
     await store.writeMediaBatch(items)
     postProgress({
@@ -3542,7 +3542,7 @@ async function importFolderIntoCatalog(
     for await (const [, entry] of directoryHandle.entries()) {
       if (isCancelled()) {
         cancelled = true
-        retun
+        return
       }
       if (entry.kind === 'directory') {
         await countFiles(entry as FileSystemDirectoryHandle)
@@ -3556,12 +3556,12 @@ async function importFolderIntoCatalog(
     for await (const [name, entry] of directoryHandle.entries()) {
       if (isCancelled()) {
         cancelled = true
-        retun
+        return
       }
       const relativePath = prefix ? `${prefix}/${name}` : name
       if (entry.kind === 'directory') {
         await walk(entry as FileSystemDirectoryHandle, relativePath)
-        if (cancelled) retun
+        if (cancelled) return
         continue
       }
       scannedFiles += 1
@@ -3608,13 +3608,13 @@ async function importFolderIntoCatalog(
     skippedFiles,
   })
   await countFiles(handle)
-  if (cancelled) retun summary()
+  if (cancelled) return summary()
   await store.prepareImportSource(source, duplicateSourceIds)
   await store.withImportTransaction(async () => {
     await walk(handle, '')
     await flushBatch('storing')
   })
-  retun summary()
+  return summary()
 }
 
 async function readFileTextWithProgress(
@@ -3631,7 +3631,7 @@ async function readFileTextWithProgress(
   while (true) {
     if (isCancelled()) {
       await reader.cancel()
-      retun { text: '', cancelled: true }
+      return { text: '', cancelled: true }
     }
     const { done, value } = await reader.read()
     if (done) break
@@ -3655,12 +3655,12 @@ async function readFileTextWithProgress(
   }
   const finalChunk = decoder.decode()
   if (finalChunk) chunks.push(finalChunk)
-  retun { text: chunks.join(''), cancelled: false }
+  return { text: chunks.join(''), cancelled: false }
 }
 
 function jsonLikePrefix(prefix: string): boolean {
   const trimmed = prefix.trimStart()
-  retun trimmed.startsWith('{') || trimmed.startsWith('[')
+  return trimmed.startsWith('{') || trimmed.startsWith('[')
 }
 
 function throwKnownUnsupportedJsonPrefix(prefix: string): void {
@@ -3685,14 +3685,14 @@ async function importGpxIntoCatalog(
 ): Promise<{ acceptedMedia: number; skippedFiles: number; cancelled: boolean }> {
   const sourceLabel = source.label
   const readResult = await readFileTextWithProgress(file, sourceLabel, postProgress, isCancelled)
-  if (readResult.cancelled) retun { acceptedMedia: 0, skippedFiles: 0, cancelled: true }
+  if (readResult.cancelled) return { acceptedMedia: 0, skippedFiles: 0, cancelled: true }
   const parsed = parseGeoFilePoints(file.name || sourceLabel, readResult.text)
   let acceptedMedia = 0
   let cancelled = false
   const batch: MediaItem[] = []
 
   const flushBatch = async (phase: ImportProgress['phase']) => {
-    if (batch.length === 0) retun
+    if (batch.length === 0) return
     const flushedItems = batch.length
     await store.writeMediaBatch(batch.splice(0))
     acceptedMedia += flushedItems
@@ -3728,7 +3728,7 @@ async function importGpxIntoCatalog(
     }
     await flushBatch('storing')
   })
-  retun { acceptedMedia, skippedFiles: parsed.skippedPoints, cancelled }
+  return { acceptedMedia, skippedFiles: parsed.skippedPoints, cancelled }
 }
 
 async function importGoogleTakeoutIntoCatalog(
@@ -3765,12 +3765,12 @@ async function importGoogleTakeoutIntoCatalog(
   }
   const maybeEmitProgress = () => {
     const now = performance.now()
-    if (now - lastProgressAt < PROGRESS_HEARTBEAT_MS) retun
+    if (now - lastProgressAt < PROGRESS_HEARTBEAT_MS) return
     lastProgressAt = now
     emitProgress('scanning')
   }
   const flushBatch = async (phase: ImportProgress['phase']) => {
-    if (batch.length === 0) retun
+    if (batch.length === 0) return
     const flushedItems = batch.length
     await store.writeMediaBatch(batch.splice(0))
     acceptedMedia += flushedItems
@@ -3839,7 +3839,7 @@ async function importGoogleTakeoutIntoCatalog(
     await flushBatch('storing')
   })
   emitProgress('storing')
-  retun { acceptedMedia, skippedFiles, cancelled }
+  return { acceptedMedia, skippedFiles, cancelled }
 }
 
 async function importGeoFileIntoCatalog(
@@ -3871,18 +3871,18 @@ async function importGeoFileIntoCatalog(
     scannedBytes: 0,
     totalBytes: file.size,
   })
-  if (isCancelled()) retun cancelledSummary()
+  if (isCancelled()) return cancelledSummary()
   await store.prepareImportSource(source, duplicateSourceIds)
-  if (isCancelled()) retun cancelledSummary()
+  if (isCancelled()) return cancelledSummary()
   const prefix = await file.slice(0, GEO_IMPORT_PREFIX_BYTES).text()
-  if (isCancelled()) retun cancelledSummary()
+  if (isCancelled()) return cancelledSummary()
   const result = jsonLikePrefix(prefix)
     ? await (async () => {
         throwKnownUnsupportedJsonPrefix(prefix)
-        retun importGoogleTakeoutIntoCatalog(file, source, store, postProgress, isCancelled)
+        return importGoogleTakeoutIntoCatalog(file, source, store, postProgress, isCancelled)
       })()
     : await importGpxIntoCatalog(file, source, store, postProgress, isCancelled)
-  retun {
+  return {
     source,
     sourceLabel,
     scannedFiles: 1,
@@ -3903,50 +3903,50 @@ async function handleRequest(
   const store = fileCatalogStore
   switch (request.type) {
     case 'init':
-      retun store.init()
+      return store.init()
     case 'upsertSource':
-      retun store.upsertSource(request.payload as MediaSource)
+      return store.upsertSource(request.payload as MediaSource)
     case 'upsertMedia':
-      retun store.upsertMedia(request.payload as MediaItem[])
+      return store.upsertMedia(request.payload as MediaItem[])
     case 'importFolder':
-      retun importFolderIntoCatalog(
+      return importFolderIntoCatalog(
         request.payload as ImportFolderPayload,
         store,
         postProgress,
         () => cancelledRequests.has(request.id),
       )
     case 'importGeoFile':
-      retun importGeoFileIntoCatalog(
+      return importGeoFileIntoCatalog(
         request.payload as ImportGeoFilePayload,
         store,
         postProgress,
         () => cancelledRequests.has(request.id),
       )
     case 'commitImport':
-      retun store.commitImport()
+      return store.commitImport()
     case 'listMedia':
-      retun store.listMedia(request.payload as CatalogQuery)
+      return store.listMedia(request.payload as CatalogQuery)
     case 'searchMedia':
-      retun store.searchMedia(
+      return store.searchMedia(
         request.payload as SearchSpec,
         () => cancelledRequests.has(request.id),
       )
     case 'searchMapPoints':
-      retun store.searchMapPoints(
+      return store.searchMapPoints(
         request.payload as SearchSpec,
         () => cancelledRequests.has(request.id),
       )
     case 'getMediaByIds':
-      retun store.getMediaByIds(request.payload as string[])
+      return store.getMediaByIds(request.payload as string[])
     case 'getGeoPoints':
-      retun store.getGeoPoints(request.payload as TimeRange)
+      return store.getGeoPoints(request.payload as TimeRange)
     case 'countMedia':
-      retun store.countMedia()
+      return store.countMedia()
     case 'buildGeoIndexes':
-      retun store.buildSearchIndexes('segmented-ball-tree', false, postProgress)
+      return store.buildSearchIndexes('segmented-ball-tree', false, postProgress)
     case 'buildSearchIndexes': {
       const payload = request.payload as { indexId: string; forceRebuild?: boolean }
-      retun store.buildSearchIndexes(
+      return store.buildSearchIndexes(
         payload.indexId,
         Boolean(payload.forceRebuild),
         postProgress,
@@ -3965,32 +3965,32 @@ async function handleRequest(
         const itemsByAssetId = new Map(
           items.map((result) => [result.assetId, result.item]),
         )
-        retun results.flatMap((result) => {
+        return results.flatMap((result) => {
           const item = itemsByAssetId.get(result.assetId)
-          retun item ? [{ mediaId: item.id, distanceMeters: result.distanceMeters }] : []
+          return item ? [{ mediaId: item.id, distanceMeters: result.distanceMeters }] : []
         })
       }
-      retun geoIndexRegistry.get(payload.indexId).search(payload.query)
+      return geoIndexRegistry.get(payload.indexId).search(payload.query)
     }
     case 'getGeoIndexStats': {
       const indexId = request.payload as string
       const distanceIndex = activeResidentDistanceIndex(indexId)
-      retun distanceIndex ? distanceIndex.stats() : geoIndexRegistry.get(indexId).stats()
+      return distanceIndex ? distanceIndex.stats() : geoIndexRegistry.get(indexId).stats()
     }
     case 'getSearchIndexStats':
-      retun store.getSearchIndexStats()
+      return store.getSearchIndexStats()
     case 'validateGeoIndex': {
       const payload = request.payload as { indexId: string; query: GeoSearchQuery }
       if (isResidentDistanceEngineId(payload.indexId)) {
         await store.ensureSearchIndexReady(payload.indexId)
       }
       const distanceIndex = activeResidentDistanceIndex(payload.indexId)
-      retun distanceIndex
+      return distanceIndex
         ? distanceIndex.validateAgainstBruteForce(payload.query)
         : geoIndexRegistry.get(payload.indexId).validateAgainstBruteForce(payload.query)
     }
     case 'clear':
-      retun store.clear()
+      return store.clear()
     default:
       throw new Error(`Unknown catalog worker request: ${request.type}`)
   }
@@ -4012,7 +4012,7 @@ if (typeof document === 'undefined' && ctx.addEventListener && ctx.postMessage) 
   ctx.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
     if (event.data.type === 'cancel') {
       cancelledRequests.add(event.data.id)
-      retun
+      return
     }
     const postProgress = (progress: GeoIndexBuildProgress | ImportProgress) => {
       ctx.postMessage?.({ id: event.data.id, type: 'progress', progress })

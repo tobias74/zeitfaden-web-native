@@ -21,6 +21,7 @@ import {
   type CSSProperties,
   type KeyboardEvent,
   type PointerEvent,
+  memo,
   useCallback,
   useEffect,
   useMemo,
@@ -59,6 +60,7 @@ import { createPlatformBackend } from './platform'
 import type {
   GeoIndexBuildProgress,
   ImportProgress,
+  ThumbnailBackend,
 } from './platform/types'
 import { traceStartup } from './lib/startupTrace'
 import type {
@@ -108,16 +110,16 @@ const MIN_MAP_HEIGHT = 240
 const MIN_CONTROL_HEIGHT = 260
 
 function clamp(value: number, min: number, max: number): number {
-  retun Math.min(Math.max(value, min), max)
+  return Math.min(Math.max(value, min), max)
 }
 
 function geoBoundsEqual(
   left: GeoBounds | undefined,
   right: GeoBounds | undefined,
 ): boolean {
-  if (!left || !right) retun left === right
+  if (!left || !right) return left === right
 
-  retun (
+  return (
     Math.abs(left.minLat - right.minLat) < 0.000001 &&
     Math.abs(left.maxLat - right.maxLat) < 0.000001 &&
     Math.abs(left.minLon - right.minLon) < 0.000001 &&
@@ -127,10 +129,10 @@ function geoBoundsEqual(
 
 function storedNumber(key: string, fallback: number): number {
   const stored = window.localStorage.getItem(key)
-  if (stored === null || stored.trim() === '') retun fallback
+  if (stored === null || stored.trim() === '') return fallback
 
   const value = Number(stored)
-  retun Number.isFinite(value) && value > 0 ? value : fallback
+  return Number.isFinite(value) && value > 0 ? value : fallback
 }
 
 function storedString<T extends string>(
@@ -139,23 +141,23 @@ function storedString<T extends string>(
   allowed: readonly T[],
 ): T {
   const stored = window.localStorage.getItem(key)
-  retun allowed.includes(stored as T) ? (stored as T) : fallback
+  return allowed.includes(stored as T) ? (stored as T) : fallback
 }
 
 function storedBoolean(key: string, fallback: boolean): boolean {
   const stored = window.localStorage.getItem(key)
-  if (stored === 'true') retun true
-  if (stored === 'false') retun false
-  retun fallback
+  if (stored === 'true') return true
+  if (stored === 'false') return false
+  return fallback
 }
 
 function storedLanguage(): Language {
   const stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY)
-  retun isLanguage(stored) ? stored : 'en'
+  return isLanguage(stored) ? stored : 'en'
 }
 
 function filterValueToKind(value: string): KindFilter {
-  retun value === 'image' ||
+  return value === 'image' ||
     value === 'video' ||
     value === 'geo_point' ||
     value === 'media'
@@ -164,17 +166,17 @@ function filterValueToKind(value: string): KindFilter {
 }
 
 function statsNumber(value: number | undefined, locale: string): string {
-  retun typeof value === 'number' ? value.toLocaleString(locale) : '0'
+  return typeof value === 'number' ? value.toLocaleString(locale) : '0'
 }
 
 function errorToMessage(error: unknown): string {
-  if (!error) retun ''
-  if (error instanceof Error) retun error.message
-  if (typeof error === 'string') retun error
+  if (!error) return ''
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string') return error
   try {
-    retun JSON.stringify(error)
+    return JSON.stringify(error)
   } catch {
-    retun String(error)
+    return String(error)
   }
 }
 
@@ -188,13 +190,13 @@ function formatBytes(value: number, locale: string): string {
     unitIndex += 1
   }
 
-  retun `${new Intl.NumberFormat(locale, {
+  return `${new Intl.NumberFormat(locale, {
     maximumFractionDigits: unitIndex === 0 ? 0 : 1,
   }).format(size)} ${units[unitIndex]}`
 }
 
 function formatMilliseconds(value: number | undefined): string {
-  retun `${(value ?? 0).toFixed(2)} ms`
+  return `${(value ?? 0).toFixed(2)} ms`
 }
 
 function importProgressCurrent(progress: ImportProgress): number | undefined {
@@ -202,10 +204,10 @@ function importProgressCurrent(progress: ImportProgress): number | undefined {
     typeof progress.scannedBytes === 'number' &&
     typeof progress.totalBytes === 'number'
   ) {
-    retun progress.scannedBytes
+    return progress.scannedBytes
   }
-  if (progress.phase === 'counting') retun undefined
-  retun progress.scannedFiles
+  if (progress.phase === 'counting') return undefined
+  return progress.scannedFiles
 }
 
 function importProgressMax(progress: ImportProgress): number | undefined {
@@ -213,18 +215,18 @@ function importProgressMax(progress: ImportProgress): number | undefined {
     typeof progress.scannedBytes === 'number' &&
     typeof progress.totalBytes === 'number'
   ) {
-    retun progress.totalBytes
+    return progress.totalBytes
   }
-  retun progress.totalFiles || undefined
+  return progress.totalFiles || undefined
 }
 
 function importProgressPercent(progress: ImportProgress): number | undefined {
   const current = importProgressCurrent(progress)
   const max = importProgressMax(progress)
   if (current === undefined || max === undefined || max === 0) {
-    retun undefined
+    return undefined
   }
-  retun Math.min(100, (current / max) * 100)
+  return Math.min(100, (current / max) * 100)
 }
 
 function importProgressLabel(
@@ -233,14 +235,14 @@ function importProgressLabel(
   locale: string,
 ): string {
   if (progress.phase === 'counting') {
-    retun t('countingFilesIn', { sourceLabel: progress.sourceLabel })
+    return t('countingFilesIn', { sourceLabel: progress.sourceLabel })
   }
   if (progress.phase === 'storing') {
-    retun t('savingMediaFiles', {
+    return t('savingMediaFiles', {
       count: progress.acceptedMedia.toLocaleString(locale),
     })
   }
-  retun t('scanningSource', { sourceLabel: progress.sourceLabel })
+  return t('scanningSource', { sourceLabel: progress.sourceLabel })
 }
 
 function importProgressDetail(
@@ -249,7 +251,7 @@ function importProgressDetail(
   locale: string,
 ): string {
   if (progress.phase === 'counting') {
-    retun t('filesFound', {
+    return t('filesFound', {
       count: progress.totalFiles.toLocaleString(locale),
     })
   }
@@ -258,23 +260,23 @@ function importProgressDetail(
     typeof progress.scannedBytes === 'number' &&
     typeof progress.totalBytes === 'number'
   ) {
-    retun `${formatBytes(progress.scannedBytes, locale)} / ${formatBytes(
+    return `${formatBytes(progress.scannedBytes, locale)} / ${formatBytes(
       progress.totalBytes,
       locale,
-    )} · ${t('importItemsAcceptedSkipped', {
+    )} Â· ${t('importItemsAcceptedSkipped', {
       accepted: progress.acceptedMedia.toLocaleString(locale),
       skipped: progress.skippedFiles.toLocaleString(locale),
     })}`
   }
 
-  retun `${progress.scannedFiles.toLocaleString(locale)} / ${progress.totalFiles.toLocaleString(locale)}`
+  return `${progress.scannedFiles.toLocaleString(locale)} / ${progress.totalFiles.toLocaleString(locale)}`
 }
 
 function geoIndexProgressPercent(
   progress: GeoIndexBuildProgress,
 ): number | undefined {
   if (progress.phase === 'loading' || progress.totalIndexes === 0) {
-    retun undefined
+    return undefined
   }
   const currentIndexProgress =
     typeof progress.currentIndexProcessedPoints === 'number' &&
@@ -285,7 +287,7 @@ function geoIndexProgressPercent(
           progress.currentIndexProcessedPoints / progress.currentIndexTotalPoints,
         )
       : 0
-  retun Math.min(
+  return Math.min(
     100,
     ((progress.builtIndexes + currentIndexProgress) / progress.totalIndexes) *
       100,
@@ -297,12 +299,12 @@ function geoIndexProgressLabel(
   t: (key: TranslationKey, values?: TranslationValues) => string,
 ): string {
   if (progress.phase === 'loading') {
-    retun t('loadingDistanceIndex', {
+    return t('loadingDistanceIndex', {
       indexLabel: progress.currentIndexLabel ?? '',
     })
   }
-  if (progress.phase === 'ready') retun t('geoIndexesReady')
-  retun t('buildingGeoIndex', {
+  if (progress.phase === 'ready') return t('geoIndexesReady')
+  return t('buildingGeoIndex', {
     indexLabel: progress.currentIndexLabel ?? '',
   })
 }
@@ -317,7 +319,7 @@ function geoIndexProgressDetail(
     typeof progress.currentIndexTotalPoints === 'number' &&
     progress.currentIndexTotalPoints > 0
   ) {
-    retun t('geoIndexProgressDetailWithCurrent', {
+    return t('geoIndexProgressDetailWithCurrent', {
       points: progress.pointCount.toLocaleString(locale),
       built: progress.builtIndexes.toLocaleString(locale),
       total: progress.totalIndexes.toLocaleString(locale),
@@ -326,7 +328,7 @@ function geoIndexProgressDetail(
     })
   }
 
-  retun t('geoIndexProgressDetail', {
+  return t('geoIndexProgressDetail', {
     points: progress.pointCount.toLocaleString(locale),
     built: progress.builtIndexes.toLocaleString(locale),
     total: progress.totalIndexes.toLocaleString(locale),
@@ -337,54 +339,54 @@ function indexStatusLabel(
   status: SearchIndexStats['indexStatus'] | undefined,
   t: (key: TranslationKey, values?: TranslationValues) => string,
 ): string {
-  if (status === 'current') retun t('indexStatusCurrent')
-  if (status === 'stale') retun t('indexStatusStale')
-  if (status === 'missing') retun t('indexStatusMissing')
-  if (status === 'building') retun t('indexStatusBuilding')
-  if (status === 'pending') retun t('indexStatusPending')
-  if (status === 'indexing') retun t('indexStatusIndexing')
-  if (status === 'failed') retun t('indexStatusFailed')
-  retun t('indexStatusUnknown')
+  if (status === 'current') return t('indexStatusCurrent')
+  if (status === 'stale') return t('indexStatusStale')
+  if (status === 'missing') return t('indexStatusMissing')
+  if (status === 'building') return t('indexStatusBuilding')
+  if (status === 'pending') return t('indexStatusPending')
+  if (status === 'indexing') return t('indexStatusIndexing')
+  if (status === 'failed') return t('indexStatusFailed')
+  return t('indexStatusUnknown')
 }
 
 function indexUpdateButtonLabel(
   status: SearchIndexStats['indexStatus'] | undefined,
   t: (key: TranslationKey, values?: TranslationValues) => string,
 ): string {
-  if (status === 'current') retun t('rebuildDistanceIndex')
-  if (status === 'building' || status === 'indexing') retun t('updatingDistanceIndex')
-  retun t('updateDistanceIndex')
+  if (status === 'current') return t('rebuildDistanceIndex')
+  if (status === 'building' || status === 'indexing') return t('updatingDistanceIndex')
+  return t('updateDistanceIndex')
 }
 
 function catalogIndexStatus(
   stats: SearchIndexStats | undefined,
   progress: GeoIndexBuildProgress | undefined,
 ): SearchIndexStats['indexStatus'] {
-  if (progress?.currentIndexId?.startsWith('file-')) retun 'building'
-  retun stats?.indexStatus ?? 'missing'
+  if (progress?.currentIndexId?.startsWith('file-')) return 'building'
+  return stats?.indexStatus ?? 'missing'
 }
 
 function catalogIndexButtonLabel(
   status: SearchIndexStats['indexStatus'] | undefined,
   t: (key: TranslationKey, values?: TranslationValues) => string,
 ): string {
-  if (status === 'current') retun t('rebuildCatalogIndexes')
-  if (status === 'building' || status === 'indexing' || status === 'pending') retun t('updatingCatalogIndexes')
-  retun t('updateCatalogIndexes')
+  if (status === 'current') return t('rebuildCatalogIndexes')
+  if (status === 'building' || status === 'indexing' || status === 'pending') return t('updatingCatalogIndexes')
+  return t('updateCatalogIndexes')
 }
 
 function formatDimensions(item: MediaItem): string | undefined {
   if (typeof item.durationMs === 'number') {
-    retun `${Math.round(item.durationMs / 1_000)} s`
+    return `${Math.round(item.durationMs / 1_000)} s`
   }
-  retun undefined
+  return undefined
 }
 
 function formatGeo(item: MediaItem): string | undefined {
   if (typeof item.latitude !== 'number' || typeof item.longitude !== 'number') {
-    retun undefined
+    return undefined
   }
-  retun `${item.latitude.toFixed(5)}, ${item.longitude.toFixed(5)}`
+  return `${item.latitude.toFixed(5)}, ${item.longitude.toFixed(5)}`
 }
 
 function resultSkeletonCount(
@@ -392,7 +394,7 @@ function resultSkeletonCount(
   pageSize: number,
 ): number {
   const modeMaximum = displayMode === 'images' ? 24 : 12
-  retun Math.max(1, Math.min(pageSize, modeMaximum))
+  return Math.max(1, Math.min(pageSize, modeMaximum))
 }
 
 function ResultSkeletons({
@@ -402,7 +404,7 @@ function ResultSkeletons({
   count: number
   displayMode: ResultDisplayMode
 }) {
-  retun Array.from({ length: count }, (_, index) => (
+  return Array.from({ length: count }, (_, index) => (
     <article
       key={`result-skeleton-${index}`}
       className="media-card media-card-skeleton"
@@ -441,6 +443,119 @@ function ResultSkeletons({
   ))
 }
 
+type ResultCardProps = {
+  result: EnrichedSearchResult
+  index: number
+  displayMode: ResultDisplayMode
+  showMetadata: boolean
+  thumbnails: ThumbnailBackend
+  locale: string
+  t: (key: TranslationKey, values?: TranslationValues) => string
+  onOpen(index: number): void
+}
+
+const ResultCard = memo(function ResultCard({
+  result,
+  index,
+  displayMode,
+  showMetadata,
+  thumbnails,
+  locale,
+  t,
+  onOpen,
+}: ResultCardProps) {
+  const { item } = result
+
+  return (
+    <article
+      className="media-card"
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpen(index)}
+      onKeyDown={(event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return
+        event.preventDefault()
+        onOpen(index)
+      }}
+    >
+      <Thumbnail
+        thumbnails={thumbnails}
+        thumbnailKey={item.thumbnailKey}
+        label={item.displayName}
+        kind={item.kind}
+      />
+      {displayMode !== 'images' && (
+        <div className="media-card-body">
+          <div className="media-title-row">
+            {item.kind === 'geo_point' ? (
+              <MapPin size={15} />
+            ) : item.kind === 'video' ? (
+              <Video size={15} />
+            ) : (
+              <ImageIcon size={15} />
+            )}
+            <h3>{item.displayName}</h3>
+          </div>
+          {showMetadata && (
+            <>
+              <p>
+                {formatDateTime(
+                  item.timestamp,
+                  locale,
+                  t('noTimestamp'),
+                )}
+              </p>
+              <p>{item.relativePath}</p>
+              <p className="metadata-extra">
+                {[
+                  item.mimeType,
+                  formatDimensions(item),
+                  formatGeo(item),
+                ]
+                  .filter(Boolean)
+                  .join(' - ')}
+              </p>
+            </>
+          )}
+          {typeof result.distanceMeters === 'number' &&
+            Number.isFinite(result.distanceMeters) && (
+            <strong>{formatDistance(result.distanceMeters)}</strong>
+          )}
+        </div>
+      )}
+      {displayMode === 'images' && showMetadata && (
+        <div className="media-overlay">
+          <span>{item.displayName}</span>
+          {typeof result.distanceMeters === 'number' &&
+            Number.isFinite(result.distanceMeters) && (
+            <strong>{formatDistance(result.distanceMeters)}</strong>
+          )}
+        </div>
+      )}
+      {displayMode === 'list' && (
+        <div className="media-list-columns">
+          <span>{t(item.kind)}</span>
+          <span>
+            {formatDateTime(
+              item.timestamp,
+              locale,
+              t('noTimestamp'),
+            )}
+          </span>
+          <span>{formatDimensions(item) ?? 'n/a'}</span>
+          <span>{formatGeo(item) ?? t('metadataNoGps')}</span>
+          {typeof result.distanceMeters === 'number' &&
+          Number.isFinite(result.distanceMeters) ? (
+            <strong>{formatDistance(result.distanceMeters)}</strong>
+          ) : (
+            <span>{t('metadataCatalog')}</span>
+          )}
+        </div>
+      )}
+    </article>
+  )
+})
+
 function App() {
   traceStartup('[startup]', 'App render start')
   const platform = useMemo(() => {
@@ -449,7 +564,7 @@ function App() {
     traceStartup('[startup]', 'platform backend created', {
       platformKind: created.kind,
     })
-    retun created
+    return created
   }, [])
   const catalog = platform.catalog
   const [language, setLanguage] = useState<Language>(() => storedLanguage())
@@ -595,14 +710,14 @@ function App() {
     useState<SearchIndexStats>()
   const searchOrder = useMemo<SearchSpec['order']>(() => {
     if (distanceSortActive) {
-      retun {
+      return {
         kind: 'distance',
         point: queryPoint,
         engineId: selectedIndexId,
       }
     }
 
-    retun {
+    return {
       kind: 'timestamp',
       sort: catalogSort,
       engineId: CATALOG_QUERY_INDEX_ID,
@@ -649,7 +764,21 @@ function App() {
     }) : undefined,
     [catalogSort, kindFilter, timeRange, visibleMapBounds],
   )
-  const searchWindows = useSearchResults({
+  const {
+    results: resultItems,
+    loading: resultItemsLoading,
+    setResults: setSearchResults,
+    pageLimitReached,
+    mapItems,
+    mapLoading,
+    mapLimitReached: mapPointLimitReached,
+    resultMetrics,
+    mapMetrics,
+    validation,
+    setValidation: setSearchValidation,
+    loadWindow,
+    clearMap,
+  } = useSearchResults({
     catalog,
     ready: catalogReady,
     pageSpec: resultSearchSpec,
@@ -659,13 +788,8 @@ function App() {
     onError: reportError,
     onStats: setIndexStatsOverride,
   })
-  const mapItems = searchWindows.mapItems
-  const mapLoading = searchWindows.mapLoading
-  const mapPointLimitReached = searchWindows.mapLimitReached
-  const mapMetrics = searchWindows.mapMetrics
-  const validation = searchWindows.validation
   const effectiveIndexStats =
-    indexStatsOverride ?? searchWindows.resultMetrics ?? indexStats
+    indexStatsOverride ?? resultMetrics ?? indexStats
   const distanceIndexBuilding =
     geoIndexProgress?.currentIndexId === selectedIndexId ||
     geoIndexProgress?.currentIndexId === 'segmented-ball-tree'
@@ -708,8 +832,6 @@ function App() {
     Boolean(importProgress) &&
     activeImportKind === 'geo'
   const visibleResults = distanceSortActive
-  const resultItems = searchWindows.results
-  const resultItemsLoading = searchWindows.loading
   const skeletonCount = resultSkeletonCount(resultDisplayMode, resultPageSize)
   const visibleStart = resultItems.length === 0 ? 0 : resultOffset + 1
   const visibleEnd = resultOffset + resultItems.length
@@ -723,19 +845,19 @@ function App() {
       ? '0'
       : `${visibleStart.toLocaleString(locale)}-${visibleEnd.toLocaleString(locale)}`
   const canPageBackward = resultPage > 0
-  const canPageForward = searchWindows.pageLimitReached
+  const canPageForward = pageLimitReached
   const loadViewerWindow = useCallback(
     async (windowOffset: number, signal?: AbortSignal) => {
-      retun (await searchWindows.loadWindow(windowOffset, signal)).items
+      return (await loadWindow(windowOffset, signal)).items
     },
-    [searchWindows],
+    [loadWindow],
   )
   const handleViewerWindowLoaded = useCallback(
     (windowOffset: number, windowItems: EnrichedSearchResult[]) => {
       setResultPage(windowOffset / resultPageSize)
-      searchWindows.setResults(windowItems)
+      setSearchResults(windowItems)
     },
-    [resultPageSize, searchWindows, setResultPage],
+    [resultPageSize, setResultPage, setSearchResults],
   )
   const {
     viewerSession,
@@ -755,7 +877,7 @@ function App() {
   })
 
   const changeLanguage = useCallback((value: string) => {
-    if (!isLanguage(value)) retun
+    if (!isLanguage(value)) return
     setLanguage(value)
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, value)
   }, [])
@@ -764,15 +886,15 @@ function App() {
     traceStartup('[startup]', 'App mounted', {
       platformKind: platform.kind,
     })
-    retun () => platform.dispose()
+    return () => platform.dispose()
   }, [platform])
 
   useEffect(() => {
     function closeMenusOnEscape(event: globalThis.KeyboardEvent) {
-      if (event.key !== 'Escape') retun
+      if (event.key !== 'Escape') return
       const openMenus = [settingsMenuRef.current, displayMenuRef.current]
         .filter((menu): menu is HTMLDetailsElement => Boolean(menu?.open))
-      if (openMenus.length === 0) retun
+      if (openMenus.length === 0) return
 
       for (const menu of openMenus) {
         menu.open = false
@@ -781,7 +903,7 @@ function App() {
     }
 
     window.addEventListener('keydown', closeMenusOnEscape)
-    retun () => window.removeEventListener('keydown', closeMenusOnEscape)
+    return () => window.removeEventListener('keydown', closeMenusOnEscape)
   }, [])
 
   useEffect(() => {
@@ -799,7 +921,7 @@ function App() {
     }
 
     window.addEventListener('pointerdown', closeMenusOnOutsidePointer)
-    retun () =>
+    return () =>
       window.removeEventListener('pointerdown', closeMenusOnOutsidePointer)
   }, [])
 
@@ -810,9 +932,9 @@ function App() {
       await catalog.clear()
       setResultPage(0)
       clearGeoBounds()
-      searchWindows.setResults([])
-      searchWindows.clearMap()
-      searchWindows.setValidation(undefined)
+      setSearchResults([])
+      clearMap()
+      setSearchValidation(undefined)
       setIndexStatsOverride(undefined)
       closeViewer()
       markCatalogChanged()
@@ -829,14 +951,16 @@ function App() {
     markCatalogChanged,
     recordActivity,
     reportError,
-    searchWindows,
+    clearMap,
+    setSearchResults,
+    setSearchValidation,
     setResultPage,
   ])
 
   const confirmClearCatalog = useCallback(() => {
-    if (busy || !catalogReady) retun
+    if (busy || !catalogReady) return
     const confirmed = window.confirm(t('clearCatalogConfirm'))
-    if (!confirmed) retun
+    if (!confirmed) return
     void clearCatalog()
   }, [busy, catalogReady, clearCatalog, t])
 
@@ -847,11 +971,11 @@ function App() {
   const setSortMode = useCallback((nextSort: SearchSortMode) => {
     setSort(nextSort)
     if (nextSort !== 'distance') {
-      searchWindows.setResults([])
-      searchWindows.setValidation(undefined)
+      setSearchResults([])
+      setSearchValidation(undefined)
       setIndexStatsOverride(undefined)
     }
-  }, [searchWindows, setSort])
+  }, [setSearchResults, setSearchValidation, setSort])
 
   const setMapQueryPoint = useCallback((point: QueryPoint) => {
     setQueryPoint(point)
@@ -873,11 +997,11 @@ function App() {
 
   const clearSearch = useCallback(() => {
     clearSearchState()
-    searchWindows.setResults([])
-    searchWindows.setValidation(undefined)
+    setSearchResults([])
+    setSearchValidation(undefined)
     setIndexStatsOverride(undefined)
     closeViewer()
-  }, [clearSearchState, closeViewer, searchWindows])
+  }, [clearSearchState, closeViewer, setSearchResults, setSearchValidation])
 
   const setDisplayMode = useCallback((mode: ResultDisplayMode) => {
     setResultDisplayMode(mode)
@@ -917,7 +1041,7 @@ function App() {
 
   const resizeLeftPane = useCallback((clientX: number) => {
     const workspace = workspaceRef.current
-    if (!workspace) retun
+    if (!workspace) return
 
     const rect = workspace.getBoundingClientRect()
     const maxWidth = Math.min(MAX_LEFT_WIDTH, rect.width - MIN_RESULTS_WIDTH)
@@ -928,7 +1052,7 @@ function App() {
 
   const resizeMapPane = useCallback((clientY: number) => {
     const leftStack = leftStackRef.current
-    if (!leftStack) retun
+    if (!leftStack) return
 
     const rect = leftStack.getBoundingClientRect()
     const nextHeight = clamp(
@@ -958,7 +1082,7 @@ function App() {
 
   const handleVerticalResizeMove = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
-      if (event.buttons !== 1) retun
+      if (event.buttons !== 1) return
       resizeLeftPane(event.clientX)
     },
     [resizeLeftPane],
@@ -966,7 +1090,7 @@ function App() {
 
   const handleHorizontalResizeMove = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
-      if (event.buttons !== 1) retun
+      if (event.buttons !== 1) return
       resizeMapPane(event.clientY)
     },
     [resizeMapPane],
@@ -975,7 +1099,7 @@ function App() {
   const nudgeLeftPane = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
       const step = event.shiftKey ? 40 : 16
-      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') retun
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
 
       event.preventDefault()
       const direction = event.key === 'ArrowRight' ? 1 : -1
@@ -1000,7 +1124,7 @@ function App() {
   const nudgeMapPane = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
       const step = event.shiftKey ? 40 : 16
-      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') retun
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
 
       event.preventDefault()
       const direction = event.key === 'ArrowDown' ? 1 : -1
@@ -1022,7 +1146,7 @@ function App() {
   const privacyHtml = language === 'de' ? privacyDeHtml : privacyEnHtml
 
   if (activePage !== 'app') {
-    retun (
+    return (
       <main className="legal-shell">
         <header className="topbar legal-topbar">
           <div className="topbar-copy">
@@ -1086,10 +1210,10 @@ function App() {
                 <h2>{t('imprint')}</h2>
               </div>
               <address className="imprint-address">
-                <strong>tobiga UG (haftungsbeschränkt)</strong>
+                <strong>tobiga UG (haftungsbeschrÃ¤nkt)</strong>
                 <span>Tobias Gassmann</span>
                 <span>Bodenseestr. 4a</span>
-                <span>81241 München</span>
+                <span>81241 MÃ¼nchen</span>
                 <span>HRB 219431</span>
                 <span>USt-IdNr. DE 301206623</span>
               </address>
@@ -1105,7 +1229,7 @@ function App() {
     )
   }
 
-  retun (
+  return (
     <main className="app-shell" style={resizeStyle}>
       <header className="topbar">
         <div className="topbar-copy">
@@ -1640,37 +1764,37 @@ function App() {
                 <dl className="metrics-grid">
                   <div>
                     <dt>{t('worker')}</dt>
-                    <dd>{formatMilliseconds(searchWindows.resultMetrics.queryTimeMs)}</dd>
+                    <dd>{formatMilliseconds(resultMetrics.queryTimeMs)}</dd>
                   </div>
                   <div>
                     <dt>{t('roundTrip')}</dt>
                     <dd>
                       {formatMilliseconds(
-                        searchWindows.resultMetrics.queryRoundTripMs,
+                        resultMetrics.queryRoundTripMs,
                       )}
                     </dd>
                   </div>
                   <div>
                     <dt>{t('paint')}</dt>
-                    <dd>{formatMilliseconds(searchWindows.resultMetrics.queryPaintMs)}</dd>
+                    <dd>{formatMilliseconds(resultMetrics.queryPaintMs)}</dd>
                   </div>
                   <div>
                     <dt>{t('clientWait')}</dt>
                     <dd>
                       {formatMilliseconds(
-                        searchWindows.resultMetrics.queryTransferMs,
+                        resultMetrics.queryTransferMs,
                       )}
                     </dd>
                   </div>
                   <div>
                     <dt>{t('render')}</dt>
-                    <dd>{formatMilliseconds(searchWindows.resultMetrics.queryRenderMs)}</dd>
+                    <dd>{formatMilliseconds(resultMetrics.queryRenderMs)}</dd>
                   </div>
                   <div>
                     <dt>{t('indexReady')}</dt>
                     <dd>
                       {formatMilliseconds(
-                        searchWindows.resultMetrics.queryIndexReadyMs,
+                        resultMetrics.queryIndexReadyMs,
                       )}
                     </dd>
                   </div>
@@ -1678,7 +1802,7 @@ function App() {
                     <dt>{t('indexScan')}</dt>
                     <dd>
                       {formatMilliseconds(
-                        searchWindows.resultMetrics.queryIndexScanMs,
+                        resultMetrics.queryIndexScanMs,
                       )}
                     </dd>
                   </div>
@@ -1686,7 +1810,7 @@ function App() {
                     <dt>{t('assetRead')}</dt>
                     <dd>
                       {formatMilliseconds(
-                        searchWindows.resultMetrics.queryAssetReadMs,
+                        resultMetrics.queryAssetReadMs,
                       )}
                     </dd>
                   </div>
@@ -1694,7 +1818,7 @@ function App() {
                     <dt>{t('filter')}</dt>
                     <dd>
                       {formatMilliseconds(
-                        searchWindows.resultMetrics.queryAssetFilterMs,
+                        resultMetrics.queryAssetFilterMs,
                       )}
                     </dd>
                   </div>
@@ -1702,7 +1826,7 @@ function App() {
                     <dt>{t('rows')}</dt>
                     <dd>
                       {statsNumber(
-                        searchWindows.resultMetrics.rowsRetuned ?? resultItems.length,
+                        resultMetrics.rowsReturned ?? resultItems.length,
                         locale,
                       )}
                     </dd>
@@ -1740,7 +1864,7 @@ function App() {
                     <dt>{t('visible')}</dt>
                     <dd>
                       {statsNumber(
-                        mapMetrics.rowsRetuned ?? mapItems.length,
+                        mapMetrics.rowsReturned ?? mapItems.length,
                         locale,
                       )}
                     </dd>
@@ -1777,7 +1901,7 @@ function App() {
                   <dt>{t('rows')}</dt>
                   <dd>
                     {statsNumber(
-                      effectiveIndexStats.rowsRetuned ?? resultItems.length,
+                      effectiveIndexStats.rowsReturned ?? resultItems.length,
                       locale,
                     )}
                   </dd>
@@ -2053,93 +2177,17 @@ function App() {
               displayMode={resultDisplayMode}
             />
           ) : resultItems.map((result, index) => (
-            <article
+            <ResultCard
               key={result.item.id}
-              className="media-card"
-              role="button"
-              tabIndex={0}
-              onClick={() => openViewer(index)}
-              onKeyDown={(event) => {
-                if (event.key !== 'Enter' && event.key !== ' ') retun
-                event.preventDefault()
-                openViewer(index)
-              }}
-            >
-              <Thumbnail
-                thumbnails={platform.thumbnails}
-                thumbnailKey={result.item.thumbnailKey}
-                label={result.item.displayName}
-                kind={result.item.kind}
-              />
-              {resultDisplayMode !== 'images' && (
-                <div className="media-card-body">
-                  <div className="media-title-row">
-                    {result.item.kind === 'geo_point' ? (
-                      <MapPin size={15} />
-                    ) : result.item.kind === 'video' ? (
-                      <Video size={15} />
-                    ) : (
-                      <ImageIcon size={15} />
-                    )}
-                    <h3>{result.item.displayName}</h3>
-                  </div>
-                  {showResultMetadata && (
-                    <>
-                      <p>
-                        {formatDateTime(
-                          result.item.timestamp,
-                          locale,
-                          t('noTimestamp'),
-                        )}
-                      </p>
-                      <p>{result.item.relativePath}</p>
-                      <p className="metadata-extra">
-                        {[
-                          result.item.mimeType,
-                          formatDimensions(result.item),
-                          formatGeo(result.item),
-                        ]
-                          .filter(Boolean)
-                          .join(' · ')}
-                      </p>
-                    </>
-                  )}
-                  {typeof result.distanceMeters === 'number' &&
-                    Number.isFinite(result.distanceMeters) && (
-                    <strong>{formatDistance(result.distanceMeters)}</strong>
-                  )}
-                </div>
-              )}
-              {resultDisplayMode === 'images' && showResultMetadata && (
-                <div className="media-overlay">
-                  <span>{result.item.displayName}</span>
-                  {typeof result.distanceMeters === 'number' &&
-                    Number.isFinite(result.distanceMeters) && (
-                    <strong>{formatDistance(result.distanceMeters)}</strong>
-                  )}
-                </div>
-              )}
-              {resultDisplayMode === 'list' && (
-                <div className="media-list-columns">
-                  <span>{t(result.item.kind)}</span>
-                  <span>
-                    {formatDateTime(
-                      result.item.timestamp,
-                      locale,
-                      t('noTimestamp'),
-                    )}
-                  </span>
-                  <span>{formatDimensions(result.item) ?? 'n/a'}</span>
-                  <span>{formatGeo(result.item) ?? t('metadataNoGps')}</span>
-                  {typeof result.distanceMeters === 'number' &&
-                  Number.isFinite(result.distanceMeters) ? (
-                    <strong>{formatDistance(result.distanceMeters)}</strong>
-                  ) : (
-                    <span>{t('metadataCatalog')}</span>
-                  )}
-                </div>
-              )}
-            </article>
+              result={result}
+              index={index}
+              displayMode={resultDisplayMode}
+              showMetadata={showResultMetadata}
+              thumbnails={platform.thumbnails}
+              locale={locale}
+              t={t}
+              onOpen={openViewer}
+            />
           ))}
         </div>
       </section>

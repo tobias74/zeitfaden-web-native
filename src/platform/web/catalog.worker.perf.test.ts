@@ -19,11 +19,11 @@ const describePerf = env?.RUN_PERF_TESTS === '1' ? describe : describe.skip
 const PERF_RECORD_COUNT = Number(env?.CATALOG_PERF_RECORD_COUNT ?? 250_000)
 
 function timestampSeconds(value: number): number {
-  retun Math.max(0, Math.min(0xffffffff, Math.floor(value / 1000)))
+  return Math.max(0, Math.min(0xffffffff, Math.floor(value / 1000)))
 }
 
 function makeNoImagePackedRecords(count: number): PackedIndexRecord[] {
-  retun Array.from({ length: count }, (_, index) => ({
+  return Array.from({ length: count }, (_, index) => ({
     timestampSec: timestampSeconds(fixtureTimestamp(index)),
     latE7: Math.round(fixtureLat(index) * 10_000_000),
     lonE7: Math.round(fixtureLon(index) * 10_000_000),

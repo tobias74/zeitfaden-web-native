@@ -18,7 +18,7 @@ class MemoryDistanceStore implements ResidentPackedDistanceStore {
   index: ArrayBuffer | undefined
 
   async readManifest(): Promise<ResidentPackedDistanceManifest | undefined> {
-    retun this.manifest ? structuredClone(this.manifest) : undefined
+    return this.manifest ? structuredClone(this.manifest) : undefined
   }
 
   async writeManifest(
@@ -29,7 +29,7 @@ class MemoryDistanceStore implements ResidentPackedDistanceStore {
   }
 
   async readIndex(): Promise<ArrayBuffer | undefined> {
-    retun this.index?.slice(0)
+    return this.index?.slice(0)
   }
 
   async writeIndex(
@@ -46,7 +46,7 @@ class MemoryDistanceStore implements ResidentPackedDistanceStore {
 }
 
 function residentPoint(point: GeoIndexPoint, assetId: number): ResidentDistanceBuildPoint {
-  retun {
+  return {
     assetId,
     kind: point.kind,
     lat: point.lat,

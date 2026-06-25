@@ -99,24 +99,24 @@ const DISTANCE_TIE_EPSILON_METERS = 1e-6
 
 function normalizeLon(lon: number): number {
   const normalized = ((((lon + 180) % 360) + 360) % 360) - 180
-  retun normalized === -180 ? 180 : normalized
+  return normalized === -180 ? 180 : normalized
 }
 
 function kindMask(kind: MediaKind | undefined): number {
-  if (kind === 'image') retun 1
-  if (kind === 'video') retun 2
-  if (kind === 'geo_point') retun 4
-  retun 8
+  if (kind === 'image') return 1
+  if (kind === 'video') return 2
+  if (kind === 'geo_point') return 4
+  return 8
 }
 
 function queryKindMask(query: GeoSearchQuery): number {
-  if (!query.kind || query.kind === 'all') retun 15
-  if (query.kind === 'media') retun 1 | 2
-  retun kindMask(query.kind)
+  if (!query.kind || query.kind === 'all') return 15
+  if (query.kind === 'media') return 1 | 2
+  return kindMask(query.kind)
 }
 
 function nodeOverlapsGeoBounds(node: DiskSegmentRoot, bounds: GeoBounds): boolean {
-  retun !(
+  return !(
     node.latMax < bounds.minLat ||
     node.latMin > bounds.maxLat ||
     node.lonMax < bounds.minLon ||
@@ -128,7 +128,7 @@ function segmentLowerBoundMeters(
   root: DiskSegmentRoot,
   query: GeoSearchQuery,
 ): number {
-  retun Math.max(
+  return Math.max(
     0,
     haversineMeters(root.centerLat, root.centerLon, query.lat, query.lon) -
       root.radiusMeters,
@@ -142,23 +142,23 @@ function rootMatchesQuery(
 ): boolean {
   if (!overlapsTimeRange(root.minTimestamp, root.maxTimestamp, query)) {
     metrics.prunedByTime += 1
-    retun false
+    return false
   }
   if ((root.kindMask & queryKindMask(query)) === 0) {
     metrics.prunedByGeo += 1
-    retun false
+    return false
   }
   if (query.geoBounds && !nodeOverlapsGeoBounds(root, query.geoBounds)) {
     metrics.prunedByGeo += 1
-    retun false
+    return false
   }
-  retun true
+  return true
 }
 
 function compareSearchResults(left: GeoSearchResult, right: GeoSearchResult): number {
   const distanceDelta = left.distanceMeters - right.distanceMeters
-  if (Math.abs(distanceDelta) > DISTANCE_TIE_EPSILON_METERS) retun distanceDelta
-  retun left.mediaId.localeCompare(right.mediaId)
+  if (Math.abs(distanceDelta) > DISTANCE_TIE_EPSILON_METERS) return distanceDelta
+  return left.mediaId.localeCompare(right.mediaId)
 }
 
 function insertBoundedResult(
@@ -166,12 +166,12 @@ function insertBoundedResult(
   result: GeoSearchResult,
   limit: number,
 ): void {
-  if (limit <= 0) retun
+  if (limit <= 0) return
   if (
     results.length === limit &&
     compareSearchResults(result, results[results.length - 1]) >= 0
   ) {
-    retun
+    return
   }
   let insertAt = 0
   while (
@@ -188,7 +188,7 @@ function snapshotForSegment(
   engineId: DiskSegmentedEngineId,
   segment: SegmentedBallTreeSnapshotSegment,
 ): SegmentedBallTreeSnapshot {
-  retun {
+  return {
     version: 1 as const,
     leafSize: DEFAULT_LEAF_SIZE,
     segmentPointLimit: DEFAULT_SEGMENT_POINT_LIMIT,
@@ -206,11 +206,11 @@ function encodeSegment(
   segment: SegmentedBallTreeSnapshotSegment,
 ): ArrayBuffer {
   const snapshot = snapshotForSegment(engineId, segment)
-  retun encodeSegmentedBallTreeSnapshot(snapshot)
+  return encodeSegmentedBallTreeSnapshot(snapshot)
 }
 
 function decodeSegment(data: ArrayBuffer): SegmentedBallTreeSnapshotSegment {
-  retun decodeSegmentedBallTreeSnapshot(data).segments[0]
+  return decodeSegmentedBallTreeSnapshot(data).segments[0]
 }
 
 function rootForSegment(
@@ -218,7 +218,7 @@ function rootForSegment(
 ): DiskSegmentRoot {
   const root = segment.nodes[0]
   if (!root) throw new Error('Segmented disk index segment has no root node.')
-  retun { ...(root as SegmentedBallTreeNode), treeKind: 'ball' }
+  return { ...(root as SegmentedBallTreeNode), treeKind: 'ball' }
 }
 
 export class DiskSegmentedTreeIndex {
@@ -254,7 +254,7 @@ export class DiskSegmentedTreeIndex {
         engineId: this.id,
         catalogEpoch,
       })
-      retun false
+      return false
     }
     const mismatchReasons = [
       manifest.engineId === this.id
@@ -281,7 +281,7 @@ export class DiskSegmentedTreeIndex {
         },
         mismatchReasons,
       })
-      retun false
+      return false
     }
 
     this.manifest = manifest
@@ -298,7 +298,7 @@ export class DiskSegmentedTreeIndex {
         0,
       ),
     })
-    retun true
+    return true
   }
 
   async build(
@@ -327,7 +327,7 @@ export class DiskSegmentedTreeIndex {
         batch,
         false,
       )
-      if (!segment) retun
+      if (!segment) return
       const data = encodeSegment(this.id, segment)
       await this.store.writeSegment(this.id, segment.id, data.slice(0))
       segments.push({
@@ -385,7 +385,7 @@ export class DiskSegmentedTreeIndex {
       buildTimeMs: this.lastStats.buildTimeMs,
       indexSizeBytes: segments.reduce((total, segment) => total + segment.byteLength, 0),
     })
-    retun pointCount
+    return pointCount
   }
 
   async search(query: GeoSearchQuery): Promise<GeoSearchResult[]> {
@@ -411,13 +411,13 @@ export class DiskSegmentedTreeIndex {
         ...this.emptyStats(),
         lastQueryTimeMs: performance.now() - startedAt,
       }
-      retun []
+      return []
     }
 
     const normalizedQuery = { ...query, lon: normalizeLon(query.lon) }
     const queue = manifest.segments.flatMap((segment) => {
-      if (!rootMatchesQuery(segment.root, normalizedQuery, metrics)) retun []
-      retun [
+      if (!rootMatchesQuery(segment.root, normalizedQuery, metrics)) return []
+      return [
         {
           segment,
           lowerBound: segmentLowerBoundMeters(segment.root, normalizedQuery),
@@ -474,17 +474,17 @@ export class DiskSegmentedTreeIndex {
       loadedPages: this.cache.size,
     }
 
-    retun topK.slice(offset, offset + limit)
+    return topK.slice(offset, offset + limit)
   }
 
   async stats(): Promise<GeoIndexStats> {
-    retun this.lastStats
+    return this.lastStats
   }
 
   async validateAgainstBruteForce(query: GeoSearchQuery): Promise<ValidationReport> {
     const manifest = this.manifest
     if (!manifest) {
-      retun {
+      return {
         checked: false,
         equal: false,
         comparedWith: 'brute-force',
@@ -520,7 +520,7 @@ export class DiskSegmentedTreeIndex {
           result.mediaId === expected[index]?.mediaId &&
           Math.abs(result.distanceMeters - expected[index].distanceMeters) < 1e-6,
       )
-    retun {
+    return {
       checked: true,
       equal,
       comparedWith: oracle.id,
@@ -535,11 +535,11 @@ export class DiskSegmentedTreeIndex {
     points: GeoIndexPoint[],
     isDelta: boolean,
   ): Promise<SegmentedBallTreeSnapshotSegment | undefined> {
-    if (points.length === 0) retun undefined
+    if (points.length === 0) return undefined
     const index = new SegmentedBallTreeGeoIndex()
     await index.build(points)
     const segment = index.snapshot().segments[0]
-    retun segment ? { ...segment, id, isDelta } : undefined
+    return segment ? { ...segment, id, isDelta } : undefined
   }
 
   private async loadSegment(
@@ -557,7 +557,7 @@ export class DiskSegmentedTreeIndex {
         byteLength: cached.byteLength,
         cacheSize: this.cache.size,
       })
-      retun cached.segment
+      return cached.segment
     }
     const pending = this.pendingLoads.get(ref.id)
     if (pending) {
@@ -569,7 +569,7 @@ export class DiskSegmentedTreeIndex {
       const loaded = await pending
       this.cache.delete(ref.id)
       this.cache.set(ref.id, loaded)
-      retun loaded.segment
+      return loaded.segment
     }
     metrics.pageCacheMisses += 1
     traceStartup(LOG_PREFIX, 'segment cache miss: reading from store', {
@@ -583,7 +583,7 @@ export class DiskSegmentedTreeIndex {
       const loaded = await pendingLoad
       metrics.diskReadBytes += loaded.byteLength
       metrics.diskReadCount += 1
-      retun loaded.segment
+      return loaded.segment
     } finally {
       this.pendingLoads.delete(ref.id)
     }
@@ -608,7 +608,7 @@ export class DiskSegmentedTreeIndex {
       byteLength: data.byteLength,
       cacheSize: this.cache.size,
     })
-    retun loaded
+    return loaded
   }
 
   private async searchSegment(
@@ -624,31 +624,31 @@ export class DiskSegmentedTreeIndex {
     const index = new SegmentedBallTreeGeoIndex()
     index.restore(snapshotForSegment(this.id, segment))
     const results = await index.search(segmentQuery)
-    retun { results, stats: () => index.stats() }
+    return { results, stats: () => index.stats() }
   }
 
   private pointCount(): number {
-    retun this.manifest?.pointCount ?? 0
+    return this.manifest?.pointCount ?? 0
   }
 
   private deltaSegmentCount(): number {
-    retun this.manifest?.segments.filter((segment) => segment.isDelta).length ?? 0
+    return this.manifest?.segments.filter((segment) => segment.isDelta).length ?? 0
   }
 
   private maxLeafSize(): number {
-    retun Math.max(0, ...(this.manifest?.segments.map((segment) => segment.maxLeafSize) ?? []))
+    return Math.max(0, ...(this.manifest?.segments.map((segment) => segment.maxLeafSize) ?? []))
   }
 
   private residentBytes(): number {
-    retun JSON.stringify(this.manifest ?? {}).length
+    return JSON.stringify(this.manifest ?? {}).length
   }
 
   private indexSizeBytes(): number {
-    retun this.manifest?.segments.reduce((total, segment) => total + segment.byteLength, 0) ?? 0
+    return this.manifest?.segments.reduce((total, segment) => total + segment.byteLength, 0) ?? 0
   }
 
   private emptyStats(): GeoIndexStats {
-    retun {
+    return {
       engineId: this.id,
       pointCount: this.pointCount(),
       indexSizeBytes: this.indexSizeBytes(),

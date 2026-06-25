@@ -57,7 +57,7 @@ the timestamp index scan itself.
 ## Practical Rule
 
 Timestamp-first indexing is excellent when the UI always wants timestamp-ordered
-results. It lets us retun already-sorted pages without a query-time sort.
+results. It lets us return already-sorted pages without a query-time sort.
 
 But for broad bbox queries, the bbox is not the leading key. It is a filter after
 the timestamp scan. That is why broad spatial filters can still be expensive,

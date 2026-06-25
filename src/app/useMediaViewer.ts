@@ -26,15 +26,15 @@ function canNavigateNext(
   pageSize: number,
   totalItems?: number,
 ): boolean {
-  if (localIndex < windowItems.length - 1) retun true
+  if (localIndex < windowItems.length - 1) return true
   if (typeof totalItems === 'number') {
-    retun windowOffset + windowItems.length < totalItems
+    return windowOffset + windowItems.length < totalItems
   }
-  retun windowItems.length === pageSize
+  return windowItems.length === pageSize
 }
 
 function isAbortError(error: unknown): boolean {
-  retun (
+  return (
     typeof error === 'object' &&
     error !== null &&
     'name' in error &&
@@ -65,7 +65,7 @@ export function useMediaViewer({
 
   const openViewerAtIndex = useCallback(
     async (absoluteIndex: number) => {
-      if (absoluteIndex < 0) retun
+      if (absoluteIndex < 0) return
 
       const requestId = ++requestIdRef.current
       loadControllerRef.current?.abort()
@@ -81,7 +81,7 @@ export function useMediaViewer({
           const controller = new AbortController()
           loadControllerRef.current = controller
           windowItems = await loadWindow(windowOffset, controller.signal)
-          if (requestId !== requestIdRef.current) retun
+          if (requestId !== requestIdRef.current) return
           onWindowLoaded(windowOffset, windowItems)
         }
 
@@ -89,7 +89,7 @@ export function useMediaViewer({
           setViewerSession((session) =>
             session ? { ...session, canNavigateNext: false } : session,
           )
-          retun
+          return
         }
 
         setViewerSession({
@@ -111,7 +111,7 @@ export function useMediaViewer({
                 : undefined,
         })
       } catch (caught) {
-        if (isAbortError(caught)) retun
+        if (isAbortError(caught)) return
         onError(caught instanceof Error ? caught.message : String(caught))
       } finally {
         if (requestId === requestIdRef.current) {
@@ -150,7 +150,7 @@ export function useMediaViewer({
     ? viewerSession.absoluteIndex - viewerSession.windowOffset
     : -1
 
-  retun {
+  return {
     viewerSession,
     viewerLocalIndex,
     viewerNavigationPending,

@@ -12,20 +12,20 @@ function orderCandidatesForSpec(
   const candidates = engines.filter((engine) => engine.canHandle(spec))
   if (spec.order.kind !== 'distance') {
     const selectedEngineId = spec.order.engineId
-    retun selectedEngineId
+    return selectedEngineId
       ? candidates.filter((engine) => engine.id === selectedEngineId)
       : candidates
   }
   const selectedEngineId = spec.order.engineId
   if (!selectedEngineId) {
-    retun candidates
+    return candidates
   }
 
-  retun candidates.filter((engine) => engine.id === selectedEngineId)
+  return candidates.filter((engine) => engine.id === selectedEngineId)
 }
 
 function isAbortError(error: unknown): boolean {
-  retun (
+  return (
     typeof error === 'object' &&
     error !== null &&
     'name' in error &&
@@ -41,7 +41,7 @@ export class SearchIndexRegistry {
   }
 
   matchingEngines(spec: SearchSpec): SearchIndexEngine[] {
-    retun orderCandidatesForSpec([...this.engines], spec).filter(
+    return orderCandidatesForSpec([...this.engines], spec).filter(
       (engine) => engine.capabilities.exact,
     )
   }
@@ -52,7 +52,7 @@ export class SearchIndexRegistry {
 
     for (const engine of candidates) {
       try {
-        retun await engine.search(spec)
+        return await engine.search(spec)
       } catch (caught) {
         if (isAbortError(caught)) throw caught
         lastError = caught
@@ -65,6 +65,6 @@ export class SearchIndexRegistry {
   }
 
   async stats(): Promise<SearchIndexStats[]> {
-    retun Promise.all(this.engines.map((engine) => engine.stats()))
+    return Promise.all(this.engines.map((engine) => engine.stats()))
   }
 }

@@ -71,11 +71,11 @@ export function useGeoIndexes({
     setIndexStats(selectedStats)
     setGeoPointCount(selectedStats.pointCount)
     setGeoIndexProgress((current) => {
-      if (!current || current.phase === 'ready') retun current
+      if (!current || current.phase === 'ready') return current
       const currentIndex = current.currentIndexId
         ? stats.find((entry) => entry.engineId === current.currentIndexId)
         : undefined
-      retun currentIndex?.indexStatus === 'current' ? undefined : current
+      return currentIndex?.indexStatus === 'current' ? undefined : current
     })
   }, [catalog, selectedIndexId])
 
@@ -85,7 +85,7 @@ export function useGeoIndexes({
       isCancelled: () => boolean = () => false,
       indexId = selectedIndexId,
     ) => {
-      if (isCancelled()) retun
+      if (isCancelled()) return
       const startedAt = performance.now()
       traceStartup('[startup:index-hook]', 'runIndexBuild start', {
         indexId,
@@ -114,7 +114,7 @@ export function useGeoIndexes({
           })
           if (!isCancelled()) setGeoIndexProgress(progress)
         })
-        if (isCancelled()) retun
+        if (isCancelled()) return
         traceStartup('[startup:index-hook]', 'runIndexBuild complete', {
           indexId,
           forceRebuild,
@@ -187,7 +187,7 @@ export function useGeoIndexes({
         }, 1200)
       }
     })
-    retun unsubscribe
+    return unsubscribe
   }, [catalog, onError, refreshIndexStats])
 
   useEffect(() => {
@@ -197,7 +197,7 @@ export function useGeoIndexes({
         catalogRevision,
       })
       const resetTimer = window.setTimeout(resetIndexState, 0)
-      retun () => window.clearTimeout(resetTimer)
+      return () => window.clearTimeout(resetTimer)
     }
 
     let cancelled = false
@@ -214,7 +214,7 @@ export function useGeoIndexes({
       })
     }, 0)
 
-    retun () => {
+    return () => {
       cancelled = true
       traceStartup('[startup:index-hook]', 'index status effect cleanup', {
         selectedIndexId,
@@ -232,7 +232,7 @@ export function useGeoIndexes({
     selectedIndexId,
   ])
 
-  retun {
+  return {
     geoPointCount,
     geoIndexVersion,
     geoIndexProgress,

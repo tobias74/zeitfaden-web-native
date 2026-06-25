@@ -283,7 +283,7 @@ struct SearchIndexStats {
     query_purpose: Option<String>,
     storage_mode: Option<String>,
     query_time_ms: Option<f64>,
-    rows_retuned: Option<usize>,
+    rows_returned: Option<usize>,
     limit: Option<i64>,
     offset: Option<i64>,
     limit_reached: Option<bool>,
@@ -624,7 +624,7 @@ fn empty_search_index_stats(engine_id: &str, engine_label: &str) -> SearchIndexS
         query_purpose: None,
         storage_mode: None,
         query_time_ms: None,
-        rows_retuned: None,
+        rows_returned: None,
         limit: None,
         offset: None,
         limit_reached: None,
@@ -674,7 +674,7 @@ fn search_stats_from_geo(
         query_purpose: None,
         storage_mode: None,
         query_time_ms: None,
-        rows_retuned: None,
+        rows_returned: None,
         limit: None,
         offset: None,
         limit_reached: None,
@@ -686,7 +686,7 @@ fn with_query_metrics(
     spec: &SearchSpec,
     storage_mode: &str,
     query_time_ms: f64,
-    rows_retuned: usize,
+    rows_returned: usize,
     limit: i64,
     offset: i64,
     limit_reached: bool,
@@ -697,7 +697,7 @@ fn with_query_metrics(
     if stats.last_query_time_ms.is_none() {
         stats.last_query_time_ms = Some(query_time_ms);
     }
-    stats.rows_retuned = Some(rows_retuned);
+    stats.rows_returned = Some(rows_returned);
     stats.limit = Some(limit);
     stats.offset = Some(offset);
     stats.limit_reached = Some(limit_reached);
@@ -734,12 +734,12 @@ fn distance_meters(point: &GeoIndexPoint, query: &GeoSearchQuery) -> f64 {
 fn matches_time_range(timestamp: Option<i64>, query: &GeoSearchQuery) -> bool {
     if let Some(start_time) = query.start_time {
         if timestamp.is_none_or(|value| value < start_time) {
-            retun false;
+            return false;
         }
     }
     if let Some(end_time) = query.end_time {
         if timestamp.is_none_or(|value| value > end_time) {
-            retun false;
+            return false;
         }
     }
     true
@@ -755,7 +755,7 @@ fn matches_kind(point: &GeoIndexPoint, query: &GeoSearchQuery) -> bool {
 
 fn matches_geo_bounds(point: &GeoIndexPoint, query: &GeoSearchQuery) -> bool {
     let Some(bounds) = query.geo_bounds.as_ref() else {
-        retun true;
+        return true;
     };
     point.lat >= bounds.min_lat
         && point.lat <= bounds.max_lat
@@ -800,12 +800,12 @@ fn overlaps_time_range(
 ) -> bool {
     if let Some(start_time) = query.start_time {
         if max_timestamp.is_some_and(|value| value < start_time) {
-            retun false;
+            return false;
         }
     }
     if let Some(end_time) = query.end_time {
         if min_timestamp.is_some_and(|value| value > end_time) {
-            retun false;
+            return false;
         }
     }
     true
@@ -922,7 +922,7 @@ impl NativeSegmentedBallTreeIndex {
     #[allow(dead_code)]
     fn flush_pending(&mut self) {
         if self.pending_points.is_empty() {
-            retun;
+            return;
         }
         let points = std::mem::take(&mut self.pending_points);
         if let Some(segment) = self.build_segment(
@@ -941,7 +941,7 @@ impl NativeSegmentedBallTreeIndex {
 
     fn search(&mut self, original_query: &GeoSearchQuery) -> Vec<GeoSearchResult> {
         if self.disk_manifest.is_some() {
-            retun self.search_disk(original_query).unwrap_or_default();
+            return self.search_disk(original_query).unwrap_or_default();
         }
         let start = Instant::now();
         let query = GeoSearchQuery {
@@ -955,7 +955,7 @@ impl NativeSegmentedBallTreeIndex {
         if limit == 0 || self.point_count() == 0 {
             stats.last_query_time_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
             self.last_stats = stats;
-            retun Vec::new();
+            return Vec::new();
         }
 
         let mut top_k = Vec::<GeoSearchResult>::new();
@@ -1070,7 +1070,7 @@ impl NativeSegmentedBallTreeIndex {
             || snapshot.engine_version != 1
             || snapshot.leaf_size != SEGMENTED_BALL_TREE_LEAF_SIZE
         {
-            retun Err("Segmented ball-tree index snapshot is incompatible.".to_string());
+            return Err("Segmented ball-tree index snapshot is incompatible.".to_string());
         }
         self.segments = snapshot.segments;
         self.pending_points = snapshot.pending_points;
@@ -1082,7 +1082,7 @@ impl NativeSegmentedBallTreeIndex {
         {
             self.segments.clear();
             self.pending_points.clear();
-            retun Err("Segmented ball-tree index snapshot is incomplete.".to_string());
+            return Err("Segmented ball-tree index snapshot is incomplete.".to_string());
         }
         self.last_stats = self.stats_with_timing(Some(0.0), None);
         Ok(())
@@ -1095,7 +1095,7 @@ impl NativeSegmentedBallTreeIndex {
         is_delta: bool,
     ) -> Option<NativeBallSegment> {
         if points.is_empty() {
-            retun None;
+            return None;
         }
         let mut segment = NativeBallSegment {
             id,
@@ -1145,7 +1145,7 @@ impl NativeSegmentedBallTreeIndex {
 
     fn point_count(&self) -> usize {
         if let Some(manifest) = self.disk_manifest.as_ref() {
-            retun manifest.point_count + self.pending_points.len();
+            return manifest.point_count + self.pending_points.len();
         }
         self.segments
             .iter()
@@ -1156,7 +1156,7 @@ impl NativeSegmentedBallTreeIndex {
 
     fn delta_segment_count(&self) -> usize {
         if let Some(manifest) = self.disk_manifest.as_ref() {
-            retun manifest
+            return manifest
                 .segments
                 .iter()
                 .filter(|segment| segment.is_delta)
@@ -1170,7 +1170,7 @@ impl NativeSegmentedBallTreeIndex {
 
     fn max_leaf_size(&self) -> usize {
         if let Some(manifest) = self.disk_manifest.as_ref() {
-            retun manifest
+            return manifest
                 .segments
                 .iter()
                 .map(|segment| segment.max_leaf_size)
@@ -1255,7 +1255,7 @@ impl NativeSegmentedBallTreeIndex {
             .cloned()
         {
             stats.page_cache_hits = Some(stats.page_cache_hits.unwrap_or(0) + 1);
-            retun Ok(cached);
+            return Ok(cached);
         }
         stats.page_cache_misses = Some(stats.page_cache_misses.unwrap_or(0) + 1);
         let dir = self
@@ -1297,7 +1297,7 @@ impl NativeSegmentedBallTreeIndex {
         if limit == 0 || manifest.point_count == 0 {
             stats.last_query_time_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
             self.last_stats = stats;
-            retun Ok(Vec::new());
+            return Ok(Vec::new());
         }
 
         let mut top_k = Vec::<GeoSearchResult>::new();
@@ -1403,20 +1403,20 @@ fn enqueue_ball_node(
     queue: &mut Vec<(usize, usize, f64)>,
 ) {
     let Some(node) = segment.nodes.get(node_index) else {
-        retun;
+        return;
     };
     if !overlaps_time_range(node.min_timestamp, node.max_timestamp, query) {
         stats.pruned_by_time += 1;
-        retun;
+        return;
     }
     if node.kind_mask & query_kind_mask(query) == 0 {
         stats.pruned_by_geo += 1;
-        retun;
+        return;
     }
     if let Some(bounds) = query.geo_bounds.as_ref() {
         if !ball_node_overlaps_geo_bounds(node, bounds) {
             stats.pruned_by_geo += 1;
-            retun;
+            return;
         }
     }
     let lower_bound =
@@ -1435,20 +1435,20 @@ fn enqueue_ball_node_for_ref(
     queue: &mut Vec<(NativeDiskSegmentRef, usize, f64)>,
 ) {
     let Some(node) = segment.nodes.get(node_index) else {
-        retun;
+        return;
     };
     if !overlaps_time_range(node.min_timestamp, node.max_timestamp, query) {
         stats.pruned_by_time += 1;
-        retun;
+        return;
     }
     if node.kind_mask & query_kind_mask(query) == 0 {
         stats.pruned_by_geo += 1;
-        retun;
+        return;
     }
     if let Some(bounds) = query.geo_bounds.as_ref() {
         if !ball_node_overlaps_geo_bounds(node, bounds) {
             stats.pruned_by_geo += 1;
-            retun;
+            return;
         }
     }
     let lower_bound =
@@ -1556,7 +1556,7 @@ fn split_ball_points(
     let smallest_partition = left.len().min(right.len());
     let min_balanced_partition = (points_len / 8).max(1);
     if !left.is_empty() && !right.is_empty() && smallest_partition >= min_balanced_partition {
-        retun (left, right);
+        return (left, right);
     }
 
     let mut sorted = left;
@@ -1598,7 +1598,7 @@ fn farthest_ball_point(from: &GeoIndexPoint, points: &[GeoIndexPoint]) -> GeoInd
 
 fn normalized_geo_index_point(point: &GeoIndexPoint) -> Option<GeoIndexPoint> {
     if !point.lat.is_finite() || !point.lon.is_finite() {
-        retun None;
+        return None;
     }
     Some(GeoIndexPoint {
         media_id: point.media_id.clone(),
@@ -1704,10 +1704,10 @@ fn summary_for_points(points: &[GeoIndexPoint]) -> NativeSegmentSummary {
 
 fn summary_matches_query(summary: &NativeSegmentSummary, query: &GeoSearchQuery) -> bool {
     if !overlaps_time_range(summary.min_timestamp, summary.max_timestamp, query) {
-        retun false;
+        return false;
     }
     if summary.kind_mask & query_kind_mask(query) == 0 {
-        retun false;
+        return false;
     }
     if let Some(bounds) = query.geo_bounds.as_ref() {
         if summary.lat_max < bounds.min_lat
@@ -1715,7 +1715,7 @@ fn summary_matches_query(summary: &NativeSegmentSummary, query: &GeoSearchQuery)
             || summary.lon_max < bounds.min_lon
             || summary.lon_min > bounds.max_lon
         {
-            retun false;
+            return false;
         }
     }
     true
@@ -1730,7 +1730,7 @@ fn validate_segmented_ball_tree_manifest(
         || manifest.engine_version != 1
         || manifest.catalog_epoch != catalog_epoch
     {
-        retun Err("Segmented ball-tree index manifest does not match catalog.".to_string());
+        return Err("Segmented ball-tree index manifest does not match catalog.".to_string());
     }
     Ok(())
 }
@@ -1744,7 +1744,7 @@ fn validate_disk_segmented_manifest(
         || manifest.engine_version != 2
         || manifest.catalog_epoch != catalog_epoch
     {
-        retun Err("Segmented disk index manifest does not match catalog.".to_string());
+        return Err("Segmented disk index manifest does not match catalog.".to_string());
     }
     Ok(())
 }
@@ -1756,7 +1756,7 @@ fn load_persisted_segmented_ball_tree_index(
     let dir = disk_segmented_index_dir(app, "segmented-ball-tree")?;
     let manifest_path = dir.join("manifest.json");
     if !manifest_path.exists() {
-        retun Ok(None);
+        return Ok(None);
     }
 
     let manifest = match fs::read_to_string(&manifest_path)
@@ -1764,17 +1764,17 @@ fn load_persisted_segmented_ball_tree_index(
         .and_then(|content| serde_json::from_str::<NativeDiskSegmentedManifest>(&content).ok())
     {
         Some(manifest) => manifest,
-        None => retun Ok(None),
+        None => return Ok(None),
     };
     if validate_disk_segmented_manifest(&manifest, "segmented-ball-tree", catalog_epoch).is_err() {
-        retun Ok(None);
+        return Ok(None);
     }
     if manifest
         .segments
         .iter()
         .any(|segment| !segment_file_path(&dir, &segment.id).exists())
     {
-        retun Ok(None);
+        return Ok(None);
     }
 
     let point_count = manifest.point_count;
@@ -2020,7 +2020,7 @@ fn load_file_catalog_manifest(app: &AppHandle) -> AppResult<FileCatalogManifest>
     ensure_file_catalog_dirs(app)?;
     let path = manifest_path(app)?;
     if !path.exists() {
-        retun Ok(empty_file_catalog_manifest());
+        return Ok(empty_file_catalog_manifest());
     }
     let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
     serde_json::from_str(&text).map_err(|error| error.to_string())
@@ -2191,14 +2191,14 @@ fn detect_geo_file_format(path: &Path, text: &str) -> AppResult<GeoFileFormat> {
     let trimmed = text.trim_start();
     if trimmed.is_empty() {
         geo_import_debug_text(path, "empty file", text);
-        retun Err(unsupported_geo_file_format_message());
+        return Err(unsupported_geo_file_format_message());
     }
 
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         match serde_json::from_str::<JsonValue>(text) {
             Ok(parsed) => {
                 if is_google_takeout_location_json(&parsed) {
-                    retun Ok(GeoFileFormat::GoogleTakeoutJson);
+                    return Ok(GeoFileFormat::GoogleTakeoutJson);
                 }
                 if is_google_semantic_location_json(&parsed) {
                     geo_import_debug_json(
@@ -2206,26 +2206,26 @@ fn detect_geo_file_format(path: &Path, text: &str) -> AppResult<GeoFileFormat> {
                         "Google Semantic Location History is not supported yet",
                         &parsed,
                     );
-                    retun Err("This looks like Google Semantic Location History JSON. That is valid Google Takeout data, but this importer currently supports only the raw Records.json location export.".to_string());
+                    return Err("This looks like Google Semantic Location History JSON. That is valid Google Takeout data, but this importer currently supports only the raw Records.json location export.".to_string());
                 }
                 if is_geojson(&parsed) {
                     geo_import_debug_json(path, "GeoJSON is not supported yet", &parsed);
-                    retun Err("GeoJSON files are not supported yet. Supported formats are GPX and Google Takeout Location History JSON.".to_string());
+                    return Err("GeoJSON files are not supported yet. Supported formats are GPX and Google Takeout Location History JSON.".to_string());
                 }
 
                 geo_import_debug_json(path, "unsupported JSON geo format", &parsed);
-                retun Err("The selected JSON file is not a supported geo import format. Supported JSON format is Google Takeout Location History JSON.".to_string());
+                return Err("The selected JSON file is not a supported geo import format. Supported JSON format is Google Takeout Location History JSON.".to_string());
             }
             Err(error) => {
                 geo_import_debug_text(path, &format!("JSON parse failed: {error}"), text);
-                retun Err(unsupported_geo_file_format_message());
+                return Err(unsupported_geo_file_format_message());
             }
         }
     }
 
     if let Ok(document) = roxmltree::Document::parse(text) {
         if document.root_element().tag_name().name() == "gpx" {
-            retun Ok(GeoFileFormat::Gpx);
+            return Ok(GeoFileFormat::Gpx);
         }
     }
 
@@ -2327,24 +2327,24 @@ fn detect_geo_file_format_from_prefix(path: &Path, prefix: &str) -> AppResult<Ge
     let trimmed = prefix.trim_start();
     if trimmed.is_empty() {
         geo_import_debug_text(path, "empty prefix", prefix);
-        retun Err(unsupported_geo_file_format_message());
+        return Err(unsupported_geo_file_format_message());
     }
 
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         if trimmed.contains("\"timelineObjects\"") {
-            retun Err("This looks like Google Semantic Location History JSON. That is valid Google Takeout data, but this importer currently supports only the raw Records.json location export.".to_string());
+            return Err("This looks like Google Semantic Location History JSON. That is valid Google Takeout data, but this importer currently supports only the raw Records.json location export.".to_string());
         }
         if trimmed.contains("\"FeatureCollection\"")
             || trimmed.contains("\"Feature\"")
             || trimmed.contains("\"Point\"")
         {
-            retun Err("GeoJSON files are not supported yet. Supported formats are GPX and Google Takeout Location History JSON.".to_string());
+            return Err("GeoJSON files are not supported yet. Supported formats are GPX and Google Takeout Location History JSON.".to_string());
         }
-        retun Ok(GeoFileFormat::GoogleTakeoutJson);
+        return Ok(GeoFileFormat::GoogleTakeoutJson);
     }
 
     if trimmed.contains("<gpx") || extension(path).as_deref() == Some("gpx") {
-        retun Ok(GeoFileFormat::Gpx);
+        return Ok(GeoFileFormat::Gpx);
     }
 
     geo_import_debug_text(path, "unsupported non-JSON/non-GPX prefix", prefix);
@@ -2378,7 +2378,7 @@ impl GoogleTakeoutLocationStreamParser {
 
     fn feed(&mut self, chunk: &str) -> AppResult<Vec<ParsedGeoPoint>> {
         if self.phase == TakeoutStreamPhase::Done {
-            retun Ok(Vec::new());
+            return Ok(Vec::new());
         }
 
         self.buffer.push_str(chunk);
@@ -2431,7 +2431,7 @@ impl GoogleTakeoutLocationStreamParser {
                 break;
             }
             if !self.buffer.starts_with('{') {
-                retun Err("The selected JSON file does not look like raw Google Takeout Records.json data.".to_string());
+                return Err("The selected JSON file does not look like raw Google Takeout Records.json data.".to_string());
             }
 
             let Some(end_offset) = complete_json_object_end_offset(&self.buffer) else {
@@ -2456,10 +2456,10 @@ impl GoogleTakeoutLocationStreamParser {
     fn finish(&mut self) -> AppResult<()> {
         self.feed("")?;
         if self.phase == TakeoutStreamPhase::BeforeLocations {
-            retun Err("The selected JSON file is not a supported geo import format. Expected raw Google Takeout Records.json with a locations array.".to_string());
+            return Err("The selected JSON file is not a supported geo import format. Expected raw Google Takeout Records.json with a locations array.".to_string());
         }
         if self.phase != TakeoutStreamPhase::Done {
-            retun Err(
+            return Err(
                 "The selected Google Takeout JSON file ended before the locations array was complete."
                     .to_string(),
             );
@@ -2470,7 +2470,7 @@ impl GoogleTakeoutLocationStreamParser {
 
 fn complete_json_object_end_offset(buffer: &str) -> Option<usize> {
     if !buffer.starts_with('{') {
-        retun None;
+        return None;
     }
 
     let mut depth = 0_i64;
@@ -2496,7 +2496,7 @@ fn complete_json_object_end_offset(buffer: &str) -> Option<usize> {
         } else if character == '}' {
             depth -= 1;
             if depth == 0 {
-                retun Some(index + character.len_utf8());
+                return Some(index + character.len_utf8());
             }
         }
     }
@@ -2616,7 +2616,7 @@ fn stream_gpx_points(
                 }
             }
             Ok(XmlEvent::Eof) => break,
-            Err(error) => retun Err(error.to_string()),
+            Err(error) => return Err(error.to_string()),
             _ => {}
         }
         buffer.clear();
@@ -2728,7 +2728,7 @@ fn modified_ms(path: &Path) -> Option<i64> {
 
 fn rational_to_f64(value: exif::Rational) -> Option<f64> {
     if value.denom == 0 {
-        retun None;
+        return None;
     }
     Some(value.num as f64 / value.denom as f64)
 }
@@ -2767,12 +2767,12 @@ fn read_image_metadata(path: &Path) -> NativeMetadata {
 
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(_) => retun metadata,
+        Err(_) => return metadata,
     };
     let mut reader = BufReader::new(file);
     let exif = match ExifReader::new().read_from_container(&mut reader) {
         Ok(exif) => exif,
-        Err(_) => retun metadata,
+        Err(_) => return metadata,
     };
 
     if metadata.timestamp.is_none() {
@@ -2821,7 +2821,7 @@ fn write_thumbnail(app: &AppHandle, content_hash: &str, path: &Path) -> Option<S
     let thumb_path = thumb_dir.join(format!("{content_hash}.webp"));
 
     if thumb_path.exists() {
-        retun Some(format!("thumbs/{content_hash}.webp"));
+        return Some(format!("thumbs/{content_hash}.webp"));
     }
 
     let image = image::open(path).ok()?;
@@ -2840,7 +2840,7 @@ fn media_from_path(
 ) -> AppResult<Option<MediaItem>> {
     let kind = match detect_media_kind(path) {
         Some(kind) => kind,
-        None => retun Ok(None),
+        None => return Ok(None),
     };
     let relative_path = relative_path(root, path);
     let content_hash = file_hash(path)?;
@@ -2960,7 +2960,7 @@ fn geo_point_item_from_parsed_point(
 fn derived_absolute_path(kind: &str, location: &MediaLocation) -> Option<String> {
     let root_path = location.root_path.as_ref()?;
     if kind == "geo_point" {
-        retun Some(root_path.clone());
+        return Some(root_path.clone());
     }
     let relative_path = location.relative_path.as_ref()?;
     Some(
@@ -2988,7 +2988,7 @@ fn derived_display_name(
             .map(|location| location.source_label.clone())
             .or_else(|| location.and_then(|location| location.relative_path.clone()))
             .unwrap_or_else(|| content_hash.to_string());
-        retun location
+        return location
             .and_then(|location| location.point_index)
             .map(|index| format!("{base} #{index}"))
             .unwrap_or(base);
@@ -3007,8 +3007,8 @@ fn normalize_media_item(
     locations.sort_by(|a, b| {
         if let Some(source_id) = preferred_source_id {
             match (a.source_id == source_id, b.source_id == source_id) {
-                (true, false) => retun std::cmp::Ordering::Less,
-                (false, true) => retun std::cmp::Ordering::Greater,
+                (true, false) => return std::cmp::Ordering::Less,
+                (false, true) => return std::cmp::Ordering::Greater,
                 _ => {}
             }
         }
@@ -3116,10 +3116,10 @@ fn read_native_binary_header(path: &Path, expected_magic: u32) -> Option<NativeA
     let mut bytes = [0_u8; ASSET_TABLE_HEADER_SIZE];
     file.read_exact(&mut bytes).ok()?;
     if read_u32_le(&bytes, 0)? != expected_magic {
-        retun None;
+        return None;
     }
     if read_u32_le(&bytes, 4)? != BINARY_SCHEMA_VERSION {
-        retun None;
+        return None;
     }
     let catalog_version = read_f64_le(&bytes, 8)?;
     let count = read_f64_le(&bytes, 16)?;
@@ -3132,7 +3132,7 @@ fn read_native_binary_header(path: &Path, expected_magic: u32) -> Option<NativeA
         || count < 0.0
         || count > usize::MAX as f64
     {
-        retun None;
+        return None;
     }
     Some(NativeAssetTableHeader {
         catalog_version: catalog_version as i64,
@@ -3154,7 +3154,7 @@ fn compare_asset_id_key(left: &[u8], right: &[u8; 64]) -> std::cmp::Ordering {
     for (left_byte, right_byte) in left.iter().take(64).zip(right.iter()) {
         match left_byte.cmp(right_byte) {
             std::cmp::Ordering::Equal => {}
-            ordering => retun ordering,
+            ordering => return ordering,
         }
     }
     std::cmp::Ordering::Equal
@@ -3186,7 +3186,7 @@ fn write_native_asset_store(
         for (index, item) in chunk.iter().enumerate() {
             let payload = serde_json::to_vec(item).map_err(|error| error.to_string())?;
             if payload.len() > u32::MAX as usize || chunk_bytes.len() > u32::MAX as usize {
-                retun Err(
+                return Err(
                     "Native asset record is too large for the binary asset table.".to_string(),
                 );
             }
@@ -3249,13 +3249,13 @@ fn open_current_native_asset_table(
     let assets_dir = assets_dir(app)?;
     let record_index_path = assets_dir.join(ASSET_RECORD_INDEX_FILE);
     let Some(header) = read_native_binary_header(&record_index_path, ASSET_TABLE_MAGIC) else {
-        retun Ok(None);
+        return Ok(None);
     };
     if header.catalog_version != manifest.catalog_version
         || header.count != manifest.asset_count
         || header.entry_size != ASSET_RECORD_INDEX_ENTRY_SIZE
     {
-        retun Ok(None);
+        return Ok(None);
     }
     Ok(Some(NativeAssetTable {
         assets_dir,
@@ -3270,13 +3270,13 @@ fn open_current_native_asset_id_map(
 ) -> AppResult<Option<NativeAssetIdMap>> {
     let path = assets_dir(app)?.join(ASSET_ID_MAP_FILE);
     let Some(header) = read_native_binary_header(&path, ASSET_ID_MAP_MAGIC) else {
-        retun Ok(None);
+        return Ok(None);
     };
     if header.catalog_version != manifest.catalog_version
         || header.count != manifest.asset_count
         || header.entry_size != ASSET_ID_MAP_ENTRY_SIZE
     {
-        retun Ok(None);
+        return Ok(None);
     }
     Ok(Some(NativeAssetIdMap { path, header }))
 }
@@ -3286,7 +3286,7 @@ fn open_current_native_asset_store(
     manifest: &FileCatalogManifest,
 ) -> AppResult<Option<NativeAssetStore>> {
     let Some(table) = open_current_native_asset_table(app, manifest)? else {
-        retun Ok(None);
+        return Ok(None);
     };
     let id_map = open_current_native_asset_id_map(app, manifest)?;
     Ok(Some(NativeAssetStore { table, id_map }))
@@ -3298,7 +3298,7 @@ fn rewrite_legacy_asset_store(
 ) -> AppResult<bool> {
     let path = assets_dir(app)?.join(FILE_CATALOG_ASSETS);
     if !path.exists() {
-        retun Ok(false);
+        return Ok(false);
     }
     let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
     let items = serde_json::from_str::<Vec<MediaItem>>(&text).map_err(|error| error.to_string())?;
@@ -3318,11 +3318,11 @@ fn ensure_current_native_asset_store(app: &AppHandle) -> AppResult<NativeAssetSt
         materialize_file_catalog(app, &mut manifest)?;
     }
     if let Some(store) = open_current_native_asset_store(app, &manifest)? {
-        retun Ok(store);
+        return Ok(store);
     }
     if rewrite_legacy_asset_store(app, &mut manifest)? {
         if let Some(store) = open_current_native_asset_store(app, &manifest)? {
-            retun Ok(store);
+            return Ok(store);
         }
     }
     materialize_file_catalog(app, &mut manifest)?;
@@ -3350,7 +3350,7 @@ fn read_all_native_assets_from_table(table: &NativeAssetTable) -> AppResult<Vec<
             offset += 4;
             let end = offset.saturating_add(length);
             if length == 0 || end > bytes.len() {
-                retun Err("Native asset chunk is truncated or corrupt.".to_string());
+                return Err("Native asset chunk is truncated or corrupt.".to_string());
             }
             items.push(
                 serde_json::from_slice(&bytes[offset..end]).map_err(|error| error.to_string())?,
@@ -3359,7 +3359,7 @@ fn read_all_native_assets_from_table(table: &NativeAssetTable) -> AppResult<Vec<
         }
     }
     if items.len() != table.header.count {
-        retun Err("Native asset table ended before all assets were read.".to_string());
+        return Err("Native asset table ended before all assets were read.".to_string());
     }
     Ok(items)
 }
@@ -3380,7 +3380,7 @@ fn read_native_asset_record_entries(
     valid_ids.sort_unstable();
     valid_ids.dedup();
     if valid_ids.is_empty() {
-        retun Ok((HashMap::new(), metrics));
+        return Ok((HashMap::new(), metrics));
     }
 
     let mut file = File::open(&table.record_index_path).map_err(|error| error.to_string())?;
@@ -3440,7 +3440,7 @@ fn read_native_assets_by_asset_ids_from_table(
 ) -> AppResult<(Vec<NativeAssetReadResult>, NativeAssetReadMetrics)> {
     let (entries, mut metrics) = read_native_asset_record_entries(table, asset_ids)?;
     if entries.is_empty() {
-        retun Ok((Vec::new(), metrics));
+        return Ok((Vec::new(), metrics));
     }
 
     let mut entries_by_chunk = HashMap::<usize, Vec<NativeAssetRecordEntry>>::new();
@@ -3492,7 +3492,7 @@ fn find_native_asset_ids_by_media_ids(
 ) -> AppResult<(Vec<usize>, NativeAssetReadMetrics)> {
     let mut metrics = NativeAssetReadMetrics::default();
     if ids.is_empty() || id_map.header.count == 0 {
-        retun Ok((Vec::new(), metrics));
+        return Ok((Vec::new(), metrics));
     }
     let mut file = File::open(&id_map.path).map_err(|error| error.to_string())?;
     let mut asset_ids = Vec::<usize>::new();
@@ -3560,7 +3560,7 @@ fn read_current_native_assets_by_media_ids(
             read_native_assets_by_asset_ids_from_table(&store.table, &asset_ids)?;
         metrics.disk_read_bytes += read_metrics.disk_read_bytes;
         metrics.disk_read_count += read_metrics.disk_read_count;
-        retun Ok((rows.into_iter().map(|row| row.item).collect(), metrics));
+        return Ok((rows.into_iter().map(|row| row.item).collect(), metrics));
     }
 
     let by_id = read_all_native_assets_from_table(&store.table)?
@@ -3738,7 +3738,7 @@ fn append_media_items(
     items: &[MediaItem],
 ) -> AppResult<usize> {
     if items.is_empty() {
-        retun Ok(0);
+        return Ok(0);
     }
     let mut manifest = load_file_catalog_manifest(app)?;
     let chunk_id = format!("chunk-{:06}", manifest.next_chunk_id);
@@ -3807,7 +3807,7 @@ fn upsert_source(app: AppHandle, source: MediaSource) -> AppResult<()> {
 #[tauri::command]
 fn upsert_media(app: AppHandle, items: Vec<MediaItem>) -> AppResult<usize> {
     if items.is_empty() {
-        retun Ok(0);
+        return Ok(0);
     }
     let source = MediaSource {
         id: items[0].source_id.clone(),
@@ -3848,7 +3848,7 @@ fn item_matches_catalog_query(item: &MediaItem, query: &CatalogQuery) -> bool {
         None | Some("all") => {}
         Some("media") if matches!(item.kind.as_str(), "image" | "video") => {}
         Some(kind) if item.kind == kind => {}
-        _ => retun false,
+        _ => return false,
     }
     if let Some(source_id) = query.source_id.as_ref() {
         if !item
@@ -3856,28 +3856,28 @@ fn item_matches_catalog_query(item: &MediaItem, query: &CatalogQuery) -> bool {
             .iter()
             .any(|location| &location.source_id == source_id)
         {
-            retun false;
+            return false;
         }
     }
     if let Some(has_geo) = query.has_geo {
         let item_has_geo = item.latitude.is_some() && item.longitude.is_some();
         if item_has_geo != has_geo {
-            retun false;
+            return false;
         }
     }
     if let Some(bounds) = query.geo_bounds.as_ref() {
         let Some(lat) = item.latitude else {
-            retun false;
+            return false;
         };
         let Some(lon) = item.longitude else {
-            retun false;
+            return false;
         };
         if lat < bounds.min_lat
             || lat > bounds.max_lat
             || lon < bounds.min_lon
             || lon > bounds.max_lon
         {
-            retun false;
+            return false;
         }
     }
     if let Some(start_time) = query.start_time {
@@ -3885,12 +3885,12 @@ fn item_matches_catalog_query(item: &MediaItem, query: &CatalogQuery) -> bool {
             .timestamp
             .is_none_or(|timestamp| timestamp < start_time)
         {
-            retun false;
+            return false;
         }
     }
     if let Some(end_time) = query.end_time {
         if item.timestamp.is_none_or(|timestamp| timestamp > end_time) {
-            retun false;
+            return false;
         }
     }
     item.timestamp.is_some()
@@ -3905,7 +3905,7 @@ fn filtered_locations(item: &MediaItem, query: &CatalogQuery) -> Vec<MediaLocati
             .cloned()
             .collect::<Vec<_>>();
         if !locations.is_empty() {
-            retun locations;
+            return locations;
         }
     }
     item.locations.clone()
@@ -4003,10 +4003,10 @@ fn kind_flags(item: &MediaItem) -> u8 {
 
 fn kind_matches_flags(flags: u8, kind: Option<&str>) -> bool {
     let Some(kind) = kind else {
-        retun true;
+        return true;
     };
     if kind == "all" {
-        retun true;
+        return true;
     }
     let encoded = flags & 0b11;
     match kind {
@@ -4029,17 +4029,17 @@ fn kind_from_flags(flags: u8) -> String {
 
 fn packed_record_matches_query(record: NativePackedIndexRecord, query: &CatalogQuery) -> bool {
     if !kind_matches_flags(record.kind_flags, query.kind.as_deref()) {
-        retun false;
+        return false;
     }
     let has_geo = record.kind_flags & KIND_FLAG_HAS_GEO != 0;
     if let Some(required) = query.has_geo {
         if required != has_geo {
-            retun false;
+            return false;
         }
     }
     if let Some(bounds) = query.geo_bounds.as_ref() {
         if !has_geo {
-            retun false;
+            return false;
         }
         let lat = coordinate_from_e7(record.lat_e7);
         let lon = coordinate_from_e7(record.lon_e7);
@@ -4048,7 +4048,7 @@ fn packed_record_matches_query(record: NativePackedIndexRecord, query: &CatalogQ
             || lon < bounds.min_lon
             || lon > bounds.max_lon
         {
-            retun false;
+            return false;
         }
     }
     true
@@ -4059,19 +4059,19 @@ fn packed_index_header_from_bytes(
     expected_kind: u32,
 ) -> Option<NativePackedIndexHeader> {
     if bytes.len() < PACKED_INDEX_HEADER_SIZE {
-        retun None;
+        return None;
     }
     if read_u32_le(&bytes, 0)? != PACKED_INDEX_MAGIC {
-        retun None;
+        return None;
     }
     if read_u32_le(&bytes, 4)? != BINARY_SCHEMA_VERSION {
-        retun None;
+        return None;
     }
     if read_u32_le(&bytes, 40)? != expected_kind {
-        retun None;
+        return None;
     }
     if read_u32_le(&bytes, 36)? as usize != TIME_GEO_RECORD_SIZE {
-        retun None;
+        return None;
     }
     Some(NativePackedIndexHeader {
         catalog_version: read_f64_le(&bytes, 8)? as i64,
@@ -4192,7 +4192,7 @@ fn scan_packed_asset_ids(
         INDEX_KIND_TIME_GEO,
     )?;
     if limit == 0 {
-        retun Ok((Vec::new(), 0, header.index_size_bytes, 0, false));
+        return Ok((Vec::new(), 0, header.index_size_bytes, 0, false));
     }
     let min_time = query.start_time.map(timestamp_seconds).unwrap_or(0);
     let max_time = query.end_time.map(timestamp_seconds).unwrap_or(u32::MAX);
@@ -4222,7 +4222,7 @@ fn scan_packed_asset_ids(
                 asset_ids.push(record.asset_id);
                 if asset_ids.len() >= max_asset_ids {
                     asset_ids.truncate(limit);
-                    retun Ok((
+                    return Ok((
                         asset_ids,
                         pages_read,
                         header.index_size_bytes,
@@ -4249,7 +4249,7 @@ fn scan_packed_asset_ids(
                 asset_ids.push(record.asset_id);
                 if asset_ids.len() >= max_asset_ids {
                     asset_ids.truncate(limit);
-                    retun Ok((
+                    return Ok((
                         asset_ids,
                         pages_read,
                         header.index_size_bytes,
@@ -4280,7 +4280,7 @@ fn visit_packed_map_record(
     points: &mut Vec<MapPoint>,
 ) -> bool {
     if !packed_record_matches_query(record, query) {
-        retun true;
+        return true;
     }
     if *matched >= offset {
         points.push(MapPoint {
@@ -4293,7 +4293,7 @@ fn visit_packed_map_record(
         });
         if points.len() > limit {
             points.truncate(limit);
-            retun false;
+            return false;
         }
     }
     *matched += 1;
@@ -4340,7 +4340,7 @@ fn scan_packed_map_points(
                         &mut matched,
                         &mut points,
                     ) {
-                        retun Ok((
+                        return Ok((
                             MapPointPage {
                                 points,
                                 limit_reached: Some(true),
@@ -4371,7 +4371,7 @@ fn scan_packed_map_points(
                         &mut matched,
                         &mut points,
                     ) {
-                        retun Ok((
+                        return Ok((
                             MapPointPage {
                                 points,
                                 limit_reached: Some(true),
@@ -4412,7 +4412,7 @@ fn search_file_catalog_index(
         let (asset_ids, scan_pages, scan_bytes, scan_inspected, scan_limit_reached) =
             scan_packed_asset_ids(app, query, candidate_limit)?;
         if asset_ids.is_empty() {
-            retun Ok((Vec::new(), scan_pages, scan_bytes, scan_inspected));
+            return Ok((Vec::new(), scan_pages, scan_bytes, scan_inspected));
         }
 
         let (asset_rows, asset_metrics) = read_current_native_assets_by_asset_ids(app, &asset_ids)?;
@@ -4425,14 +4425,14 @@ fn search_file_catalog_index(
             .collect::<Vec<_>>();
         if matched.len() >= offset.saturating_add(limit) || !scan_limit_reached {
             let rows = matched.into_iter().skip(offset).take(limit).collect();
-            retun Ok((rows, pages_read, disk_read_bytes, scan_inspected));
+            return Ok((rows, pages_read, disk_read_bytes, scan_inspected));
         }
         let next_candidate_limit = candidate_limit
             .saturating_mul(2)
             .max(candidate_limit.saturating_add(1));
         if next_candidate_limit <= candidate_limit {
             let rows = matched.into_iter().skip(offset).take(limit).collect();
-            retun Ok((rows, pages_read, disk_read_bytes, scan_inspected));
+            return Ok((rows, pages_read, disk_read_bytes, scan_inspected));
         }
         candidate_limit = next_candidate_limit;
     }
@@ -4550,7 +4550,7 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
             distance_limit_reached,
         );
 
-        retun Ok(SearchPage {
+        return Ok(SearchPage {
             items: rows,
             result_metrics,
             engine_id,
@@ -4569,7 +4569,7 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
     index_stats.candidates_inspected = candidates_inspected as i64;
     let limit_reached = rows.len() > limit as usize;
     let items = rows.into_iter().take(limit as usize).collect::<Vec<_>>();
-    let rows_retuned = items.len();
+    let rows_returned = items.len();
 
     Ok(SearchPage {
         items: media_items_to_search_rows(items),
@@ -4578,7 +4578,7 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
             &spec,
             "native",
             started_at.elapsed().as_secs_f64() * 1000.0,
-            rows_retuned,
+            rows_returned,
             limit,
             offset,
             limit_reached,
@@ -4618,7 +4618,7 @@ fn search_map_points(app: AppHandle, spec: SearchSpec) -> AppResult<MapPointPage
 #[tauri::command]
 fn get_media_by_ids(app: AppHandle, ids: Vec<String>) -> AppResult<Vec<MediaItem>> {
     if ids.is_empty() {
-        retun Ok(Vec::new());
+        return Ok(Vec::new());
     }
     let (items, _) = read_current_native_assets_by_media_ids(&app, &ids)?;
     Ok(items)
@@ -4770,7 +4770,7 @@ fn build_search_indexes(
 ) -> AppResult<SearchIndexBuildSummary> {
     let started = Instant::now();
     if index_id == "file-time-geo" {
-        retun build_file_catalog_indexes(&app, &window, &index_id, started);
+        return build_file_catalog_indexes(&app, &window, &index_id, started);
     }
     let total_indexes = 1_usize;
     let selected_index_id = match index_id.as_str() {
@@ -4825,7 +4825,7 @@ fn build_search_indexes(
                     current_index_total_points: Some(point_count),
                 },
             );
-            retun Ok(SearchIndexBuildSummary {
+            return Ok(SearchIndexBuildSummary {
                 point_count,
                 build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
                 engine_count: 4,
@@ -4855,7 +4855,7 @@ fn build_search_indexes(
                     current_index_total_points: Some(point_count),
                 },
             );
-            retun Ok(SearchIndexBuildSummary {
+            return Ok(SearchIndexBuildSummary {
                 point_count,
                 build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
                 engine_count: 4,
@@ -5150,7 +5150,7 @@ fn require_search_index_current(
         _ => empty_search_index_stats(engine_id, engine_label),
     };
     if stats.index_status.as_deref() != Some("current") {
-        retun Err(format!(
+        return Err(format!(
             "{} index is {}. Update the index before querying.",
             stats.engine_label.as_deref().unwrap_or(engine_label),
             stats.index_status.as_deref().unwrap_or("not ready")
@@ -5198,7 +5198,7 @@ fn segmented_ball_tree_status_stats(app: &AppHandle) -> AppResult<SearchIndexSta
             stats.index_status = Some("current".to_string());
             stats.catalog_version = Some(catalog_version);
             stats.index_catalog_version = Some(index_catalog_version);
-            retun Ok(stats);
+            return Ok(stats);
         }
 
         {
@@ -5215,7 +5215,7 @@ fn segmented_ball_tree_status_stats(app: &AppHandle) -> AppResult<SearchIndexSta
         stats.index_status = Some("stale".to_string());
         stats.catalog_version = Some(catalog_version);
         stats.index_catalog_version = Some(index_catalog_version);
-        retun Ok(stats);
+        return Ok(stats);
     }
 
     {
@@ -5238,7 +5238,7 @@ fn validate_geo_index(
     query: GeoSearchQuery,
 ) -> AppResult<ValidationReport> {
     if index_id == "brute-force" {
-        retun Ok(ValidationReport {
+        return Ok(ValidationReport {
             checked: true,
             equal: true,
             compared_with: "brute-force".to_string(),
@@ -5299,7 +5299,7 @@ fn list_sources(app: AppHandle) -> AppResult<Vec<MediaSource>> {
 #[tauri::command]
 fn remove_sources(app: AppHandle, source_ids: Vec<String>) -> AppResult<()> {
     if source_ids.is_empty() {
-        retun Ok(());
+        return Ok(());
     }
     let removing = source_ids.into_iter().collect::<HashSet<_>>();
     let mut manifest = load_file_catalog_manifest(&app)?;
@@ -5431,7 +5431,7 @@ fn flush_media_batch(
     batch: &mut Vec<MediaItem>,
 ) -> AppResult<usize> {
     if batch.is_empty() {
-        retun Ok(0);
+        return Ok(0);
     }
     let written = append_media_items(app, &session.source_id, session.generation, batch)?;
     batch.clear();
@@ -5444,7 +5444,7 @@ fn flush_and_commit_geo_import_if_requested(
     batch: &mut Vec<MediaItem>,
 ) -> AppResult<()> {
     if !take_import_commit_requested() {
-        retun Ok(());
+        return Ok(());
     }
     flush_media_batch(app, session, batch)?;
     let mut manifest = load_file_catalog_manifest(app)?;
@@ -5471,7 +5471,7 @@ fn maybe_emit_byte_progress(
     total_bytes: i64,
 ) {
     if last_progress.elapsed().as_millis() < PROGRESS_HEARTBEAT_MS {
-        retun;
+        return;
     }
     *last_progress = Instant::now();
     emit_progress(
@@ -5623,7 +5623,7 @@ fn import_gpx_streaming(
     let stream_result = stream_gpx_points(path, |event| {
         if import_cancelled() {
             cancelled = true;
-            retun Err("Import cancelled".to_string());
+            return Err("Import cancelled".to_string());
         }
         match event {
             GpxStreamEvent::Point(point, position) => {
@@ -5651,7 +5651,7 @@ fn import_gpx_streaming(
                     flush_and_commit_geo_import_if_requested(app, session, &mut batch)?;
                     if import_cancelled() {
                         cancelled = true;
-                        retun Err("Import cancelled".to_string());
+                        return Err("Import cancelled".to_string());
                     }
                     emit_progress(
                         window,
@@ -5703,7 +5703,7 @@ fn import_gpx_streaming(
         Err(error) if cancelled || error == "Import cancelled" => {
             cancelled = true;
         }
-        Err(error) => retun Err(error),
+        Err(error) => return Err(error),
     }
     emit_progress(
         window,
@@ -5725,7 +5725,7 @@ fn import_gpx_streaming(
 #[tauri::command]
 fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
     let Some(root) = rfd::FileDialog::new().pick_folder() else {
-        retun Err("Import cancelled".to_string());
+        return Err("Import cancelled".to_string());
     };
     reset_import_cancel();
     let root = root.canonicalize().unwrap_or(root);
@@ -5898,7 +5898,7 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
         .add_filter("Geo point files", &["gpx", "json", "geojson"])
         .pick_file()
     else {
-        retun Err("Import cancelled".to_string());
+        return Err("Import cancelled".to_string());
     };
     reset_import_cancel();
     let path = path.canonicalize().unwrap_or(path);
@@ -5962,7 +5962,7 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
                 }
                 summary
             }
-            Err(error) => retun Err(error),
+            Err(error) => return Err(error),
         }
     };
 

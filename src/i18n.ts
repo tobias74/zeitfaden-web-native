@@ -330,11 +330,11 @@ const dictionaries: Record<Language, Record<TranslationKey, string>> = {
 }
 
 export function isLanguage(value: string | null): value is Language {
-  retun LANGUAGES.some((language) => language.id === value)
+  return LANGUAGES.some((language) => language.id === value)
 }
 
 export function languageLocale(language: Language): string {
-  retun language === 'de' ? 'de-DE' : 'en-US'
+  return language === 'de' ? 'de-DE' : 'en-US'
 }
 
 export function translate(
@@ -342,7 +342,7 @@ export function translate(
   key: TranslationKey,
   values: TranslationValues = {},
 ): string {
-  retun dictionaries[language][key].replace(/\{(\w+)\}/g, (_, token) =>
+  return dictionaries[language][key].replace(/\{(\w+)\}/g, (_, token) =>
     String(values[token] ?? ''),
   )
 }

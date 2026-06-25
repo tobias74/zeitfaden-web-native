@@ -38,7 +38,7 @@ const defaultResultMetrics: SearchIndexStats = {
   queryPurpose: 'results',
   storageMode: 'file',
   queryTimeMs: 0,
-  rowsRetuned: 0,
+  rowsReturned: 0,
   limit: 0,
   offset: 0,
   limitReached: false,
@@ -50,7 +50,7 @@ const defaultMapMetrics: SearchIndexStats = {
 }
 
 function isAbortError(error: unknown): boolean {
-  retun (
+  return (
     typeof error === 'object' &&
     error !== null &&
     'name' in error &&
@@ -65,7 +65,7 @@ function clientTimedMetrics(
   paintAt = responseAt,
 ): SearchIndexStats {
   const workerMs = metrics.queryTimeMs ?? metrics.lastQueryTimeMs ?? 0
-  retun {
+  return {
     ...metrics,
     queryRoundTripMs: responseAt - requestedAt,
     queryTransferMs: Math.max(0, responseAt - requestedAt - workerMs),
@@ -79,12 +79,12 @@ function mapFallbackMetrics(
   points: MapPoint[],
   limitReached: boolean,
 ): SearchIndexStats {
-  retun {
+  return {
     ...defaultMapMetrics,
     engineId: spec.order.engineId ?? 'file-time-geo',
     engineLabel: 'Time-first packed index',
     queryPurpose: 'map',
-    rowsRetuned: points.length,
+    rowsReturned: points.length,
     limit: spec.limit ?? 0,
     offset: spec.offset ?? 0,
     limitReached,
@@ -162,7 +162,7 @@ export function useSearchResults({
         offset,
         purpose: 'viewer',
       }, { signal })
-      retun { items: page.items }
+      return { items: page.items }
     },
     [catalog, pageSpec],
   )
@@ -175,7 +175,7 @@ export function useSearchResults({
       const timer = window.setTimeout(() => {
         setLoading(false)
       }, 0)
-      retun () => window.clearTimeout(timer)
+      return () => window.clearTimeout(timer)
     }
 
     const requestId = ++pageRequestIdRef.current
@@ -191,7 +191,7 @@ export function useSearchResults({
         })
         const responseAt = performance.now()
 
-        if (requestId !== pageRequestIdRef.current) retun
+        if (requestId !== pageRequestIdRef.current) return
 
         const responseMetrics = clientTimedMetrics(
           page.resultMetrics,
@@ -206,7 +206,7 @@ export function useSearchResults({
         onError('')
         setLoading(false)
         window.requestAnimationFrame(() => {
-          if (requestId !== pageRequestIdRef.current) retun
+          if (requestId !== pageRequestIdRef.current) return
           const paintMetrics = clientTimedMetrics(
             page.resultMetrics,
             requestedAt,
@@ -217,7 +217,7 @@ export function useSearchResults({
           onStats(paintMetrics)
         })
       } catch (caught) {
-        if (isAbortError(caught)) retun
+        if (isAbortError(caught)) return
         if (requestId === pageRequestIdRef.current) {
           setLoading(false)
           onError(caught instanceof Error ? caught.message : String(caught))
@@ -229,7 +229,7 @@ export function useSearchResults({
       void loadResultPage()
     }, 0)
 
-    retun () => {
+    return () => {
       window.clearTimeout(timer)
       if (pageAbortControllerRef.current === abortController) {
         pageAbortControllerRef.current = undefined
@@ -254,7 +254,7 @@ export function useSearchResults({
       const timer = window.setTimeout(() => {
         setMapLoading(false)
       }, 0)
-      retun () => window.clearTimeout(timer)
+      return () => window.clearTimeout(timer)
     }
 
     const requestId = ++mapRequestIdRef.current
@@ -270,7 +270,7 @@ export function useSearchResults({
           signal: abortController.signal,
         })
         const responseAt = performance.now()
-        if (requestId !== mapRequestIdRef.current) retun
+        if (requestId !== mapRequestIdRef.current) return
 
         const baseMetrics =
           page.resultMetrics ??
@@ -290,7 +290,7 @@ export function useSearchResults({
         onError('')
         setMapLoading(false)
         window.requestAnimationFrame(() => {
-          if (requestId !== mapRequestIdRef.current) retun
+          if (requestId !== mapRequestIdRef.current) return
           setMapMetrics(
             clientTimedMetrics(
               baseMetrics,
@@ -301,7 +301,7 @@ export function useSearchResults({
           )
         })
       } catch (caught) {
-        if (isAbortError(caught)) retun
+        if (isAbortError(caught)) return
         if (requestId === mapRequestIdRef.current) {
           setMapLoading(false)
           onError(caught instanceof Error ? caught.message : String(caught))
@@ -313,7 +313,7 @@ export function useSearchResults({
       void loadMapPage()
     }, 0)
 
-    retun () => {
+    return () => {
       window.clearTimeout(timer)
       if (mapAbortControllerRef.current === abortController) {
         mapAbortControllerRef.current = undefined
@@ -322,7 +322,7 @@ export function useSearchResults({
     }
   }, [catalog, indexVersion, mapSpec, onError, ready, revision])
 
-  retun {
+  return {
     results,
     loading,
     setResults,

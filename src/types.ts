@@ -191,7 +191,7 @@ export type SearchIndexStats = GeoIndexStats & {
   queryIndexScanMs?: number
   queryAssetReadMs?: number
   queryAssetFilterMs?: number
-  rowsRetuned?: number
+  rowsReturned?: number
   limit?: number
   offset?: number
   limitReached?: boolean

@@ -54,7 +54,7 @@ type PendingRequest<T> = {
 function abortError(): Error {
   const error = new Error('Catalog request aborted')
   error.name = 'AbortError'
-  retun error
+  return error
 }
 
 export class CatalogClient {
@@ -70,15 +70,15 @@ export class CatalogClient {
   }
 
   init(): Promise<CatalogInfo> {
-    retun this.request('init')
+    return this.request('init')
   }
 
   upsertSource(source: MediaSource): Promise<void> {
-    retun this.request('upsertSource', source)
+    return this.request('upsertSource', source)
   }
 
   upsertMedia(items: MediaItem[]): Promise<number> {
-    retun this.request('upsertMedia', items)
+    return this.request('upsertMedia', items)
   }
 
   importFolder(
@@ -86,7 +86,7 @@ export class CatalogClient {
     onProgress?: (progress: ImportProgress) => void,
     signal?: AbortSignal,
   ): Promise<ImportSummary> {
-    retun this.request('importFolder', payload, (progress) => {
+    return this.request('importFolder', payload, (progress) => {
       onProgress?.(progress as ImportProgress)
     }, signal)
   }
@@ -96,34 +96,34 @@ export class CatalogClient {
     onProgress?: (progress: ImportProgress) => void,
     signal?: AbortSignal,
   ): Promise<ImportSummary> {
-    retun this.request('importGeoFile', payload, (progress) => {
+    return this.request('importGeoFile', payload, (progress) => {
       onProgress?.(progress as ImportProgress)
     }, signal)
   }
 
   commitImport(): Promise<void> {
-    retun this.request('commitImport')
+    return this.request('commitImport')
   }
 
   searchMedia(
     spec: SearchSpec,
     options: CatalogSearchOptions = {},
   ): Promise<SearchPage> {
-    retun this.request('searchMedia', spec, undefined, options.signal)
+    return this.request('searchMedia', spec, undefined, options.signal)
   }
 
   searchMapPoints(
     spec: SearchSpec,
     options: CatalogSearchOptions = {},
   ): Promise<MapPointPage> {
-    retun this.request('searchMapPoints', spec, undefined, options.signal)
+    return this.request('searchMapPoints', spec, undefined, options.signal)
   }
 
   buildSearchIndexes(
     indexId: string,
     onProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<SearchIndexBuildSummary> {
-    retun this.request('buildSearchIndexes', { indexId }, (progress) => {
+    return this.request('buildSearchIndexes', { indexId }, (progress) => {
       onProgress?.(progress as GeoIndexBuildProgress)
     })
   }
@@ -132,7 +132,7 @@ export class CatalogClient {
     indexId: string,
     onProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<SearchIndexBuildSummary> {
-    retun this.request(
+    return this.request(
       'buildSearchIndexes',
       { indexId, forceRebuild: true },
       (progress) => {
@@ -144,35 +144,35 @@ export class CatalogClient {
   onIndexProgress(listener: (progress: GeoIndexBuildProgress) => void): () => void {
     this.indexProgressListeners.add(listener)
     this.ensureWorker()
-    retun () => {
+    return () => {
       this.indexProgressListeners.delete(listener)
     }
   }
 
   getSearchIndexStats(): Promise<SearchIndexStats[]> {
-    retun this.request('getSearchIndexStats')
+    return this.request('getSearchIndexStats')
   }
 
   listMedia(query: CatalogQuery): Promise<MediaItem[]> {
-    retun this.request('listMedia', query)
+    return this.request('listMedia', query)
   }
 
   getMediaByIds(ids: string[]): Promise<MediaItem[]> {
-    retun this.request('getMediaByIds', ids)
+    return this.request('getMediaByIds', ids)
   }
 
   getGeoPoints(range: TimeRange = {}): Promise<GeoIndexPoint[]> {
-    retun this.request('getGeoPoints', range)
+    return this.request('getGeoPoints', range)
   }
 
   countMedia(): Promise<number> {
-    retun this.request('countMedia')
+    return this.request('countMedia')
   }
 
   buildGeoIndexes(
     onProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<GeoIndexBuildSummary> {
-    retun this.request('buildGeoIndexes', undefined, (progress) => {
+    return this.request('buildGeoIndexes', undefined, (progress) => {
       onProgress?.(progress as GeoIndexBuildProgress)
     })
   }
@@ -181,22 +181,22 @@ export class CatalogClient {
     indexId: string,
     query: GeoSearchQuery,
   ): Promise<GeoSearchResult[]> {
-    retun this.request('searchGeoIndex', { indexId, query })
+    return this.request('searchGeoIndex', { indexId, query })
   }
 
   getGeoIndexStats(indexId: string): Promise<GeoIndexStats> {
-    retun this.request('getGeoIndexStats', indexId)
+    return this.request('getGeoIndexStats', indexId)
   }
 
   validateGeoIndex(
     indexId: string,
     query: GeoSearchQuery,
   ): Promise<ValidationReport> {
-    retun this.request('validateGeoIndex', { indexId, query })
+    return this.request('validateGeoIndex', { indexId, query })
   }
 
   clear(): Promise<void> {
-    retun this.request('clear')
+    return this.request('clear')
   }
 
   dispose(): void {
@@ -209,7 +209,7 @@ export class CatalogClient {
     if (this.worker) {
       traceStartup('[startup:catalog-client]', 'reusing catalog worker', {
       })
-      retun this.worker
+      return this.worker
     }
 
     traceStartup('[startup:catalog-client]', 'creating catalog worker', {
@@ -226,10 +226,10 @@ export class CatalogClient {
       if ('type' in response && response.type === 'backgroundProgress') {
         const progress = response.progress as GeoIndexBuildProgress
         for (const listener of this.indexProgressListeners) listener(progress)
-        retun
+        return
       }
       const pending = this.pending.get(response.id)
-      if (!pending) retun
+      if (!pending) return
 
       if ('type' in response && response.type === 'progress') {
         traceStartup('[startup:catalog-client]', 'worker progress received', {
@@ -239,7 +239,7 @@ export class CatalogClient {
           progress: response.progress,
         })
         pending.onProgress?.(response.progress)
-        retun
+        return
       }
 
       this.pending.delete(response.id)
@@ -280,7 +280,7 @@ export class CatalogClient {
       this.rejectAll(new Error('Catalog worker sent an unreadable response'))
     })
 
-    retun worker
+    return worker
   }
 
   private rejectAll(error: Error): void {
@@ -305,10 +305,10 @@ export class CatalogClient {
       hasPayload: payload !== undefined,
     })
 
-    retun new Promise<T>((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       if (signal?.aborted) {
         reject(abortError())
-        retun
+        return
       }
       const cancelRequest = () => {
         traceStartup('[startup:catalog-client]', 'request cancellation posted', {

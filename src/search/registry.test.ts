@@ -20,7 +20,7 @@ const baseCapabilities: SearchIndexCapabilities = {
 }
 
 function stats(engineId: string): SearchIndexStats {
-  retun {
+  return {
     engineId,
     pointCount: 0,
     distanceComputations: 0,
@@ -33,7 +33,7 @@ function stats(engineId: string): SearchIndexStats {
 }
 
 function page(engineId: string): SearchPage {
-  retun {
+  return {
     items: [],
     resultMetrics: stats(engineId),
     engineId,
@@ -47,7 +47,7 @@ function engine(
   canHandle: (spec: SearchSpec) => boolean,
   search = vi.fn(async () => page(id)),
 ): SearchIndexEngine {
-  retun {
+  return {
     id,
     label: id,
     capabilities: baseCapabilities,

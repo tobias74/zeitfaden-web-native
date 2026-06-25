@@ -1033,6 +1033,7 @@
   background: #ffffff;
   overflow: hidden;
   position: relative;
+  content-visibility: auto;
   cursor: pointer;
   outline: none;
   transition:

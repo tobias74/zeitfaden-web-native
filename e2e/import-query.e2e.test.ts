@@ -34,7 +34,7 @@ function chromeExecutable(): string {
       'No Chromium executable found. Set PLAYWRIGHT_CHROMIUM_EXECUTABLE.',
     )
   }
-  retun executable
+  return executable
 }
 
 async function waitForDevServerUrl(): Promise<string> {
@@ -42,7 +42,7 @@ async function waitForDevServerUrl(): Promise<string> {
   const url = urls.find((candidate) => candidate.startsWith('http://127.0.0.1'))
     ?? urls[0]
   if (!url) throw new Error('Vite did not expose a local dev server URL.')
-  retun url
+  return url
 }
 
 async function expectNoUiError(page: Page): Promise<void> {
@@ -58,7 +58,7 @@ async function waitForResultCards(page: Page, minimum = 1): Promise<void> {
     (minimumCount) => {
       const grid = document.querySelector('.media-grid')
       const busy = grid?.getAttribute('aria-busy')
-      retun (
+      return (
         busy !== 'true' &&
         document.querySelectorAll('.media-card').length >= minimumCount
       )
@@ -83,7 +83,7 @@ async function waitForIndexCurrent(page: Page, panelTitle: string): Promise<void
 }
 
 async function appDiagnostic(page: Page): Promise<string> {
-  retun page.evaluate(() => {
+  return page.evaluate(() => {
     const text = (selector: string) =>
       document.querySelector(selector)?.textContent?.replace(/\s+/g, ' ').trim()
         ?? ''
@@ -96,7 +96,7 @@ async function appDiagnostic(page: Page): Promise<string> {
         .slice(0, 1_000)
         ?? ''
 
-    retun JSON.stringify(
+    return JSON.stringify(
       {
         alert: text('[role="alert"]'),
         topbarProgress: text('.topbar-progress-slot'),
@@ -133,7 +133,7 @@ async function runStep(
 }
 
 function installGeneratedGeoFile(pageContext: BrowserContext): Promise<void> {
-  retun pageContext.addInitScript(
+  return pageContext.addInitScript(
     ({ pointCount }) => {
       window.localStorage.setItem('geo-media-index-lab:language', 'en')
       window.localStorage.setItem('geo-media-index-lab:result-page-size', '100')
@@ -145,7 +145,7 @@ function installGeneratedGeoFile(pageContext: BrowserContext): Promise<void> {
           longitudeE7: Math.round((8 + (index % 1_000) / 10_000) * 10_000_000),
           timestamp: new Date(baseTime + index * 60_000).toISOString(),
         }))
-        retun new File(
+        return new File(
           [JSON.stringify({ locations })],
           `zeitfaden-e2e-${pointCount}.json`,
           { type: 'application/json' },

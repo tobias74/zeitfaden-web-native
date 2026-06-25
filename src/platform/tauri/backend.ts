@@ -34,7 +34,7 @@ import type {
 function abortError(): Error {
   const error = new Error('Catalog request aborted')
   error.name = 'AbortError'
-  retun error
+  return error
 }
 
 function invokeWithAbort<T>(
@@ -42,10 +42,10 @@ function invokeWithAbort<T>(
   args: Record<string, unknown> | undefined,
   signal?: AbortSignal,
 ): Promise<T> {
-  if (!signal) retun invoke<T>(command, args)
-  if (signal.aborted) retun Promise.reject(abortError())
+  if (!signal) return invoke<T>(command, args)
+  if (signal.aborted) return Promise.reject(abortError())
 
-  retun new Promise<T>((resolve, reject) => {
+  return new Promise<T>((resolve, reject) => {
     const abort = () => {
       reject(abortError())
     }
@@ -60,45 +60,45 @@ function invokeWithAbort<T>(
 
 class TauriCatalogBackend implements CatalogBackend {
   init(): Promise<CatalogInfo> {
-    retun invoke('init_catalog')
+    return invoke('init_catalog')
   }
 
   upsertSource(source: MediaSource): Promise<void> {
-    retun invoke('upsert_source', { source })
+    return invoke('upsert_source', { source })
   }
 
   upsertMedia(items: MediaItem[]): Promise<number> {
-    retun invoke('upsert_media', { items })
+    return invoke('upsert_media', { items })
   }
 
   listMedia(query: CatalogQuery): Promise<MediaItem[]> {
-    retun invoke('list_media', { query })
+    return invoke('list_media', { query })
   }
 
   searchMedia(
     spec: SearchSpec,
     options: CatalogSearchOptions = {},
   ): Promise<SearchPage> {
-    retun invokeWithAbort('search_media', { spec }, options.signal)
+    return invokeWithAbort('search_media', { spec }, options.signal)
   }
 
   searchMapPoints(
     spec: SearchSpec,
     options: CatalogSearchOptions = {},
   ): Promise<MapPointPage> {
-    retun invokeWithAbort('search_map_points', { spec }, options.signal)
+    return invokeWithAbort('search_map_points', { spec }, options.signal)
   }
 
   getMediaByIds(ids: string[]): Promise<MediaItem[]> {
-    retun invoke('get_media_by_ids', { ids })
+    return invoke('get_media_by_ids', { ids })
   }
 
   getGeoPoints(range: TimeRange = {}): Promise<GeoIndexPoint[]> {
-    retun invoke('get_geo_points', { range })
+    return invoke('get_geo_points', { range })
   }
 
   countMedia(): Promise<number> {
-    retun invoke('count_media')
+    return invoke('count_media')
   }
 
   async buildGeoIndexes(
@@ -108,7 +108,7 @@ class TauriCatalogBackend implements CatalogBackend {
       'segmented-ball-tree',
       onProgress,
     )
-    retun {
+    return {
       pointCount: summary.pointCount,
       buildTimeMs: summary.buildTimeMs,
     }
@@ -118,14 +118,14 @@ class TauriCatalogBackend implements CatalogBackend {
     indexId: string,
     onProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<SearchIndexBuildSummary> {
-    retun this.runSearchIndexBuild(indexId, false, onProgress)
+    return this.runSearchIndexBuild(indexId, false, onProgress)
   }
 
   async rebuildSearchIndex(
     indexId: string,
     onProgress?: (progress: GeoIndexBuildProgress) => void,
   ): Promise<SearchIndexBuildSummary> {
-    retun this.runSearchIndexBuild(indexId, true, onProgress)
+    return this.runSearchIndexBuild(indexId, true, onProgress)
   }
 
   private async runSearchIndexBuild(
@@ -141,7 +141,7 @@ class TauriCatalogBackend implements CatalogBackend {
     )
 
     try {
-      retun await invoke('build_search_indexes', { indexId, forceRebuild })
+      return await invoke('build_search_indexes', { indexId, forceRebuild })
     } finally {
       unlisten()
     }
@@ -151,26 +151,26 @@ class TauriCatalogBackend implements CatalogBackend {
     indexId: string,
     query: GeoSearchQuery,
   ): Promise<GeoSearchResult[]> {
-    retun invoke('search_geo_index', { indexId, query })
+    return invoke('search_geo_index', { indexId, query })
   }
 
   getGeoIndexStats(indexId: string): Promise<GeoIndexStats> {
-    retun invoke('get_geo_index_stats', { indexId })
+    return invoke('get_geo_index_stats', { indexId })
   }
 
   getSearchIndexStats(): Promise<SearchIndexStats[]> {
-    retun invoke('get_search_index_stats')
+    return invoke('get_search_index_stats')
   }
 
   validateGeoIndex(
     indexId: string,
     query: GeoSearchQuery,
   ): Promise<ValidationReport> {
-    retun invoke('validate_geo_index', { indexId, query })
+    return invoke('validate_geo_index', { indexId, query })
   }
 
   clear(): Promise<void> {
-    retun invoke('clear_catalog')
+    return invoke('clear_catalog')
   }
 
   dispose(): void {}
@@ -181,14 +181,14 @@ class TauriImportBackend implements ImportBackend {
     onProgress?: (progress: ImportProgress) => void,
     options?: ImportOptions,
   ): Promise<ImportSummary> {
-    retun this.importWithProgress('import_folder', onProgress, options)
+    return this.importWithProgress('import_folder', onProgress, options)
   }
 
   async importGeoFile(
     onProgress?: (progress: ImportProgress) => void,
     options?: ImportOptions,
   ): Promise<ImportSummary> {
-    retun this.importWithProgress('import_geo_file', onProgress, options)
+    return this.importWithProgress('import_geo_file', onProgress, options)
   }
 
   private async importWithProgress(
@@ -208,7 +208,7 @@ class TauriImportBackend implements ImportBackend {
     })
 
     try {
-      retun await invoke(command)
+      return await invoke(command)
     } finally {
       options?.signal?.removeEventListener('abort', cancelImport)
       unlisten()
@@ -216,7 +216,7 @@ class TauriImportBackend implements ImportBackend {
   }
 
   commitImport(): Promise<void> {
-    retun invoke('commit_import')
+    return invoke('commit_import')
   }
 
   dispose(): void {}
@@ -224,11 +224,11 @@ class TauriImportBackend implements ImportBackend {
 
 class TauriThumbnailBackend implements ThumbnailBackend {
   async resolveThumbnailUrl(thumbnailKey?: string): Promise<string | undefined> {
-    if (!thumbnailKey) retun undefined
+    if (!thumbnailKey) return undefined
     const path = await invoke<string | undefined>('resolve_thumbnail_path', {
       thumbnailKey,
     })
-    retun path ? convertFileSrc(path) : undefined
+    return path ? convertFileSrc(path) : undefined
   }
 
   revokeThumbnailUrl(): void {}
@@ -241,7 +241,7 @@ class TauriFileLocationBackend {
   ): Promise<string | undefined> {
     const selectedLocation =
       location ?? item.locations.find((candidate) => candidate.absolutePath)
-    retun selectedLocation?.absolutePath
+    return selectedLocation?.absolutePath
       ? convertFileSrc(selectedLocation.absolutePath)
       : undefined
   }
@@ -249,14 +249,14 @@ class TauriFileLocationBackend {
   revokeOriginalUrl(): void {}
 
   revealLocation(location: MediaLocation): Promise<void> {
-    retun invoke('reveal_location', { location })
+    return invoke('reveal_location', { location })
   }
 }
 
 export function createTauriPlatformBackend(): PlatformBackend {
   const catalog = new TauriCatalogBackend()
 
-  retun {
+  return {
     kind: 'tauri',
     capabilities: {
       absolutePaths: true,

@@ -29,18 +29,18 @@ class MemoryDirectoryHandle {
   async getFileHandle(name: string): Promise<MemoryFileHandle> {
     const file = this.files.get(name)
     if (!file) throw new Error(`Missing memory file: ${name}`)
-    retun {
+    return {
       getFile: async () => file,
     }
   }
 }
 
 function timestampSeconds(value: number): number {
-  retun Math.max(0, Math.min(0xffffffff, Math.floor(value / 1000)))
+  return Math.max(0, Math.min(0xffffffff, Math.floor(value / 1000)))
 }
 
 function coordinateE7(value: number): number {
-  retun Math.round(value * 10_000_000)
+  return Math.round(value * 10_000_000)
 }
 
 function kindFlags(kind: MediaKind, hasGeo = true): number {
@@ -50,11 +50,11 @@ function kindFlags(kind: MediaKind, hasGeo = true): number {
       : kind === 'geo_point'
         ? constants.KIND_FLAG_GEO_POINT
         : constants.KIND_FLAG_IMAGE
-  retun encoded | (hasGeo ? constants.KIND_FLAG_HAS_GEO : 0)
+  return encoded | (hasGeo ? constants.KIND_FLAG_HAS_GEO : 0)
 }
 
 function makePackedRecord(index: number, kind: MediaKind = fixtureKind(index)): PackedIndexRecord {
-  retun {
+  return {
     timestampSec: timestampSeconds(fixtureTimestamp(index)),
     latE7: coordinateE7(fixtureLat(index)),
     lonE7: coordinateE7(fixtureLon(index)),
@@ -67,7 +67,7 @@ function makePackedRecords(
   count: number,
   kindForIndex: (index: number) => MediaKind = fixtureKind,
 ): PackedIndexRecord[] {
-  retun Array.from({ length: count }, (_, index) =>
+  return Array.from({ length: count }, (_, index) =>
     makePackedRecord(index, kindForIndex(index)),
   )
 }
@@ -81,14 +81,14 @@ function makePackedIndex(records: PackedIndexRecord[]): ResidentPackedGeoIndex {
     constants.INDEX_KIND_TIME_GEO,
   )
   if (!index) throw new Error('Failed to create packed fixture index')
-  retun index
+  return index
 }
 
 function mediaKindFromFlags(flags: number): MediaKind {
   const encoded = flags & 0b11
-  if (encoded === constants.KIND_FLAG_VIDEO) retun 'video'
-  if (encoded === constants.KIND_FLAG_GEO_POINT) retun 'geo_point'
-  retun 'image'
+  if (encoded === constants.KIND_FLAG_VIDEO) return 'video'
+  if (encoded === constants.KIND_FLAG_GEO_POINT) return 'geo_point'
+  return 'image'
 }
 
 function bruteForceAssetIds(
@@ -102,26 +102,26 @@ function bruteForceAssetIds(
     .filter((record) => record.timestampSec >= minTime && record.timestampSec <= maxTime)
     .filter((record) => {
       const kind = mediaKindFromFlags(record.kindFlags)
-      if (query.kind === 'media' && kind !== 'image' && kind !== 'video') retun false
+      if (query.kind === 'media' && kind !== 'image' && kind !== 'video') return false
       if (query.kind && query.kind !== 'all' && query.kind !== 'media' && kind !== query.kind) {
-        retun false
+        return false
       }
       const hasGeo = (record.kindFlags & constants.KIND_FLAG_HAS_GEO) !== 0
-      if (query.hasGeo === true && !hasGeo) retun false
-      if (query.hasGeo === false && hasGeo) retun false
+      if (query.hasGeo === true && !hasGeo) return false
+      if (query.hasGeo === false && hasGeo) return false
       if (query.geoBounds) {
         const lat = record.latE7 / 10_000_000
         const lon = record.lonE7 / 10_000_000
-        if (lat < query.geoBounds.minLat || lat > query.geoBounds.maxLat) retun false
-        if (lon < query.geoBounds.minLon || lon > query.geoBounds.maxLon) retun false
+        if (lat < query.geoBounds.minLat || lat > query.geoBounds.maxLat) return false
+        if (lon < query.geoBounds.minLon || lon > query.geoBounds.maxLon) return false
       }
-      retun true
+      return true
     })
     .sort((left, right) =>
       left.timestampSec - right.timestampSec || left.assetId - right.assetId,
     )
   if (direction === 'desc') filtered.reverse()
-  retun filtered.map((record) => record.assetId)
+  return filtered.map((record) => record.assetId)
 }
 
 function encodeAssetTableFiles(items: MediaItem[]): MemoryDirectoryHandle {
@@ -169,7 +169,7 @@ function encodeAssetTableFiles(items: MediaItem[]): MemoryDirectoryHandle {
     constants.ASSET_RECORD_INDEX_FILE,
     new File([recordIndexBytes], constants.ASSET_RECORD_INDEX_FILE),
   )
-  retun directory
+  return directory
 }
 
 describe('catalog worker packed query hot paths', () => {
@@ -191,7 +191,7 @@ describe('catalog worker packed query hot paths', () => {
     expect(page.metrics.pagesRead).toBeGreaterThanOrEqual(1)
   }, 15_000)
 
-  it('retuns sparse kind matches in timestamp order without enriching every record', async () => {
+  it('returns sparse kind matches in timestamp order without enriching every record', async () => {
     const records = makePackedRecords(LARGE_RECORD_COUNT, (index) =>
       index % 25_000 === 0 ? 'image' : 'geo_point',
     )
@@ -211,7 +211,7 @@ describe('catalog worker packed query hot paths', () => {
     expect(page.metrics.candidatesInspected).toBeLessThanOrEqual(LARGE_RECORD_COUNT)
   }, 15_000)
 
-  it('retuns map points with time, kind, bounds, offset, and limit filters', async () => {
+  it('returns map points with time, kind, bounds, offset, and limit filters', async () => {
     const records = makePackedRecords(20_000)
     const index = makePackedIndex(records)
     const query: CatalogQuery = {

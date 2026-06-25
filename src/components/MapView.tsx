@@ -74,59 +74,56 @@ const AREA_CURSOR_TOLERANCE_PX = 10
 function clusterStyle(feature: FeatureLike): Style {
   const clusteredFeatures = (feature.get('features') ?? []) as Feature[]
   const size = clusteredFeatures.length
-  const hasResult = clusteredFeatures.some(
-    (clusteredFeature) => clusteredFeature.get('isResult') === true,
-  )
 
   if (size <= 1) {
-    retun hasResult ? resultStyle : baseStyle
+    return baseStyle
   }
 
   const bucket = size >= 100 ? 'large' : size >= 10 ? 'medium' : 'small'
-  const key = `${hasResult ? 'result' : 'base'}:${bucket}:${size}`
+  const key = `${bucket}:${size}`
   const cachedStyle = clusterStyleCache.get(key)
-  if (cachedStyle) retun cachedStyle
+  if (cachedStyle) return cachedStyle
 
   const radius = bucket === 'large' ? 22 : bucket === 'medium' ? 18 : 15
   const style = new Style({
     image: new CircleStyle({
       radius,
-      fill: new Fill({ color: hasResult ? '#008a72' : '#4f5b69' }),
+      fill: new Fill({ color: '#4f5b69' }),
       stroke: new Stroke({ color: '#ffffff', width: 2.5 }),
     }),
     text: new Text({
       text: size.toLocaleString(),
       fill: new Fill({ color: '#ffffff' }),
-      stroke: new Stroke({ color: hasResult ? '#005446' : '#303846', width: 2 }),
+      stroke: new Stroke({ color: '#303846', width: 2 }),
       font: '700 12px system-ui, sans-serif',
     }),
   })
 
   clusterStyleCache.set(key, style)
-  retun style
+  return style
 }
 
 function coordinatesForCluster(feature: FeatureLike): Coordinate[] {
   const clusteredFeatures = (feature.get('features') ?? []) as Feature[]
-  retun clusteredFeatures.flatMap((clusteredFeature) => {
+  return clusteredFeatures.flatMap((clusteredFeature) => {
     const geometry = clusteredFeature.getGeometry()
-    retun geometry instanceof Point ? [geometry.getCoordinates()] : []
+    return geometry instanceof Point ? [geometry.getCoordinates()] : []
   })
 }
 
 function boundedLatitude(value: number): number {
-  retun Math.min(90, Math.max(-90, value))
+  return Math.min(90, Math.max(-90, value))
 }
 
 function boundedLongitude(value: number): number {
-  retun Math.min(180, Math.max(-180, value))
+  return Math.min(180, Math.max(-180, value))
 }
 
 function boundsFromMapExtent(extent: Extent): GeoBounds {
   const [leftLon, bottomLat] = toLonLat([extent[0], extent[1]])
   const [rightLon, topLat] = toLonLat([extent[2], extent[3]])
 
-  retun {
+  return {
     minLat: boundedLatitude(Math.min(bottomLat, topLat)),
     maxLat: boundedLatitude(Math.max(bottomLat, topLat)),
     minLon: boundedLongitude(Math.min(leftLon, rightLon)),
@@ -137,7 +134,7 @@ function boundsFromMapExtent(extent: Extent): GeoBounds {
 function boundsFromClusterCoordinates(
   coordinates: Coordinate[],
 ): GeoBounds | undefined {
-  if (coordinates.length === 0) retun undefined
+  if (coordinates.length === 0) return undefined
 
   const extent = boundingExtent(coordinates) as [number, number, number, number]
   const width = extent[2] - extent[0]
@@ -151,7 +148,7 @@ function boundsFromClusterCoordinates(
     MIN_CLUSTER_BOUNDS_PADDING_METERS,
   )
 
-  retun boundsFromMapExtent([
+  return boundsFromMapExtent([
     extent[0] - paddingX,
     extent[1] - paddingY,
     extent[2] + paddingX,
@@ -163,7 +160,7 @@ function mapExtentFromBounds(bounds: GeoBounds): Extent {
   const [minX, minY] = fromLonLat([bounds.minLon, bounds.minLat])
   const [maxX, maxY] = fromLonLat([bounds.maxLon, bounds.maxLat])
 
-  retun [
+  return [
     Math.min(minX, maxX),
     Math.min(minY, maxY),
     Math.max(minX, maxX),
@@ -173,9 +170,9 @@ function mapExtentFromBounds(bounds: GeoBounds): Extent {
 
 function visibleBoundsFromMap(map: Map): GeoBounds | undefined {
   const size = map.getSize()
-  if (!size || size[0] <= 0 || size[1] <= 0) retun undefined
+  if (!size || size[0] <= 0 || size[1] <= 0) return undefined
 
-  retun boundsFromMapExtent(map.getView().calculateExtent(size))
+  return boundsFromMapExtent(map.getView().calculateExtent(size))
 }
 
 function clearExtentInteraction(interaction: ExtentInteraction): void {
@@ -186,7 +183,7 @@ function clearExtentInteraction(interaction: ExtentInteraction): void {
 }
 
 function currentExtent(interaction: ExtentInteraction): Extent | undefined {
-  retun (
+  return (
     interaction as {
       getExtent(): Extent | null
     }
@@ -202,7 +199,7 @@ function setExtentDragEnabled(
 }
 
 function isPixelBetween(value: number, min: number, max: number): boolean {
-  retun (
+  return (
     value >= min - AREA_CURSOR_TOLERANCE_PX &&
     value <= max + AREA_CURSOR_TOLERANCE_PX
   )
@@ -227,13 +224,13 @@ function areaCursorForPixel(map: Map, extent: Extent, pixel: Pixel): string {
     Math.abs(y - bottom) <= AREA_CURSOR_TOLERANCE_PX && isPixelBetween(x, left, right)
 
   if ((nearLeft && nearTop) || (nearRight && nearBottom)) {
-    retun 'nwse-resize'
+    return 'nwse-resize'
   }
   if ((nearRight && nearTop) || (nearLeft && nearBottom)) {
-    retun 'nesw-resize'
+    return 'nesw-resize'
   }
-  if (nearLeft || nearRight) retun 'ew-resize'
-  if (nearTop || nearBottom) retun 'ns-resize'
+  if (nearLeft || nearRight) return 'ew-resize'
+  if (nearTop || nearBottom) return 'ns-resize'
 
   if (
     x > left + AREA_CURSOR_TOLERANCE_PX &&
@@ -241,10 +238,10 @@ function areaCursorForPixel(map: Map, extent: Extent, pixel: Pixel): string {
     y > top + AREA_CURSOR_TOLERANCE_PX &&
     y < bottom - AREA_CURSOR_TOLERANCE_PX
   ) {
-    retun 'move'
+    return 'move'
   }
 
-  retun 'grab'
+  return 'grab'
 }
 
 function setMapCursor(target: HTMLElement, map: Map, cursor: string): void {
@@ -257,15 +254,13 @@ function pointRenderKey(
   lon: number,
   timestamp: number | undefined,
 ): string {
-  retun `${lat.toFixed(7)}:${lon.toFixed(7)}:${timestamp ?? ''}`
+  return `${lat.toFixed(7)}:${lon.toFixed(7)}:${timestamp ?? ''}`
 }
 
-function resultPointKey(result: EnrichedSearchResult): string | undefined {
-  const { item } = result
-  if (typeof item.latitude !== 'number' || typeof item.longitude !== 'number') {
-    retun undefined
-  }
-  retun pointRenderKey(item.latitude, item.longitude, item.timestamp)
+function pointFeature(lon: number, lat: number): Feature {
+  return new Feature({
+    geometry: new Point(fromLonLat([lon, lat])),
+  })
 }
 
 export function MapView({
@@ -287,10 +282,11 @@ export function MapView({
   const pendingBoundsExtentRef = useRef<Extent | undefined>(undefined)
   const syncingBoundsRef = useRef(false)
   const sourceRef = useRef(new VectorSource())
+  const resultSourceRef = useRef(new VectorSource())
   const querySourceRef = useRef(new VectorSource())
 
   useEffect(() => {
-    if (!targetRef.current || mapRef.current) retun
+    if (!targetRef.current || mapRef.current) return
 
     const target = targetRef.current
     const clusterSource = new Cluster({
@@ -305,6 +301,10 @@ export function MapView({
     const queryLayer = new VectorLayer({
       source: querySourceRef.current,
       style: queryStyle,
+    })
+    const resultLayer = new VectorLayer({
+      source: resultSourceRef.current,
+      style: resultStyle,
     })
     const extentInteraction = new ExtentInteraction({
       drag: false,
@@ -322,6 +322,7 @@ export function MapView({
           source: new OSM(),
         }),
         clusterLayer,
+        resultLayer,
         queryLayer,
       ],
       view: new View({
@@ -339,15 +340,15 @@ export function MapView({
     const commitPendingBounds = () => {
       const extent = pendingBoundsExtentRef.current
       pendingBoundsExtentRef.current = undefined
-      if (!boundsDrawingRef.current || !extent) retun
-      if (extent[0] === extent[2] || extent[1] === extent[3]) retun
+      if (!boundsDrawingRef.current || !extent) return
+      if (extent[0] === extent[2] || extent[1] === extent[3]) return
       onGeoBoundsChange(boundsFromMapExtent(extent))
     }
 
     extentInteraction.on('extentchanged', (event) => {
-      if (syncingBoundsRef.current || !event.extent) retun
+      if (syncingBoundsRef.current || !event.extent) return
       const extent = event.extent.slice() as Extent
-      if (extent[0] === extent[2] || extent[1] === extent[3]) retun
+      if (extent[0] === extent[2] || extent[1] === extent[3]) return
       setExtentDragEnabled(extentInteraction, true)
       pendingBoundsExtentRef.current = extent
     })
@@ -356,7 +357,7 @@ export function MapView({
     map.on('moveend', reportVisibleBounds)
 
     map.on('singleclick', (event) => {
-      if (boundsDrawingRef.current) retun
+      if (boundsDrawingRef.current) return
 
       const clickedCluster = map.forEachFeatureAtPixel(
         event.pixel,
@@ -367,7 +368,7 @@ export function MapView({
         if (coordinates.length > 1) {
           const bounds = boundsFromClusterCoordinates(coordinates)
           if (bounds) onGeoBoundsChange(bounds)
-          retun
+          return
         }
       }
 
@@ -385,12 +386,12 @@ export function MapView({
             ? areaCursorForPixel(map, extent, event.pixel)
             : 'crosshair',
         )
-        retun
+        return
       }
 
       if (event.dragging) {
         setMapCursor(target, map, '')
-        retun
+        return
       }
 
       const hoveredCluster = map.forEachFeatureAtPixel(
@@ -415,7 +416,7 @@ export function MapView({
     resizeObserver.observe(target)
     const initialBoundsTimer = window.setTimeout(reportVisibleBounds, 0)
 
-    retun () => {
+    return () => {
       window.clearTimeout(initialBoundsTimer)
       document.removeEventListener('pointerup', commitPendingBounds)
       document.removeEventListener('pointercancel', commitPendingBounds)
@@ -439,45 +440,62 @@ export function MapView({
 
   useEffect(() => {
     const source = sourceRef.current
-    const querySource = querySourceRef.current
-    source.clear()
-    querySource.clear()
-
-    const resultIds = new Set(results.map((result) => result.mediaId))
-    const resultPointKeys = new Set(
-      results.flatMap((result) => {
-        const key = resultPointKey(result)
-        retun key ? [key] : []
-      }),
-    )
+    const features: Feature[] = []
 
     for (const item of geoItems) {
       if (typeof item.lat !== 'number' || typeof item.lon !== 'number') {
         continue
       }
-      const isResult =
-        (item.mediaId ? resultIds.has(item.mediaId) : false) ||
-        resultPointKeys.has(pointRenderKey(item.lat, item.lon, item.timestamp))
-      const feature = new Feature({
-        geometry: new Point(fromLonLat([item.lon, item.lat])),
-      })
-      feature.set('mediaId', item.mediaId ?? item.assetId)
-      feature.set('isResult', isResult)
-      source.addFeature(feature)
+      const feature = pointFeature(item.lon, item.lat)
+      feature.set('mediaId', item.mediaId ?? item.assetId, true)
+      features.push(feature)
     }
 
+    source.clear(true)
+    source.addFeatures(features)
+  }, [geoItems])
+
+  useEffect(() => {
+    const resultSource = resultSourceRef.current
+    const features: Feature[] = []
+    const seenPoints = new Set<string>()
+
+    for (const result of results) {
+      const { item } = result
+      if (
+        typeof item.latitude !== 'number' ||
+        typeof item.longitude !== 'number'
+      ) {
+        continue
+      }
+
+      const key = pointRenderKey(item.latitude, item.longitude, item.timestamp)
+      if (seenPoints.has(key)) continue
+      seenPoints.add(key)
+
+      const feature = pointFeature(item.longitude, item.latitude)
+      feature.set('mediaId', result.mediaId, true)
+      features.push(feature)
+    }
+
+    resultSource.clear(true)
+    resultSource.addFeatures(features)
+  }, [results])
+
+  useEffect(() => {
+    const querySource = querySourceRef.current
+    querySource.clear(true)
+
     if (queryPoint) {
-      const feature = new Feature({
-        geometry: new Point(fromLonLat([queryPoint.lon, queryPoint.lat])),
-      })
+      const feature = pointFeature(queryPoint.lon, queryPoint.lat)
       querySource.addFeature(feature)
     }
-  }, [geoItems, queryPoint, results])
+  }, [queryPoint])
 
   useEffect(() => {
     hasGeoBoundsRef.current = Boolean(geoBounds)
     const extentInteraction = extentInteractionRef.current
-    if (!extentInteraction) retun
+    if (!extentInteraction) return
 
     syncingBoundsRef.current = true
     if (geoBounds) {
@@ -490,5 +508,5 @@ export function MapView({
     syncingBoundsRef.current = false
   }, [geoBounds])
 
-  retun <div ref={targetRef} className="map-view" aria-label={label} />
+  return <div ref={targetRef} className="map-view" aria-label={label} />
 }

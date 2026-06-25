@@ -24,7 +24,7 @@ class MemoryDistanceStore implements ResidentPackedDistanceStore {
   index: ArrayBuffer | undefined
 
   async readManifest(): Promise<ResidentPackedDistanceManifest | undefined> {
-    retun this.manifest ? structuredClone(this.manifest) : undefined
+    return this.manifest ? structuredClone(this.manifest) : undefined
   }
 
   async writeManifest(
@@ -35,7 +35,7 @@ class MemoryDistanceStore implements ResidentPackedDistanceStore {
   }
 
   async readIndex(): Promise<ArrayBuffer | undefined> {
-    retun this.index?.slice(0)
+    return this.index?.slice(0)
   }
 
   async writeIndex(
@@ -53,19 +53,19 @@ class MemoryDistanceStore implements ResidentPackedDistanceStore {
 
 function matchesQuery(point: ResidentDistanceBuildPoint, query: GeoSearchQuery): boolean {
   if (query.startTime !== undefined || query.endTime !== undefined) {
-    if (point.timestamp === undefined) retun false
-    if (query.startTime !== undefined && point.timestamp < query.startTime) retun false
-    if (query.endTime !== undefined && point.timestamp > query.endTime) retun false
+    if (point.timestamp === undefined) return false
+    if (query.startTime !== undefined && point.timestamp < query.startTime) return false
+    if (query.endTime !== undefined && point.timestamp > query.endTime) return false
   }
-  if (query.kind === 'media' && point.kind !== 'image' && point.kind !== 'video') retun false
+  if (query.kind === 'media' && point.kind !== 'image' && point.kind !== 'video') return false
   if (query.kind && query.kind !== 'all' && query.kind !== 'media' && point.kind !== query.kind) {
-    retun false
+    return false
   }
   if (query.geoBounds) {
-    if (point.lat < query.geoBounds.minLat || point.lat > query.geoBounds.maxLat) retun false
-    if (point.lon < query.geoBounds.minLon || point.lon > query.geoBounds.maxLon) retun false
+    if (point.lat < query.geoBounds.minLat || point.lat > query.geoBounds.maxLat) return false
+    if (point.lon < query.geoBounds.minLon || point.lon > query.geoBounds.maxLon) return false
   }
-  retun true
+  return true
 }
 
 function bruteForce(
@@ -73,7 +73,7 @@ function bruteForce(
   query: GeoSearchQuery,
 ): ResidentDistanceSearchResult[] {
   const offset = query.offset ?? 0
-  retun sourcePoints
+  return sourcePoints
     .filter((point) => matchesQuery(point, query))
     .map((point) => ({
       assetId: point.assetId,
@@ -81,7 +81,7 @@ function bruteForce(
     }))
     .sort((left, right) => {
       const distanceDelta = left.distanceMeters - right.distanceMeters
-      retun Math.abs(distanceDelta) > 1e-6 ? distanceDelta : left.assetId - right.assetId
+      return Math.abs(distanceDelta) > 1e-6 ? distanceDelta : left.assetId - right.assetId
     })
     .slice(offset, offset + query.k)
 }
@@ -93,7 +93,7 @@ describe('ResidentPackedDistanceIndex', () => {
     await index.build(async (onBatch) => {
       await onBatch(points.slice(0, 3), 3)
       await onBatch(points.slice(3), points.length)
-      retun points.length
+      return points.length
     }, 11)
 
     const restored = new ResidentPackedDistanceIndex(store)
