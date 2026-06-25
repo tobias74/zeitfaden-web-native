@@ -218,7 +218,6 @@ export function useSearchState(options: UseSearchStateOptions): {
 
   const setGeoBounds = useCallback((bounds: GeoBounds) => {
     setGeoBoundsState(bounds)
-    setBoundsDrawing(false)
     resetPage()
   }, [resetPage])
 

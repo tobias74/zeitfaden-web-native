@@ -265,11 +265,6 @@
   cursor: crosshair;
 }
 
-.map-draw-box {
-  border: 2px solid #d84d2a;
-  background: rgba(216, 77, 42, 0.14);
-}
-
 .map-area-tools {
   position: absolute;
   top: 12px;

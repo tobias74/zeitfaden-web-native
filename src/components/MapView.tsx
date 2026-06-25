@@ -3,8 +3,7 @@ import Map from 'ol/Map'
 import View from 'ol/View'
 import { boundingExtent } from 'ol/extent'
 import Point from 'ol/geom/Point'
-import { fromExtent } from 'ol/geom/Polygon'
-import DragBox from 'ol/interaction/DragBox'
+import ExtentInteraction from 'ol/interaction/Extent'
 import TileLayer from 'ol/layer/Tile'
 import VectorLayer from 'ol/layer/Vector'
 import { fromLonLat, toLonLat } from 'ol/proj'
@@ -16,6 +15,8 @@ import { useEffect, useRef } from 'react'
 import type { EnrichedSearchResult, GeoBounds, MediaItem } from '../types'
 import type { FeatureLike } from 'ol/Feature'
 import type { Coordinate } from 'ol/coordinate'
+import type { Extent } from 'ol/extent'
+import type { Pixel } from 'ol/pixel'
 
 type QueryPoint = {
   lat: number
@@ -62,9 +63,18 @@ const boundsStyle = new Style({
   stroke: new Stroke({ color: '#d84d2a', width: 2 }),
 })
 
+const boundsHandleStyle = new Style({
+  image: new CircleStyle({
+    radius: 5,
+    fill: new Fill({ color: '#ffffff' }),
+    stroke: new Stroke({ color: '#d84d2a', width: 2 }),
+  }),
+})
+
 const clusterStyleCache = new globalThis.Map<string, Style>()
 const CLUSTER_BOUNDS_PADDING_RATIO = 0.12
 const MIN_CLUSTER_BOUNDS_PADDING_METERS = 250
+const AREA_CURSOR_TOLERANCE_PX = 10
 
 function clusterStyle(feature: FeatureLike): Style {
   const clusteredFeatures = (feature.get('features') ?? []) as Feature[]
@@ -117,7 +127,7 @@ function boundedLongitude(value: number): number {
   return Math.min(180, Math.max(-180, value))
 }
 
-function boundsFromMapExtent(extent: [number, number, number, number]): GeoBounds {
+function boundsFromMapExtent(extent: Extent): GeoBounds {
   const [leftLon, bottomLat] = toLonLat([extent[0], extent[1]])
   const [rightLon, topLat] = toLonLat([extent[2], extent[3]])
 
@@ -154,7 +164,7 @@ function boundsFromClusterCoordinates(
   ])
 }
 
-function mapExtentFromBounds(bounds: GeoBounds): [number, number, number, number] {
+function mapExtentFromBounds(bounds: GeoBounds): Extent {
   const [minX, minY] = fromLonLat([bounds.minLon, bounds.minLat])
   const [maxX, maxY] = fromLonLat([bounds.maxLon, bounds.maxLat])
 
@@ -164,6 +174,72 @@ function mapExtentFromBounds(bounds: GeoBounds): [number, number, number, number
     Math.max(minX, maxX),
     Math.max(minY, maxY),
   ]
+}
+
+function clearExtentInteraction(interaction: ExtentInteraction): void {
+  const clearableInteraction = interaction as {
+    setExtent(extent: Extent | null): void
+  }
+  clearableInteraction.setExtent(null)
+}
+
+function currentExtent(interaction: ExtentInteraction): Extent | undefined {
+  return (
+    interaction as {
+      getExtent(): Extent | null
+    }
+  ).getExtent() ?? undefined
+}
+
+function isPixelBetween(value: number, min: number, max: number): boolean {
+  return (
+    value >= min - AREA_CURSOR_TOLERANCE_PX &&
+    value <= max + AREA_CURSOR_TOLERANCE_PX
+  )
+}
+
+function areaCursorForPixel(map: Map, extent: Extent, pixel: Pixel): string {
+  const topLeft = map.getPixelFromCoordinate([extent[0], extent[3]])
+  const bottomRight = map.getPixelFromCoordinate([extent[2], extent[1]])
+  const left = Math.min(topLeft[0], bottomRight[0])
+  const right = Math.max(topLeft[0], bottomRight[0])
+  const top = Math.min(topLeft[1], bottomRight[1])
+  const bottom = Math.max(topLeft[1], bottomRight[1])
+  const [x, y] = pixel
+
+  const nearLeft =
+    Math.abs(x - left) <= AREA_CURSOR_TOLERANCE_PX && isPixelBetween(y, top, bottom)
+  const nearRight =
+    Math.abs(x - right) <= AREA_CURSOR_TOLERANCE_PX && isPixelBetween(y, top, bottom)
+  const nearTop =
+    Math.abs(y - top) <= AREA_CURSOR_TOLERANCE_PX && isPixelBetween(x, left, right)
+  const nearBottom =
+    Math.abs(y - bottom) <= AREA_CURSOR_TOLERANCE_PX && isPixelBetween(x, left, right)
+
+  if ((nearLeft && nearTop) || (nearRight && nearBottom)) {
+    return 'nwse-resize'
+  }
+  if ((nearRight && nearTop) || (nearLeft && nearBottom)) {
+    return 'nesw-resize'
+  }
+  if (nearLeft || nearRight) return 'ew-resize'
+  if (nearTop || nearBottom) return 'ns-resize'
+
+  if (
+    x > left + AREA_CURSOR_TOLERANCE_PX &&
+    x < right - AREA_CURSOR_TOLERANCE_PX &&
+    y > top + AREA_CURSOR_TOLERANCE_PX &&
+    y < bottom - AREA_CURSOR_TOLERANCE_PX
+  ) {
+    return 'move'
+  }
+
+  return 'crosshair'
+}
+
+function setMapCursor(target: HTMLElement, map: Map, cursor: string): void {
+  target.style.cursor = cursor
+  map.getViewport().style.cursor = cursor
 }
 
 export function MapView({
@@ -178,11 +254,13 @@ export function MapView({
 }: MapViewProps) {
   const targetRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<Map | null>(null)
-  const dragBoxRef = useRef<DragBox | null>(null)
+  const extentInteractionRef = useRef<ExtentInteraction | null>(null)
   const boundsDrawingRef = useRef(boundsDrawing)
+  const hasGeoBoundsRef = useRef(Boolean(geoBounds))
+  const pendingBoundsExtentRef = useRef<Extent | undefined>(undefined)
+  const syncingBoundsRef = useRef(false)
   const sourceRef = useRef(new VectorSource())
   const querySourceRef = useRef(new VectorSource())
-  const boundsSourceRef = useRef(new VectorSource())
 
   useEffect(() => {
     if (!targetRef.current || mapRef.current) return
@@ -201,15 +279,13 @@ export function MapView({
       source: querySourceRef.current,
       style: queryStyle,
     })
-    const boundsLayer = new VectorLayer({
-      source: boundsSourceRef.current,
-      style: boundsStyle,
+    const extentInteraction = new ExtentInteraction({
+      drag: true,
+      boxStyle: boundsStyle,
+      pointerStyle: boundsHandleStyle,
+      pixelTolerance: 10,
     })
-    const dragBox = new DragBox({
-      className: 'map-draw-box',
-      minArea: 64,
-    })
-    dragBox.setActive(boundsDrawingRef.current)
+    extentInteraction.setActive(boundsDrawingRef.current)
 
     const map = new Map({
       target,
@@ -217,7 +293,6 @@ export function MapView({
         new TileLayer({
           source: new OSM(),
         }),
-        boundsLayer,
         clusterLayer,
         queryLayer,
       ],
@@ -226,17 +301,24 @@ export function MapView({
         zoom: 4,
       }),
     })
-    map.addInteraction(dragBox)
+    map.addInteraction(extentInteraction)
 
-    dragBox.on('boxend', () => {
-      const extent = dragBox.getGeometry().getExtent() as [
-        number,
-        number,
-        number,
-        number,
-      ]
+    const commitPendingBounds = () => {
+      const extent = pendingBoundsExtentRef.current
+      pendingBoundsExtentRef.current = undefined
+      if (!boundsDrawingRef.current || !extent) return
+      if (extent[0] === extent[2] || extent[1] === extent[3]) return
       onGeoBoundsChange(boundsFromMapExtent(extent))
+    }
+
+    extentInteraction.on('extentchanged', (event) => {
+      if (syncingBoundsRef.current || !event.extent) return
+      const extent = event.extent.slice() as Extent
+      if (extent[0] === extent[2] || extent[1] === extent[3]) return
+      pendingBoundsExtentRef.current = extent
     })
+    document.addEventListener('pointerup', commitPendingBounds)
+    document.addEventListener('pointercancel', commitPendingBounds)
 
     map.on('singleclick', (event) => {
       if (boundsDrawingRef.current) return
@@ -259,8 +341,20 @@ export function MapView({
     })
 
     map.on('pointermove', (event) => {
-      if (event.dragging || boundsDrawingRef.current) {
-        target.style.cursor = boundsDrawingRef.current ? 'crosshair' : ''
+      if (boundsDrawingRef.current) {
+        const extent = currentExtent(extentInteraction)
+        setMapCursor(
+          target,
+          map,
+          hasGeoBoundsRef.current && extent
+            ? areaCursorForPixel(map, extent, event.pixel)
+            : 'crosshair',
+        )
+        return
+      }
+
+      if (event.dragging) {
+        setMapCursor(target, map, '')
         return
       }
 
@@ -268,29 +362,38 @@ export function MapView({
         event.pixel,
         (feature, layer) => (layer === clusterLayer ? feature : undefined),
       )
-      target.style.cursor =
+      setMapCursor(
+        target,
+        map,
         hoveredCluster && coordinatesForCluster(hoveredCluster).length > 1
           ? 'pointer'
-          : ''
+          : '',
+      )
     })
 
     mapRef.current = map
-    dragBoxRef.current = dragBox
+    extentInteractionRef.current = extentInteraction
     const resizeObserver = new ResizeObserver(() => map.updateSize())
     resizeObserver.observe(target)
 
     return () => {
+      document.removeEventListener('pointerup', commitPendingBounds)
+      document.removeEventListener('pointercancel', commitPendingBounds)
       resizeObserver.disconnect()
-      map.removeInteraction(dragBox)
+      map.removeInteraction(extentInteraction)
       map.setTarget(undefined)
       mapRef.current = null
-      dragBoxRef.current = null
+      extentInteractionRef.current = null
     }
   }, [onGeoBoundsChange, onQueryPointChange])
 
   useEffect(() => {
     boundsDrawingRef.current = boundsDrawing
-    dragBoxRef.current?.setActive(boundsDrawing)
+    if (!boundsDrawing) pendingBoundsExtentRef.current = undefined
+    extentInteractionRef.current?.setActive(boundsDrawing)
+    if (!boundsDrawing && targetRef.current && mapRef.current) {
+      setMapCursor(targetRef.current, mapRef.current, '')
+    }
   }, [boundsDrawing])
 
   useEffect(() => {
@@ -322,15 +425,17 @@ export function MapView({
   }, [geoItems, queryPoint, results])
 
   useEffect(() => {
-    const boundsSource = boundsSourceRef.current
-    boundsSource.clear()
-    if (!geoBounds) return
+    hasGeoBoundsRef.current = Boolean(geoBounds)
+    const extentInteraction = extentInteractionRef.current
+    if (!extentInteraction) return
 
-    boundsSource.addFeature(
-      new Feature({
-        geometry: fromExtent(mapExtentFromBounds(geoBounds)),
-      }),
-    )
+    syncingBoundsRef.current = true
+    if (geoBounds) {
+      extentInteraction.setExtent(mapExtentFromBounds(geoBounds))
+    } else {
+      clearExtentInteraction(extentInteraction)
+    }
+    syncingBoundsRef.current = false
   }, [geoBounds])
 
   return <div ref={targetRef} className="map-view" aria-label={label} />
