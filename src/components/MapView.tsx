@@ -12,7 +12,7 @@ import OSM from 'ol/source/OSM'
 import VectorSource from 'ol/source/Vector'
 import { Circle as CircleStyle, Fill, Stroke, Style, Text } from 'ol/style'
 import { useEffect, useRef } from 'react'
-import type { EnrichedSearchResult, GeoBounds, MapPoint } from '../types'
+import type { GeoBounds, MapPoint } from '../types'
 import type { FeatureLike } from 'ol/Feature'
 import type { Coordinate } from 'ol/coordinate'
 import type { Extent } from 'ol/extent'
@@ -26,7 +26,6 @@ type QueryPoint = {
 type MapViewProps = {
   queryPoint?: QueryPoint
   geoItems: MapPoint[]
-  results: EnrichedSearchResult[]
   geoBounds?: GeoBounds
   boundsDrawing: boolean
   label: string
@@ -40,14 +39,6 @@ const baseStyle = new Style({
     radius: 4,
     fill: new Fill({ color: '#6f7887' }),
     stroke: new Stroke({ color: '#ffffff', width: 1.5 }),
-  }),
-})
-
-const resultStyle = new Style({
-  image: new CircleStyle({
-    radius: 6,
-    fill: new Fill({ color: '#008a72' }),
-    stroke: new Stroke({ color: '#ffffff', width: 2 }),
   }),
 })
 
@@ -249,14 +240,6 @@ function setMapCursor(target: HTMLElement, map: Map, cursor: string): void {
   map.getViewport().style.cursor = cursor
 }
 
-function pointRenderKey(
-  lat: number,
-  lon: number,
-  timestamp: number | undefined,
-): string {
-  return `${lat.toFixed(7)}:${lon.toFixed(7)}:${timestamp ?? ''}`
-}
-
 function pointFeature(lon: number, lat: number): Feature {
   return new Feature({
     geometry: new Point(fromLonLat([lon, lat])),
@@ -266,7 +249,6 @@ function pointFeature(lon: number, lat: number): Feature {
 export function MapView({
   queryPoint,
   geoItems,
-  results,
   geoBounds,
   boundsDrawing,
   label,
@@ -282,7 +264,6 @@ export function MapView({
   const pendingBoundsExtentRef = useRef<Extent | undefined>(undefined)
   const syncingBoundsRef = useRef(false)
   const sourceRef = useRef(new VectorSource())
-  const resultSourceRef = useRef(new VectorSource())
   const querySourceRef = useRef(new VectorSource())
 
   useEffect(() => {
@@ -302,10 +283,6 @@ export function MapView({
       source: querySourceRef.current,
       style: queryStyle,
     })
-    const resultLayer = new VectorLayer({
-      source: resultSourceRef.current,
-      style: resultStyle,
-    })
     const extentInteraction = new ExtentInteraction({
       drag: false,
       boxStyle: boundsStyle,
@@ -322,7 +299,6 @@ export function MapView({
           source: new OSM(),
         }),
         clusterLayer,
-        resultLayer,
         queryLayer,
       ],
       view: new View({
@@ -454,33 +430,6 @@ export function MapView({
     source.clear(true)
     source.addFeatures(features)
   }, [geoItems])
-
-  useEffect(() => {
-    const resultSource = resultSourceRef.current
-    const features: Feature[] = []
-    const seenPoints = new Set<string>()
-
-    for (const result of results) {
-      const { item } = result
-      if (
-        typeof item.latitude !== 'number' ||
-        typeof item.longitude !== 'number'
-      ) {
-        continue
-      }
-
-      const key = pointRenderKey(item.latitude, item.longitude, item.timestamp)
-      if (seenPoints.has(key)) continue
-      seenPoints.add(key)
-
-      const feature = pointFeature(item.longitude, item.latitude)
-      feature.set('mediaId', result.mediaId, true)
-      features.push(feature)
-    }
-
-    resultSource.clear(true)
-    resultSource.addFeatures(features)
-  }, [results])
 
   useEffect(() => {
     const querySource = querySourceRef.current

@@ -1441,7 +1441,6 @@ function App() {
             <MapView
               queryPoint={distanceSortActive ? queryPoint : undefined}
               geoItems={mapItems}
-              results={resultItems}
               geoBounds={geoBounds}
               boundsDrawing={boundsDrawing}
               label={t('searchMap')}
