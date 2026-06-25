@@ -22,6 +22,9 @@ import { traceStartup } from '../../lib/startupTrace'
 declare global {
   interface Window {
     __ZEITFADEN_E2E_GEO_FILE__?: () => File | Promise<File>
+    __ZEITFADEN_E2E_DIRECTORY_HANDLE__?: () =>
+      | FileSystemDirectoryHandle
+      | Promise<FileSystemDirectoryHandle>
   }
 }
 
@@ -39,9 +42,38 @@ type ImportGeoFileRecord = {
   duplicateSourceIds: string[]
 }
 
+const e2eDirectoryRecords = new Map<
+  string,
+  {
+    id: string
+    label: string
+    handle: FileSystemDirectoryHandle
+  }
+>()
+
+function e2eDirectoryHandleId(
+  handle: FileSystemDirectoryHandle,
+): string | undefined {
+  return (handle as FileSystemDirectoryHandle & { __zeitfadenId?: string })
+    .__zeitfadenId
+}
+
 async function sourceRecordForHandle(
   handle: FileSystemDirectoryHandle,
 ): Promise<ImportSourceRecord> {
+  const e2eHandleId = import.meta.env.DEV
+    ? e2eDirectoryHandleId(handle)
+    : undefined
+  if (e2eHandleId) {
+    const id = `e2e-directory:${e2eHandleId}`
+    return {
+      id,
+      label: handle.name,
+      handle,
+      duplicateSourceIds: [],
+    }
+  }
+
   if (typeof handle.isSameEntry === 'function') {
     const existingRecords = await listDirectoryHandles()
     const matchingRecords = []
@@ -150,24 +182,37 @@ class WebImportBackend implements ImportBackend {
     onProgress?: (progress: ImportProgress) => void,
     options: ImportOptions = {},
   ): Promise<ImportSummary> {
-    if (!window.showDirectoryPicker) {
+    const testHandle = import.meta.env.DEV
+      ? await window.__ZEITFADEN_E2E_DIRECTORY_HANDLE__?.()
+      : undefined
+    if (!testHandle && !window.showDirectoryPicker) {
       throw new Error('This browser does not expose the File System Access API.')
     }
 
-    const handle = await window.showDirectoryPicker({ mode: 'read' })
+    const handle = testHandle ?? await window.showDirectoryPicker!({
+      mode: 'read',
+    })
     const sourceRecord = await sourceRecordForHandle(handle)
     if (options.signal?.aborted) {
       return this.cancelledSummary(sourceRecord)
     }
 
-    await putDirectoryHandle({
-      id: sourceRecord.id,
-      label: sourceRecord.label,
-      handle: sourceRecord.handle,
-    })
-    await Promise.all(
-      sourceRecord.duplicateSourceIds.map((id) => removeDirectoryHandle(id)),
-    )
+    if (testHandle && e2eDirectoryHandleId(testHandle)) {
+      e2eDirectoryRecords.set(sourceRecord.id, {
+        id: sourceRecord.id,
+        label: sourceRecord.label,
+        handle: sourceRecord.handle,
+      })
+    } else {
+      await putDirectoryHandle({
+        id: sourceRecord.id,
+        label: sourceRecord.label,
+        handle: sourceRecord.handle,
+      })
+      await Promise.all(
+        sourceRecord.duplicateSourceIds.map((id) => removeDirectoryHandle(id)),
+      )
+    }
 
     return this.catalog.importFolder(
       {
@@ -178,6 +223,75 @@ class WebImportBackend implements ImportBackend {
       onProgress,
       options.signal,
     )
+  }
+
+  async rescanFolders(
+    onProgress?: (progress: ImportProgress) => void,
+    options: ImportOptions = {},
+  ): Promise<ImportSummary> {
+    const realRecords = await listDirectoryHandles()
+    const recordsById = new Map<
+      string,
+      {
+        id: string
+        label: string
+        handle: FileSystemDirectoryHandle
+      }
+    >()
+    for (const record of realRecords) recordsById.set(record.id, record)
+    for (const record of e2eDirectoryRecords.values()) {
+      recordsById.set(record.id, record)
+    }
+
+    const records = Array.from(recordsById.values())
+    const source = {
+      id: 'rescan-folders',
+      label: 'Previously scanned folders',
+    }
+    const aggregate: ImportSummary = {
+      source,
+      sourceLabel: source.label,
+      scannedFiles: 0,
+      totalFiles: 0,
+      acceptedMedia: 0,
+      skippedFiles: 0,
+      errors: [],
+    }
+
+    for (const record of records) {
+      if (options.signal?.aborted) {
+        aggregate.cancelled = true
+        break
+      }
+      try {
+        if (!(await ensureReadPermission(record.handle))) {
+          aggregate.errors.push(`${record.label}: read permission denied`)
+          continue
+        }
+        const summary = await this.catalog.importFolder(
+          {
+            source: sourceFromRecord(record),
+            duplicateSourceIds: [],
+            handle: record.handle,
+          },
+          onProgress,
+          options.signal,
+        )
+        aggregate.scannedFiles += summary.scannedFiles
+        aggregate.totalFiles += summary.totalFiles
+        aggregate.acceptedMedia += summary.acceptedMedia
+        aggregate.skippedFiles += summary.skippedFiles
+        aggregate.errors.push(...summary.errors)
+        aggregate.cancelled = aggregate.cancelled || summary.cancelled
+        if (summary.cancelled) break
+      } catch (error) {
+        aggregate.errors.push(
+          `${record.label}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    }
+
+    return aggregate
   }
 
   async importGeoFile(

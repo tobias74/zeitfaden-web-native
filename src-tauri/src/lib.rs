@@ -5934,6 +5934,14 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
     };
     reset_import_cancel();
     let root = root.canonicalize().unwrap_or(root);
+    import_folder_from_root(app, window, root)
+}
+
+fn import_folder_from_root(
+    app: AppHandle,
+    window: Window,
+    root: PathBuf,
+) -> AppResult<ImportSummary> {
     let source = source_from_root(&root);
     let source_label = source.label.clone();
 
@@ -6080,7 +6088,7 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
         ),
     );
     flush_media_batch(&app, &session, &mut batch)?;
-    if accepted_media > 0 {
+    if !cancelled {
         let mut manifest = load_file_catalog_manifest(&app)?;
         materialize_file_catalog(&app, &mut manifest)?;
     }
@@ -6095,6 +6103,69 @@ fn import_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
         errors,
         cancelled: cancelled.then_some(true),
     })
+}
+
+#[tauri::command]
+fn rescan_folders(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
+    reset_import_cancel();
+    let manifest = load_file_catalog_manifest(&app)?;
+    let source = MediaSource {
+        id: "rescan-folders".to_string(),
+        label: "Previously scanned folders".to_string(),
+        root_path: None,
+    };
+    let mut summary = ImportSummary {
+        source,
+        source_label: "Previously scanned folders".to_string(),
+        scanned_files: 0,
+        total_files: 0,
+        accepted_media: 0,
+        skipped_files: 0,
+        errors: Vec::new(),
+        cancelled: None,
+    };
+    let mut roots = manifest
+        .sources
+        .values()
+        .filter(|source| source.active)
+        .filter_map(|source| source.root_path.as_ref())
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
+
+    for root in roots {
+        if import_cancelled() {
+            summary.cancelled = Some(true);
+            break;
+        }
+        if !root.exists() {
+            summary
+                .errors
+                .push(format!("{}: folder is not available", root.to_string_lossy()));
+            continue;
+        }
+        match import_folder_from_root(app.clone(), window.clone(), root.clone()) {
+            Ok(source_summary) => {
+                summary.scanned_files += source_summary.scanned_files;
+                summary.total_files += source_summary.total_files;
+                summary.accepted_media += source_summary.accepted_media;
+                summary.skipped_files += source_summary.skipped_files;
+                summary.errors.extend(source_summary.errors);
+                if source_summary.cancelled.unwrap_or(false) {
+                    summary.cancelled = Some(true);
+                    break;
+                }
+            }
+            Err(error) => {
+                summary
+                    .errors
+                    .push(format!("{}: {error}", root.to_string_lossy()));
+            }
+        }
+    }
+
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -6225,6 +6296,7 @@ pub fn run() {
             cancel_import,
             commit_import,
             import_folder,
+            rescan_folders,
             import_geo_file,
             resolve_thumbnail_path,
             reveal_location

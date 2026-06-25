@@ -124,6 +124,10 @@ export interface ImportBackend {
     onProgress?: (progress: ImportProgress) => void,
     options?: ImportOptions,
   ): Promise<ImportSummary>
+  rescanFolders(
+    onProgress?: (progress: ImportProgress) => void,
+    options?: ImportOptions,
+  ): Promise<ImportSummary>
   importGeoFile(
     onProgress?: (progress: ImportProgress) => void,
     options?: ImportOptions,

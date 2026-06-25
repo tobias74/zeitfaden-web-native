@@ -184,6 +184,13 @@ class TauriImportBackend implements ImportBackend {
     return this.importWithProgress('import_folder', onProgress, options)
   }
 
+  async rescanFolders(
+    onProgress?: (progress: ImportProgress) => void,
+    options?: ImportOptions,
+  ): Promise<ImportSummary> {
+    return this.importWithProgress('rescan_folders', onProgress, options)
+  }
+
   async importGeoFile(
     onProgress?: (progress: ImportProgress) => void,
     options?: ImportOptions,

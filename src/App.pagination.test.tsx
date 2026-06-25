@@ -289,6 +289,7 @@ function createPlatform(): PlatformBackend {
     catalog,
     importer: {
       importFolder: vi.fn(),
+      rescanFolders: vi.fn(),
       importGeoFile: vi.fn(),
       commitImport: vi.fn(),
       dispose: vi.fn(),

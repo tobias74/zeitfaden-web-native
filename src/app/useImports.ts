@@ -31,9 +31,10 @@ export function useImports({
 }: UseImportsOptions): {
   busy: boolean
   importProgress: ImportProgress | undefined
-  activeImportKind: 'folder' | 'geo' | undefined
+  activeImportKind: 'folder' | 'geo' | 'rescan' | undefined
   cancelling: boolean
   importFolder(): Promise<void>
+  rescanFolders(): Promise<void>
   importGeoFile(): Promise<void>
   cancelImport(): void
   commitImport(): void
@@ -41,7 +42,7 @@ export function useImports({
   const [busy, setBusy] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [activeImportKind, setActiveImportKind] = useState<
-    'folder' | 'geo' | undefined
+    'folder' | 'geo' | 'rescan' | undefined
   >()
   const [importProgress, setImportProgress] = useState<ImportProgress>()
   const activeImportControllerRef = useRef<AbortController | undefined>(
@@ -110,6 +111,36 @@ export function useImports({
     }
   }, [finishImport, onError, platform, recordActivity])
 
+  const rescanFolders = useCallback(async () => {
+    onError('')
+    setImportProgress(undefined)
+    setBusy(true)
+    setCancelling(false)
+    setActiveImportKind('rescan')
+    const controller = new AbortController()
+    activeImportControllerRef.current = controller
+    try {
+      const summary = await platform.importer.rescanFolders(
+        (progress) => {
+          setImportProgress(progress)
+        },
+        { signal: controller.signal },
+      )
+      finishImport(summary)
+    } catch (caught) {
+      if (!isAbortError(caught)) {
+        onError(caught instanceof Error ? caught.message : String(caught))
+      }
+      recordActivity('activityImportStopped')
+    } finally {
+      activeImportControllerRef.current = undefined
+      setImportProgress(undefined)
+      setCancelling(false)
+      setActiveImportKind(undefined)
+      setBusy(false)
+    }
+  }, [finishImport, onError, platform, recordActivity])
+
   const importGeoFile = useCallback(async () => {
     onError('')
     setImportProgress(undefined)
@@ -146,6 +177,7 @@ export function useImports({
     activeImportKind,
     cancelling,
     importFolder,
+    rescanFolders,
     importGeoFile,
     cancelImport,
     commitImport,

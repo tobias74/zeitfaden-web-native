@@ -1506,7 +1506,7 @@
   line-height: 1.35;
 }
 
-@media (max-width: 1320px) {
+@media (max-width: 1500px) {
   .topbar-tools {
     grid-template-columns: auto minmax(0, 1fr);
     gap: 10px 16px;

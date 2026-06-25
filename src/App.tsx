@@ -11,6 +11,7 @@ import {
   Languages,
   List,
   MapPin,
+  RefreshCw,
   Save,
   Settings2,
   Trash2,
@@ -945,6 +946,7 @@ function App() {
     activeImportKind,
     cancelling: cancellingImport,
     importFolder,
+    rescanFolders,
     importGeoFile,
     cancelImport,
     commitImport,
@@ -1456,6 +1458,14 @@ function App() {
             >
               <MapPin size={17} />
               {t('importGeoFile')}
+            </button>
+            <button
+              type="button"
+              onClick={rescanFolders}
+              disabled={busy || !catalogReady}
+            >
+              <RefreshCw size={17} />
+              {t('rescanFolders')}
             </button>
             <label className="language-control" title={t('language')}>
               <span aria-hidden="true">
