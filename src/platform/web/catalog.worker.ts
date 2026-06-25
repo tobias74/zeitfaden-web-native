@@ -1,10 +1,12 @@
 import * as exifr from 'exifr'
 import {
-  DiskSegmentedTreeIndex,
-  type DiskSegmentedEngineId,
-  type DiskSegmentedTreeManifest,
-  type DiskSegmentedTreeStore,
-} from '../../geo/diskSegmentedTreeIndex'
+  ResidentPackedDistanceIndex,
+  type ResidentDistanceBuildPoint,
+  type ResidentDistanceSearchResult,
+  type ResidentPackedDistanceEngineId,
+  type ResidentPackedDistanceManifest,
+  type ResidentPackedDistanceStore,
+} from '../../geo/residentPackedDistanceIndex'
 import { GeoIndexRegistry } from '../../geo/registry'
 import {
   geoPointContentHash,
@@ -122,6 +124,11 @@ type MediaSearchRows = {
   metrics?: Partial<SearchIndexStats>
 }
 
+type AssetMediaResult = {
+  assetId: number
+  item: MediaItem
+}
+
 type MediaSearchRowsFn = (
   query: CatalogQuery,
   indexId: FileCatalogIndexId,
@@ -145,12 +152,17 @@ type CatalogStore = {
   listMedia(query: CatalogQuery): Promise<MediaItem[]>
   searchMedia(spec: SearchSpec): Promise<SearchPage>
   getMediaByIds(ids: string[]): Promise<MediaItem[]>
+  getMediaByAssetIds(assetIds: number[]): Promise<AssetMediaResult[]>
   getGeoPoints(range: TimeRange): Promise<GeoIndexPoint[]>
   forEachGeoPointBatch(
     batchSize: number,
     onBatch: (batch: GeoIndexPoint[], processedPoints: number) => Promise<void>,
   ): Promise<number>
-  diskSegmentedTreeStore(): DiskSegmentedTreeStore
+  forEachGeoAssetBatch(
+    batchSize: number,
+    onBatch: (batch: ResidentDistanceBuildPoint[], processedPoints: number) => Promise<void>,
+  ): Promise<number>
+  residentDistanceIndexStore(): ResidentPackedDistanceStore
   catalogEpoch(): Promise<number>
   buildSearchIndexes(
     indexId: string,
@@ -198,7 +210,7 @@ const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 
 const geoIndexRegistry = new GeoIndexRegistry()
-const diskSegmentedIndexInstances = new Map<string, DiskSegmentedTreeIndex>()
+const residentDistanceIndexInstances = new Map<string, ResidentPackedDistanceIndex>()
 const cancelledRequests = new Set<number>()
 
 async function yieldToEventLoop(): Promise<void> {
@@ -662,45 +674,22 @@ function fileCatalogIndexSpec(): {
   }
 }
 
-async function diskSegmentedStatusStats(
+async function residentDistanceStatusStats(
   store: CatalogStore,
-  indexId: DiskSegmentedEngineId,
+  indexId: ResidentPackedDistanceEngineId,
 ): Promise<SearchIndexStats> {
   const catalogVersion = await store.catalogEpoch()
-  const diskStore = store.diskSegmentedTreeStore()
-  const manifest = await diskStore.readManifest(indexId)
-  const diskIndex = diskSegmentedIndex(store, indexId)
-  if (
-    manifest &&
-    manifest.engineId === indexId &&
-    manifest.engineVersion === 2 &&
-    manifest.catalogEpoch === catalogVersion
-  ) {
-    await diskIndex.prepare(catalogVersion)
-    return {
-      ...(await diskIndex.stats()),
-      engineLabel: diskIndex.label,
-      exact: diskIndex.capabilities.exact,
-      persistent: diskIndex.capabilities.persistent,
-      indexStatus: 'current',
-      catalogVersion,
-      indexCatalogVersion: manifest.catalogEpoch,
-    }
+  const distanceIndex = residentDistanceIndex(store, indexId)
+  const stats = await distanceIndex.status(catalogVersion)
+  if (stats.indexStatus === 'current' && stats.indexStorage !== 'memory') {
+    distanceIndex.preload(catalogVersion)
   }
-
-  diskSegmentedIndexInstances.delete(diskSegmentedRuntimeKey(indexId))
   return {
-    ...defaultSearchStats(indexId, diskIndex.label),
-    pointCount: manifest?.pointCount ?? 0,
-    indexSizeBytes: manifest?.segments.reduce(
-      (total, segment) => total + segment.byteLength,
-      0,
-    ),
-    segmentCount: manifest?.segmentCount ?? 0,
-    indexStorage: 'disk',
-    indexStatus: manifest ? 'stale' : 'missing',
+    ...stats,
+    engineLabel: distanceIndex.label,
+    exact: distanceIndex.capabilities.exact,
+    persistent: distanceIndex.capabilities.persistent,
     catalogVersion,
-    indexCatalogVersion: manifest?.catalogEpoch,
   }
 }
 
@@ -744,6 +733,23 @@ function mediaItemsToSearchResults(items: MediaItem[]): SearchPage['items'] {
     item,
     mediaId: item.id,
   }))
+}
+
+async function enrichDistanceAssetResults(
+  getMediaByAssetIdsFn: (assetIds: number[]) => Promise<AssetMediaResult[]>,
+  results: ResidentDistanceSearchResult[],
+): Promise<SearchPage['items']> {
+  const resultAssetIds = Array.from(new Set(results.map((result) => result.assetId)))
+  const items = await getMediaByAssetIdsFn(resultAssetIds)
+  const itemsByAssetId = new Map(
+    items.map((result) => [result.assetId, result.item]),
+  )
+  return results.flatMap((result) => {
+    const item = itemsByAssetId.get(result.assetId)
+    return item
+      ? [{ mediaId: item.id, distanceMeters: result.distanceMeters, item }]
+      : []
+  })
 }
 
 async function enrichDistanceResults(
@@ -816,39 +822,40 @@ function createFileSearchEngine(
   }
 }
 
-function isDiskSegmentedEngineId(indexId: string): indexId is DiskSegmentedEngineId {
+function isResidentDistanceEngineId(indexId: string): indexId is ResidentPackedDistanceEngineId {
   return indexId === 'segmented-ball-tree'
 }
 
-function diskSegmentedRuntimeKey(indexId: DiskSegmentedEngineId): string {
+function residentDistanceRuntimeKey(indexId: ResidentPackedDistanceEngineId): string {
   return `file:${indexId}`
 }
 
-function diskSegmentedIndex(
+function residentDistanceIndex(
   store: CatalogStore,
-  indexId: DiskSegmentedEngineId,
-): DiskSegmentedTreeIndex {
-  const key = diskSegmentedRuntimeKey(indexId)
-  const existing = diskSegmentedIndexInstances.get(key)
+  indexId: ResidentPackedDistanceEngineId,
+): ResidentPackedDistanceIndex {
+  const key = residentDistanceRuntimeKey(indexId)
+  const existing = residentDistanceIndexInstances.get(key)
   if (existing) return existing
-  const index = new DiskSegmentedTreeIndex(indexId, store.diskSegmentedTreeStore())
-  diskSegmentedIndexInstances.set(key, index)
+  const index = new ResidentPackedDistanceIndex(store.residentDistanceIndexStore())
+  residentDistanceIndexInstances.set(key, index)
   return index
 }
 
-function activeDiskSegmentedIndex(indexId: string): DiskSegmentedTreeIndex | undefined {
-  if (!isDiskSegmentedEngineId(indexId)) return undefined
-  return diskSegmentedIndexInstances.get(diskSegmentedRuntimeKey(indexId))
+function activeResidentDistanceIndex(indexId: string): ResidentPackedDistanceIndex | undefined {
+  if (!isResidentDistanceEngineId(indexId)) return undefined
+  return residentDistanceIndexInstances.get(residentDistanceRuntimeKey(indexId))
 }
 
-async function clearDiskSegmentedIndexCaches(store: CatalogStore): Promise<void> {
-  await store.diskSegmentedTreeStore().clear('segmented-ball-tree')
-  diskSegmentedIndexInstances.delete(diskSegmentedRuntimeKey('segmented-ball-tree'))
+async function clearResidentDistanceIndexCaches(store: CatalogStore): Promise<void> {
+  await store.residentDistanceIndexStore().clear('segmented-ball-tree')
+  residentDistanceIndexInstances.delete(residentDistanceRuntimeKey('segmented-ball-tree'))
 }
 
 function createDistanceSearchEngine(
   geoIndex: (typeof geoIndexRegistry.indexes)[number],
   getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
+  getMediaByAssetIdsFn: (assetIds: number[]) => Promise<AssetMediaResult[]>,
   ensureIndexReadyFn: EnsureSearchIndexReadyFn,
 ): SearchIndexEngine {
   return {
@@ -884,24 +891,50 @@ function createDistanceSearchEngine(
         kind: spec.kind,
         geoBounds: spec.geoBounds,
       }
-      const activeIndex = isDiskSegmentedEngineId(geoIndex.id)
+      const activeIndex = isResidentDistanceEngineId(geoIndex.id)
         ? await ensureIndexReadyFn(geoIndex.id).then(() =>
-            activeDiskSegmentedIndex(geoIndex.id),
+            activeResidentDistanceIndex(geoIndex.id),
           )
-        : activeDiskSegmentedIndex(geoIndex.id)
-      if (isDiskSegmentedEngineId(geoIndex.id) && !activeIndex) {
+        : activeResidentDistanceIndex(geoIndex.id)
+      if (isResidentDistanceEngineId(geoIndex.id) && !activeIndex) {
         throw new Error(`${geoIndex.label} index is not ready. Update the index before querying.`)
       }
-      const results = activeIndex
-        ? await activeIndex.search(query)
-        : await geoIndex.search(query)
-      const stats = activeIndex ? await activeIndex.stats() : await geoIndex.stats()
+      if (activeIndex) {
+        const results = await activeIndex.search(query)
+        const stats = await activeIndex.stats()
+        const items = await enrichDistanceAssetResults(getMediaByAssetIdsFn, results)
+        const resultMetrics = {
+          ...stats,
+          engineLabel: activeIndex.label,
+          exact: activeIndex.capabilities.exact,
+          persistent: activeIndex.capabilities.persistent,
+        }
+        const limitReached =
+          results.length >= limit && resultMetrics.pointCount > offset + limit
+        return {
+          items,
+          resultMetrics: withQueryMetrics(
+            resultMetrics,
+            spec,
+            performance.now() - startedAt,
+            items.length,
+            limit,
+            offset,
+            limitReached,
+          ),
+          engineId: geoIndex.id,
+          engineLabel: geoIndex.label,
+          limitReached,
+        }
+      }
+      const results = await geoIndex.search(query)
+      const stats = await geoIndex.stats()
       const items = await enrichDistanceResults(getMediaByIdsFn, results)
       const resultMetrics = {
         ...stats,
-        engineLabel: activeIndex?.label ?? geoIndex.label,
-        exact: activeIndex?.capabilities.exact ?? geoIndex.capabilities.exact,
-        persistent: activeIndex?.capabilities.persistent ?? geoIndex.capabilities.persistent,
+        engineLabel: geoIndex.label,
+        exact: geoIndex.capabilities.exact,
+        persistent: geoIndex.capabilities.persistent,
       }
       const limitReached =
         results.length >= limit && resultMetrics.pointCount > offset + limit
@@ -935,6 +968,7 @@ function createDistanceSearchEngine(
 function createSearchRegistry(
   searchRowsFn: MediaSearchRowsFn,
   getMediaByIdsFn: (ids: string[]) => Promise<MediaItem[]>,
+  getMediaByAssetIdsFn: (assetIds: number[]) => Promise<AssetMediaResult[]>,
   ensureIndexReadyFn: EnsureSearchIndexReadyFn,
 ): SearchIndexEngineRegistry {
   return new SearchIndexEngineRegistry([
@@ -945,7 +979,12 @@ function createSearchRegistry(
       ensureIndexReadyFn,
     ),
     ...geoIndexRegistry.indexes.map((index) =>
-      createDistanceSearchEngine(index, getMediaByIdsFn, ensureIndexReadyFn),
+      createDistanceSearchEngine(
+        index,
+        getMediaByIdsFn,
+        getMediaByAssetIdsFn,
+        ensureIndexReadyFn,
+      ),
     ),
   ])
 }
@@ -1372,7 +1411,7 @@ class FileCatalogStore implements CatalogStore {
     }
     this.importSource = { sourceId: source.id, generation }
     await this.markDirty()
-    await clearDiskSegmentedIndexCaches(this)
+    await clearResidentDistanceIndexCaches(this)
   }
 
   async writeMediaBatch(items: MediaItem[]): Promise<MediaBatchWriteResult> {
@@ -1435,6 +1474,7 @@ class FileCatalogStore implements CatalogStore {
     return createSearchRegistry(
       (query) => this.searchRows(query),
       (ids) => this.getMediaByIds(ids),
+      (assetIds) => this.getMediaByAssetIds(assetIds),
       (indexId) => this.ensureSearchIndexReady(indexId),
     ).search(spec)
   }
@@ -1456,6 +1496,24 @@ class FileCatalogStore implements CatalogStore {
       if (assetId === undefined) continue
       const result = await assetTable.read(assetId)
       if (result.item) resolved.push(result.item)
+    }
+    return resolved
+  }
+
+  async getMediaByAssetIds(assetIds: number[]): Promise<AssetMediaResult[]> {
+    if (assetIds.length === 0) return []
+    const assetTable = await this.openAssetTable()
+    if (!assetTable) {
+      const catalog = await this.ensureMaterialized()
+      return assetIds.flatMap((assetId) => {
+        const item = catalog.assets[assetId]
+        return item ? [{ assetId, item }] : []
+      })
+    }
+    const resolved: AssetMediaResult[] = []
+    for (const assetId of assetIds) {
+      const result = await assetTable.read(assetId)
+      if (result.item) resolved.push({ assetId, item: result.item })
     }
     return resolved
   }
@@ -1533,8 +1591,43 @@ class FileCatalogStore implements CatalogStore {
     return points.length
   }
 
-  diskSegmentedTreeStore(): DiskSegmentedTreeStore {
-    return createOpfsDiskSegmentedTreeStore()
+  async forEachGeoAssetBatch(
+    batchSize: number,
+    onBatch: (batch: ResidentDistanceBuildPoint[], processedPoints: number) => Promise<void>,
+  ): Promise<number> {
+    let assetTable = await this.openAssetTable()
+    if (!assetTable) {
+      await this.ensureMaterialized()
+      assetTable = await this.openAssetTable()
+    }
+    if (!assetTable) {
+      throw new Error('Catalog asset table is missing. Finish the import before rebuilding indexes.')
+    }
+    let processed = 0
+    let batch: ResidentDistanceBuildPoint[] = []
+    for await (const { assetId, item } of assetTable.scan()) {
+      if (item.latitude !== undefined && item.longitude !== undefined) {
+        batch.push({
+          assetId,
+          kind: item.kind,
+          lat: item.latitude,
+          lon: item.longitude,
+          timestamp: item.timestamp,
+        })
+        processed += 1
+      }
+      if (batch.length >= batchSize) {
+        await onBatch(batch, processed)
+        batch = []
+        await yieldToEventLoop()
+      }
+    }
+    if (batch.length > 0) await onBatch(batch, processed)
+    return processed
+  }
+
+  residentDistanceIndexStore(): ResidentPackedDistanceStore {
+    return createOpfsResidentDistanceIndexStore()
   }
 
   async catalogEpoch(): Promise<number> {
@@ -1556,11 +1649,12 @@ class FileCatalogStore implements CatalogStore {
     const registry = createSearchRegistry(
       (query, indexId) => this.searchRows(query, indexId),
       (ids) => this.getMediaByIds(ids),
+      (assetIds) => this.getMediaByAssetIds(assetIds),
       (indexId) => this.ensureSearchIndexReady(indexId),
     )
     const stats = await registry.stats()
     const timeGeoStats = await this.fileCatalogIndexStats('file-time-geo')
-    const segmentedStats = await diskSegmentedStatusStats(
+    const segmentedStats = await residentDistanceStatusStats(
       this,
       'segmented-ball-tree',
     )
@@ -1583,7 +1677,7 @@ class FileCatalogStore implements CatalogStore {
     this.materialized = undefined
     this.importSource = undefined
     this.clearResidentPackedIndexes()
-    diskSegmentedIndexInstances.clear()
+    residentDistanceIndexInstances.clear()
     await this.saveManifest()
   }
 
@@ -1756,8 +1850,8 @@ class FileCatalogStore implements CatalogStore {
   async ensureSearchIndexReady(indexId: string): Promise<SearchIndexStats> {
     const stats = isFileCatalogIndexId(indexId)
       ? await this.fileCatalogIndexStats(indexId)
-      : isDiskSegmentedEngineId(indexId)
-        ? await diskSegmentedStatusStats(this, indexId)
+      : isResidentDistanceEngineId(indexId)
+        ? await residentDistanceStatusStats(this, indexId)
         : undefined
     if (!stats) {
       throw new Error(`Search index "${indexId}" is not available.`)
@@ -1773,6 +1867,11 @@ class FileCatalogStore implements CatalogStore {
     if (isFileCatalogIndexId(indexId)) {
       await this.ensureResidentPackedIndexes()
       return this.fileCatalogIndexStats(indexId)
+    }
+    if (isResidentDistanceEngineId(indexId)) {
+      const catalogVersion = await this.catalogEpoch()
+      await residentDistanceIndex(this, indexId).ensureResident(catalogVersion)
+      return residentDistanceStatusStats(this, indexId)
     }
     return stats
   }
@@ -2559,37 +2658,45 @@ class FileCatalogStore implements CatalogStore {
   }
 }
 
-async function diskSegmentedTreeOpfsDirectory(
-  engineId: DiskSegmentedEngineId,
+async function residentDistanceIndexOpfsDirectory(
+  engineId: ResidentPackedDistanceEngineId,
 ): Promise<FileSystemDirectoryHandle> {
   const root = await rootDirectory()
   const indexes = await childDirectory(root, 'indexes')
   const engine = await childDirectory(indexes, engineId)
-  return childDirectory(engine, 'v2')
+  return childDirectory(engine, 'v3')
 }
 
-function createOpfsDiskSegmentedTreeStore(): DiskSegmentedTreeStore {
+async function residentDistanceIndexEngineDirectory(
+  engineId: ResidentPackedDistanceEngineId,
+): Promise<FileSystemDirectoryHandle> {
+  const root = await rootDirectory()
+  const indexes = await childDirectory(root, 'indexes')
+  return childDirectory(indexes, engineId)
+}
+
+function createOpfsResidentDistanceIndexStore(): ResidentPackedDistanceStore {
   return {
     async readManifest(engineId) {
-      const directory = await diskSegmentedTreeOpfsDirectory(engineId)
+      const directory = await residentDistanceIndexOpfsDirectory(engineId)
       const file = await readFile(directory, 'manifest.json')
       if (!file) return undefined
-      return JSON.parse(await file.text()) as DiskSegmentedTreeManifest
+      return JSON.parse(await file.text()) as ResidentPackedDistanceManifest
     },
     async writeManifest(engineId, manifest) {
-      const directory = await diskSegmentedTreeOpfsDirectory(engineId)
+      const directory = await residentDistanceIndexOpfsDirectory(engineId)
       await writeFile(directory, 'manifest.json', JSON.stringify(manifest))
     },
-    async readSegment(engineId, segmentId) {
-      const directory = await diskSegmentedTreeOpfsDirectory(engineId)
-      return (await readFile(directory, `${segmentId}.bin`))?.arrayBuffer()
+    async readIndex(engineId) {
+      const directory = await residentDistanceIndexOpfsDirectory(engineId)
+      return (await readFile(directory, 'index.bin'))?.arrayBuffer()
     },
-    async writeSegment(engineId, segmentId, data) {
-      const directory = await diskSegmentedTreeOpfsDirectory(engineId)
-      await writeFile(directory, `${segmentId}.bin`, data)
+    async writeIndex(engineId, data) {
+      const directory = await residentDistanceIndexOpfsDirectory(engineId)
+      await writeFile(directory, 'index.bin', data)
     },
     async clear(engineId) {
-      await clearDirectory(await diskSegmentedTreeOpfsDirectory(engineId))
+      await clearDirectory(await residentDistanceIndexEngineDirectory(engineId))
     },
   }
 }
@@ -2601,11 +2708,11 @@ async function buildSearchIndexes(
   postProgress: (progress: GeoIndexBuildProgress) => void,
 ): Promise<GeoIndexBuildSummary & { engineCount: number }> {
   const startedAt = performance.now()
-  const selectedIndexId = isDiskSegmentedEngineId(requestedIndexId)
+  const selectedIndexId = isResidentDistanceEngineId(requestedIndexId)
     ? requestedIndexId
     : 'segmented-ball-tree'
   const catalogEpoch = await store.catalogEpoch()
-  const diskIndex = diskSegmentedIndex(store, selectedIndexId)
+  const distanceIndex = residentDistanceIndex(store, selectedIndexId)
 
   postProgress({
     phase: 'loading',
@@ -2613,20 +2720,21 @@ async function buildSearchIndexes(
     builtIndexes: 0,
     totalIndexes: 1,
     currentIndexId: selectedIndexId,
-    currentIndexLabel: diskIndex.label,
+    currentIndexLabel: distanceIndex.label,
   })
 
   if (!forceRebuild) {
-    const restored = await diskIndex.prepare(catalogEpoch)
+    const restored = await distanceIndex.prepare(catalogEpoch)
     if (restored) {
-      const stats = await diskIndex.stats()
+      await distanceIndex.ensureResident(catalogEpoch)
+      const stats = await distanceIndex.stats()
       postProgress({
         phase: 'ready',
         pointCount: stats.pointCount,
         builtIndexes: 1,
         totalIndexes: 1,
         currentIndexId: selectedIndexId,
-        currentIndexLabel: diskIndex.label,
+        currentIndexLabel: distanceIndex.label,
       })
       return {
         pointCount: stats.pointCount,
@@ -2636,8 +2744,8 @@ async function buildSearchIndexes(
     }
   }
 
-  const pointCount = await diskIndex.build(
-    (onBatch) => store.forEachGeoPointBatch(100_000, onBatch),
+  const pointCount = await distanceIndex.build(
+    (onBatch) => store.forEachGeoAssetBatch(100_000, onBatch),
     catalogEpoch,
     (processedPoints, totalPoints) => {
       postProgress({
@@ -2646,7 +2754,7 @@ async function buildSearchIndexes(
         builtIndexes: 0,
         totalIndexes: 1,
         currentIndexId: selectedIndexId,
-        currentIndexLabel: diskIndex.label,
+        currentIndexLabel: distanceIndex.label,
         currentIndexProcessedPoints: processedPoints,
         currentIndexTotalPoints: totalPoints,
       })
@@ -2658,7 +2766,7 @@ async function buildSearchIndexes(
     builtIndexes: 1,
     totalIndexes: 1,
     currentIndexId: selectedIndexId,
-    currentIndexLabel: diskIndex.label,
+    currentIndexLabel: distanceIndex.label,
   })
   return {
     pointCount,
@@ -3281,29 +3389,39 @@ async function handleRequest(
     }
     case 'searchGeoIndex': {
       const payload = request.payload as { indexId: string; query: GeoSearchQuery }
-      if (isDiskSegmentedEngineId(payload.indexId)) {
+      if (isResidentDistanceEngineId(payload.indexId)) {
         await store.ensureSearchIndexReady(payload.indexId)
       }
-      const diskIndex = activeDiskSegmentedIndex(payload.indexId)
-      return diskIndex
-        ? diskIndex.search(payload.query)
-        : geoIndexRegistry.get(payload.indexId).search(payload.query)
+      const distanceIndex = activeResidentDistanceIndex(payload.indexId)
+      if (distanceIndex) {
+        const results = await distanceIndex.search(payload.query)
+        const resultAssetIds = Array.from(new Set(results.map((result) => result.assetId)))
+        const items = await store.getMediaByAssetIds(resultAssetIds)
+        const itemsByAssetId = new Map(
+          items.map((result) => [result.assetId, result.item]),
+        )
+        return results.flatMap((result) => {
+          const item = itemsByAssetId.get(result.assetId)
+          return item ? [{ mediaId: item.id, distanceMeters: result.distanceMeters }] : []
+        })
+      }
+      return geoIndexRegistry.get(payload.indexId).search(payload.query)
     }
     case 'getGeoIndexStats': {
       const indexId = request.payload as string
-      const diskIndex = activeDiskSegmentedIndex(indexId)
-      return diskIndex ? diskIndex.stats() : geoIndexRegistry.get(indexId).stats()
+      const distanceIndex = activeResidentDistanceIndex(indexId)
+      return distanceIndex ? distanceIndex.stats() : geoIndexRegistry.get(indexId).stats()
     }
     case 'getSearchIndexStats':
       return store.getSearchIndexStats()
     case 'validateGeoIndex': {
       const payload = request.payload as { indexId: string; query: GeoSearchQuery }
-      if (isDiskSegmentedEngineId(payload.indexId)) {
+      if (isResidentDistanceEngineId(payload.indexId)) {
         await store.ensureSearchIndexReady(payload.indexId)
       }
-      const diskIndex = activeDiskSegmentedIndex(payload.indexId)
-      return diskIndex
-        ? diskIndex.validateAgainstBruteForce(payload.query)
+      const distanceIndex = activeResidentDistanceIndex(payload.indexId)
+      return distanceIndex
+        ? distanceIndex.validateAgainstBruteForce(payload.query)
         : geoIndexRegistry.get(payload.indexId).validateAgainstBruteForce(payload.query)
     }
     case 'clear':
