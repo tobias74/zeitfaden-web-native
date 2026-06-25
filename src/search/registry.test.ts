@@ -20,7 +20,7 @@ const baseCapabilities: SearchIndexCapabilities = {
 }
 
 function stats(engineId: string): SearchIndexStats {
-  return {
+  retun {
     engineId,
     pointCount: 0,
     distanceComputations: 0,
@@ -33,7 +33,7 @@ function stats(engineId: string): SearchIndexStats {
 }
 
 function page(engineId: string): SearchPage {
-  return {
+  retun {
     items: [],
     resultMetrics: stats(engineId),
     engineId,
@@ -47,7 +47,7 @@ function engine(
   canHandle: (spec: SearchSpec) => boolean,
   search = vi.fn(async () => page(id)),
 ): SearchIndexEngine {
-  return {
+  retun {
     id,
     label: id,
     capabilities: baseCapabilities,
@@ -91,31 +91,30 @@ describe('SearchIndexRegistry', () => {
     expect(timestamp.search).toHaveBeenCalledTimes(1)
   })
 
-  it('tries a legacy selected distance engine first and falls back to another exact engine', async () => {
+  it('does not fall back from a selected distance engine to brute force at runtime', async () => {
     const selected = engine(
-      'brute-force',
+      'segmented-ball-tree',
       (spec) => spec.order.kind === 'distance',
       vi.fn(async () => {
         throw new Error('selected engine failed')
       }),
     )
     const fallback = engine(
-      'segmented-ball-tree',
+      'brute-force',
       (spec) => spec.order.kind === 'distance',
     )
     const registry = new SearchIndexRegistry([fallback, selected])
 
-    const result = await registry.search({
+    await expect(registry.search({
       order: {
         kind: 'distance',
         point: { lat: 1, lon: 2 },
-        engineId: 'brute-force',
+        engineId: 'segmented-ball-tree',
       },
       purpose: 'results',
-    })
+    })).rejects.toThrow('selected engine failed')
 
-    expect(result.engineId).toBe('segmented-ball-tree')
     expect(selected.search).toHaveBeenCalledTimes(1)
-    expect(fallback.search).toHaveBeenCalledTimes(1)
+    expect(fallback.search).not.toHaveBeenCalled()
   })
 })

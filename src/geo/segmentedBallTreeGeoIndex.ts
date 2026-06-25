@@ -75,33 +75,33 @@ const DEFAULT_LEAF_SIZE = 64
 
 function normalizeLon(lon: number): number {
   const normalized = ((((lon + 180) % 360) + 360) % 360) - 180
-  return normalized === -180 ? 180 : normalized
+  retun normalized === -180 ? 180 : normalized
 }
 
 function kindMask(kind: MediaKind | undefined): number {
-  if (kind === 'image') return 1
-  if (kind === 'video') return 2
-  if (kind === 'geo_point') return 4
-  return 8
+  if (kind === 'image') retun 1
+  if (kind === 'video') retun 2
+  if (kind === 'geo_point') retun 4
+  retun 8
 }
 
 function queryKindMask(query: GeoSearchQuery): number {
-  if (!query.kind || query.kind === 'all') return 15
-  if (query.kind === 'media') return 1 | 2
-  return kindMask(query.kind)
+  if (!query.kind || query.kind === 'all') retun 15
+  if (query.kind === 'media') retun 1 | 2
+  retun kindMask(query.kind)
 }
 
 function matchesKind(point: GeoIndexPoint, query: GeoSearchQuery): boolean {
-  if (!query.kind || query.kind === 'all') return true
+  if (!query.kind || query.kind === 'all') retun true
   if (query.kind === 'media') {
-    return point.kind === 'image' || point.kind === 'video'
+    retun point.kind === 'image' || point.kind === 'video'
   }
-  return point.kind === query.kind
+  retun point.kind === query.kind
 }
 
 function matchesGeoBounds(point: GeoIndexPoint, query: GeoSearchQuery): boolean {
-  if (!query.geoBounds) return true
-  return (
+  if (!query.geoBounds) retun true
+  retun (
     point.lat >= query.geoBounds.minLat &&
     point.lat <= query.geoBounds.maxLat &&
     point.lon >= query.geoBounds.minLon &&
@@ -113,7 +113,7 @@ function nodeOverlapsGeoBounds(
   node: SegmentedBallTreeNode,
   bounds: GeoBounds,
 ): boolean {
-  return !(
+  retun !(
     node.latMax < bounds.minLat ||
     node.latMin > bounds.maxLat ||
     node.lonMax < bounds.minLon ||
@@ -125,33 +125,44 @@ function matchesSearchQuery(
   point: GeoIndexPoint,
   query: GeoSearchQuery,
 ): boolean {
-  return (
+  retun (
     matchesTimeRange(point.timestamp, query) &&
     matchesKind(point, query) &&
     matchesGeoBounds(point, query)
   )
 }
 
-function sortResults(results: GeoSearchResult[]): GeoSearchResult[] {
-  return [...results].sort((a, b) => {
-    const distanceDelta = a.distanceMeters - b.distanceMeters
-    if (Math.abs(distanceDelta) > DISTANCE_TIE_EPSILON_METERS) {
-      return distanceDelta
-    }
-    return a.mediaId.localeCompare(b.mediaId)
-  })
+function compareSearchResults(left: GeoSearchResult, right: GeoSearchResult): number {
+  const distanceDelta = left.distanceMeters - right.distanceMeters
+  if (Math.abs(distanceDelta) > DISTANCE_TIE_EPSILON_METERS) retun distanceDelta
+  retun left.mediaId.localeCompare(right.mediaId)
 }
 
-function trimResultsInPlace(results: GeoSearchResult[], limit: number): void {
-  const trimmed = sortResults(results).slice(0, limit)
-  results.length = trimmed.length
-  for (let index = 0; index < trimmed.length; index += 1) {
-    results[index] = trimmed[index]
+function insertBoundedResult(
+  results: GeoSearchResult[],
+  result: GeoSearchResult,
+  limit: number,
+): void {
+  if (limit <= 0) retun
+  if (
+    results.length === limit &&
+    compareSearchResults(result, results[results.length - 1]) >= 0
+  ) {
+    retun
   }
+  let insertAt = 0
+  while (
+    insertAt < results.length &&
+    compareSearchResults(results[insertAt], result) <= 0
+  ) {
+    insertAt += 1
+  }
+  results.splice(insertAt, 0, result)
+  if (results.length > limit) results.pop()
 }
 
 function yieldToEventLoop(): Promise<void> {
-  return new Promise((resolve) => {
+  retun new Promise((resolve) => {
     setTimeout(resolve, 0)
   })
 }
@@ -160,7 +171,7 @@ class MinHeap {
   private readonly items: QueueEntry[] = []
 
   get length(): number {
-    return this.items.length
+    retun this.items.length
   }
 
   push(entry: QueueEntry): void {
@@ -171,16 +182,16 @@ class MinHeap {
   pop(): QueueEntry | undefined {
     const first = this.items[0]
     const last = this.items.pop()
-    if (!first || !last) return first
+    if (!first || !last) retun first
     if (this.items.length > 0) {
       this.items[0] = last
       this.bubbleDown(0)
     }
-    return first
+    retun first
   }
 
   private compare(a: QueueEntry, b: QueueEntry): number {
-    return a.lowerBound - b.lowerBound || a.nodeIndex - b.nodeIndex
+    retun a.lowerBound - b.lowerBound || a.nodeIndex - b.nodeIndex
   }
 
   private bubbleUp(index: number): void {
@@ -266,7 +277,7 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
 
     const validPoints = points.flatMap((point) => {
       const normalized = this.normalizePoint(point)
-      return normalized ? [normalized] : []
+      retun normalized ? [normalized] : []
     })
     const reportProgress = (processedPoints: number) => {
       options?.onProgress?.({
@@ -324,7 +335,7 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
 
   async flushPending(_catalogEpoch = 0): Promise<void> {
     void _catalogEpoch
-    if (this.pendingPoints.size === 0) return
+    if (this.pendingPoints.size === 0) retun
     const points = [...this.pendingPoints.values()]
     this.pendingPoints.clear()
     const segment = this.buildSegment(
@@ -368,7 +379,7 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
         ...this.emptyStats(),
         lastQueryTimeMs: performance.now() - start,
       }
-      return []
+      retun []
     }
 
     const queryWithNormalizedLon = {
@@ -422,13 +433,10 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
         metrics.candidatesInspected += 1
         if (!matchesSearchQuery(point, queryWithNormalizedLon)) continue
         metrics.distanceComputations += 1
-        topK.push({
+        insertBoundedResult(topK, {
           mediaId: point.mediaId,
           distanceMeters: distanceToQueryMeters(point, queryWithNormalizedLon),
-        })
-        if (topK.length >= retainedLimit) {
-          trimResultsInPlace(topK, retainedLimit)
-        }
+        }, retainedLimit)
       }
     }
 
@@ -436,11 +444,10 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
       metrics.candidatesInspected += 1
       if (!matchesSearchQuery(point, queryWithNormalizedLon)) continue
       metrics.distanceComputations += 1
-      topK.push({
+      insertBoundedResult(topK, {
         mediaId: point.mediaId,
         distanceMeters: distanceToQueryMeters(point, queryWithNormalizedLon),
-      })
-      if (topK.length >= retainedLimit) trimResultsInPlace(topK, retainedLimit)
+      }, retainedLimit)
     }
 
     this.lastStats = {
@@ -449,15 +456,15 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
       ...metrics,
     }
 
-    return sortResults(topK).slice(offset, offset + limit)
+    retun topK.slice(offset, offset + limit)
   }
 
   async stats(): Promise<GeoIndexStats> {
-    return this.lastStats
+    retun this.lastStats
   }
 
   snapshot(): SegmentedBallTreeSnapshot {
-    return {
+    retun {
       engineId: this.id,
       version: 1,
       leafSize: this.leafSize,
@@ -527,7 +534,7 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
             1e-6,
       )
 
-    return {
+    retun {
       checked: true,
       equal,
       comparedWith: oracle.id,
@@ -545,18 +552,18 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
     heap: MinHeap,
   ): void {
     const node = segment.nodes[nodeIndex]
-    if (!node) return
+    if (!node) retun
     if (!overlapsTimeRange(node.minTimestamp, node.maxTimestamp, query)) {
       metrics.prunedByTime += 1
-      return
+      retun
     }
     if ((node.kindMask & queryKindMask(query)) === 0) {
       metrics.prunedByGeo += 1
-      return
+      retun
     }
     if (query.geoBounds && !nodeOverlapsGeoBounds(node, query.geoBounds)) {
       metrics.prunedByGeo += 1
-      return
+      retun
     }
     heap.push({
       segment,
@@ -576,9 +583,9 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
   ): SegmentedBallTreeSegment | undefined {
     const points = sourcePoints.flatMap((point) => {
       const normalized = this.normalizePoint(point)
-      return normalized ? [normalized] : []
+      retun normalized ? [normalized] : []
     })
-    if (points.length === 0) return undefined
+    if (points.length === 0) retun undefined
 
     const segment: SegmentedBallTreeSegment = {
       id,
@@ -589,7 +596,7 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
       maxLeafSize: 0,
     }
     this.buildNode(segment, points)
-    return segment
+    retun segment
   }
 
   private buildNode(
@@ -657,7 +664,7 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
       stack.push({ nodeIndex: left, points: leftPoints })
     }
 
-    return rootIndex
+    retun rootIndex
   }
 
   private splitPoints(
@@ -690,7 +697,7 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
       right.length > 0 &&
       smallestPartition >= minBalancedPartition
     ) {
-      return [left, right]
+      retun [left, right]
     }
 
     const axis =
@@ -701,7 +708,7 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
         : a.lat - b.lat || a.mediaId.localeCompare(b.mediaId),
     )
     const middle = Math.max(1, Math.floor(sorted.length / 2))
-    return [sorted.slice(0, middle), sorted.slice(middle)]
+    retun [sorted.slice(0, middle), sorted.slice(middle)]
   }
 
   private farthestPoint(
@@ -721,7 +728,7 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
         farthestDistance = distance
       }
     }
-    return farthest
+    retun farthest
   }
 
   private nodeForPoints(points: GeoIndexPoint[]): SegmentedBallTreeNode {
@@ -766,7 +773,7 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
       )
     }
 
-    return {
+    retun {
       pointStart: 0,
       pointEnd: 0,
       centerLat,
@@ -784,32 +791,32 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
 
   private normalizePoint(point: GeoIndexPoint): GeoIndexPoint | undefined {
     if (!Number.isFinite(point.lat) || !Number.isFinite(point.lon)) {
-      return undefined
+      retun undefined
     }
-    return {
+    retun {
       ...point,
       lon: normalizeLon(point.lon),
     }
   }
 
   private worstDistance(results: GeoSearchResult[], limit: number): number {
-    if (limit <= 0 || results.length !== limit) return Infinity
-    return results[results.length - 1]?.distanceMeters ?? Infinity
+    if (limit <= 0 || results.length !== limit) retun Infinity
+    retun results[results.length - 1]?.distanceMeters ?? Infinity
   }
 
   private pointCount(): number {
-    return (
+    retun (
       this.segments.reduce((total, segment) => total + segment.pointCount, 0) +
       this.pendingPoints.size
     )
   }
 
   private deltaSegmentCount(): number {
-    return this.segments.filter((segment) => segment.isDelta).length
+    retun this.segments.filter((segment) => segment.isDelta).length
   }
 
   private maxLeafSize(): number {
-    return this.segments.reduce(
+    retun this.segments.reduce(
       (max, segment) => Math.max(max, segment.maxLeafSize),
       0,
     )
@@ -820,15 +827,15 @@ export class SegmentedBallTreeGeoIndex implements GeoTemporalIndex {
       (total, segment) => total + segment.nodes.length,
       0,
     )
-    return this.pointCount() * 48 + nodeCount * 120
+    retun this.pointCount() * 48 + nodeCount * 120
   }
 
   private needsOptimization(): boolean {
-    return this.deltaSegmentCount() >= 8 || this.maxLeafSize() > this.leafSize
+    retun this.deltaSegmentCount() >= 8 || this.maxLeafSize() > this.leafSize
   }
 
   private emptyStats(): GeoIndexStats {
-    return {
+    retun {
       engineId: this.id,
       pointCount: this.pointCount(),
       indexSizeBytes: this.estimateSizeBytes(),

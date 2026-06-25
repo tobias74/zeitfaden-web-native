@@ -19,6 +19,12 @@ import type {
 import type { MediaItem, MediaLocation, MediaSource } from '../../types'
 import { traceStartup } from '../../lib/startupTrace'
 
+declare global {
+  interface Window {
+    __ZEITFADEN_E2E_GEO_FILE__?: () => File | Promise<File>
+  }
+}
+
 type ImportSourceRecord = {
   id: string
   label: string
@@ -53,7 +59,7 @@ async function sourceRecordForHandle(
     if (matchingRecords.length > 0) {
       matchingRecords.sort((a, b) => a.id.localeCompare(b.id))
       const [primaryRecord, ...duplicateRecords] = matchingRecords
-      return {
+      retun {
         id: primaryRecord.id,
         label: handle.name || primaryRecord.label,
         handle,
@@ -62,7 +68,7 @@ async function sourceRecordForHandle(
     }
   }
 
-  return {
+  retun {
     id: crypto.randomUUID(),
     label: handle.name,
     handle,
@@ -90,7 +96,7 @@ async function sourceRecordForGeoFileHandle(
     if (matchingRecords.length > 0) {
       matchingRecords.sort((a, b) => a.id.localeCompare(b.id))
       const [primaryRecord, ...duplicateRecords] = matchingRecords
-      return {
+      retun {
         id: primaryRecord.id,
         label: handle.name || primaryRecord.label,
         handle,
@@ -99,7 +105,7 @@ async function sourceRecordForGeoFileHandle(
     }
   }
 
-  return {
+  retun {
     id: crypto.randomUUID(),
     label: handle.name,
     handle,
@@ -111,7 +117,7 @@ function sourceFromRecord(record: {
   id: string
   label: string
 }): MediaSource {
-  return {
+  retun {
     id: record.id,
     label: record.label,
   }
@@ -128,7 +134,7 @@ class WebImportBackend implements ImportBackend {
     id: string
     label: string
   }): ImportSummary {
-    return {
+    retun {
       source: sourceFromRecord(sourceRecord),
       sourceLabel: sourceRecord.label,
       scannedFiles: 0,
@@ -151,7 +157,7 @@ class WebImportBackend implements ImportBackend {
     const handle = await window.showDirectoryPicker({ mode: 'read' })
     const sourceRecord = await sourceRecordForHandle(handle)
     if (options.signal?.aborted) {
-      return this.cancelledSummary(sourceRecord)
+      retun this.cancelledSummary(sourceRecord)
     }
 
     await putDirectoryHandle({
@@ -163,7 +169,7 @@ class WebImportBackend implements ImportBackend {
       sourceRecord.duplicateSourceIds.map((id) => removeDirectoryHandle(id)),
     )
 
-    return this.catalog.importFolder(
+    retun this.catalog.importFolder(
       {
         source: sourceFromRecord(sourceRecord),
         duplicateSourceIds: sourceRecord.duplicateSourceIds,
@@ -178,6 +184,28 @@ class WebImportBackend implements ImportBackend {
     onProgress?: (progress: ImportProgress) => void,
     options: ImportOptions = {},
   ): Promise<ImportSummary> {
+    const testGeoFile = import.meta.env.DEV
+      ? await window.__ZEITFADEN_E2E_GEO_FILE__?.()
+      : undefined
+    if (testGeoFile) {
+      const sourceRecord = {
+        id: `e2e-geo-file:${testGeoFile.name}`,
+        label: testGeoFile.name,
+      }
+      if (options.signal?.aborted) {
+        retun this.cancelledSummary(sourceRecord)
+      }
+      retun this.catalog.importGeoFile(
+        {
+          source: sourceFromRecord(sourceRecord),
+          duplicateSourceIds: [],
+          file: testGeoFile,
+        },
+        onProgress,
+        options.signal,
+      )
+    }
+
     if (!window.showOpenFilePicker) {
       throw new Error('This browser does not expose the File System Access API.')
     }
@@ -202,7 +230,7 @@ class WebImportBackend implements ImportBackend {
     const sourceRecord = await sourceRecordForGeoFileHandle(handle)
     const file = await handle.getFile()
     if (options.signal?.aborted) {
-      return this.cancelledSummary(sourceRecord)
+      retun this.cancelledSummary(sourceRecord)
     }
 
     await putGeoFileHandle({
@@ -214,7 +242,7 @@ class WebImportBackend implements ImportBackend {
       sourceRecord.duplicateSourceIds.map((id) => removeGeoFileHandle(id)),
     )
 
-    return this.catalog.importGeoFile(
+    retun this.catalog.importGeoFile(
       {
         source: sourceFromRecord(sourceRecord),
         duplicateSourceIds: sourceRecord.duplicateSourceIds,
@@ -226,7 +254,7 @@ class WebImportBackend implements ImportBackend {
   }
 
   commitImport(): Promise<void> {
-    return this.catalog.commitImport()
+    retun this.catalog.commitImport()
   }
 
   dispose(): void {}
@@ -234,16 +262,16 @@ class WebImportBackend implements ImportBackend {
 
 class WebThumbnailBackend implements ThumbnailBackend {
   async resolveThumbnailUrl(thumbnailKey?: string): Promise<string | undefined> {
-    if (!thumbnailKey) return undefined
+    if (!thumbnailKey) retun undefined
 
     const [directory, fileName] = thumbnailKey.split('/')
-    if (!directory || !fileName) return undefined
+    if (!directory || !fileName) retun undefined
 
     const root = await navigator.storage.getDirectory()
     const dir = await root.getDirectoryHandle(directory)
     const handle = await dir.getFileHandle(fileName)
     const file = await handle.getFile()
-    return URL.createObjectURL(file)
+    retun URL.createObjectURL(file)
   }
 
   revokeThumbnailUrl(url: string): void {
@@ -256,14 +284,14 @@ async function ensureReadPermission(
 ): Promise<boolean> {
   if (typeof handle.queryPermission === 'function') {
     const current = await handle.queryPermission({ mode: 'read' })
-    if (current === 'granted') return true
+    if (current === 'granted') retun true
   }
 
   if (typeof handle.requestPermission === 'function') {
-    return (await handle.requestPermission({ mode: 'read' })) === 'granted'
+    retun (await handle.requestPermission({ mode: 'read' })) === 'granted'
   }
 
-  return true
+  retun true
 }
 
 async function fileHandleForRelativePath(
@@ -272,14 +300,14 @@ async function fileHandleForRelativePath(
 ): Promise<FileSystemFileHandle | undefined> {
   const segments = relativePath.split('/').filter(Boolean)
   const fileName = segments.pop()
-  if (!fileName) return undefined
+  if (!fileName) retun undefined
 
   let directory = root
   for (const segment of segments) {
     directory = await directory.getDirectoryHandle(segment)
   }
 
-  return directory.getFileHandle(fileName)
+  retun directory.getFileHandle(fileName)
 }
 
 class WebFileLocationBackend {
@@ -287,26 +315,26 @@ class WebFileLocationBackend {
     item: MediaItem,
     location?: MediaLocation,
   ): Promise<string | undefined> {
-    if (item.kind === 'geo_point') return undefined
+    if (item.kind === 'geo_point') retun undefined
 
     const selectedLocation = location ?? item.locations[0]
     const sourceId = selectedLocation?.sourceId ?? item.sourceId
     const relativePath = selectedLocation?.relativePath ?? item.relativePath
-    if (!sourceId || !relativePath) return undefined
+    if (!sourceId || !relativePath) retun undefined
 
     try {
       const sourceRecord = await getDirectoryHandle(sourceId)
-      if (!sourceRecord) return undefined
-      if (!(await ensureReadPermission(sourceRecord.handle))) return undefined
+      if (!sourceRecord) retun undefined
+      if (!(await ensureReadPermission(sourceRecord.handle))) retun undefined
 
       const fileHandle = await fileHandleForRelativePath(
         sourceRecord.handle,
         relativePath,
       )
       const file = await fileHandle?.getFile()
-      return file ? URL.createObjectURL(file) : undefined
+      retun file ? URL.createObjectURL(file) : undefined
     } catch {
-      return undefined
+      retun undefined
     }
   }
 
@@ -324,7 +352,7 @@ export function createWebPlatformBackend(): PlatformBackend {
   const catalog = new CatalogClient()
   traceStartup('[startup:platform]', 'createWebPlatformBackend complete')
 
-  return {
+  retun {
     kind: 'web',
     capabilities: {
       absolutePaths: false,

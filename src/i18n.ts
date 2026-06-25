@@ -50,8 +50,10 @@ const en = {
   diskRead: 'Disk read',
   diskReads: 'Disk reads',
   engine: 'Engine',
+  assetRead: 'Asset read',
   filesCouldNotBeRead: '{count} files could not be read.',
   filesFound: '{count} items found',
+  filter: 'Filter',
   from: 'From',
   geoPoints: 'Geo points',
   geo_point: 'geo point',
@@ -71,6 +73,9 @@ const en = {
   catalogVersion: 'Catalog version',
   indexStorage: 'Index storage',
   indexSize: 'Index size',
+  indexDetails: 'Index details',
+  indexReady: 'Index ready',
+  indexScan: 'Index scan',
   indexStatusBuilding: 'Updating',
   indexStatusCurrent: 'Current',
   indexStatusFailed: 'Failed',
@@ -94,6 +99,7 @@ const en = {
   locations: 'Locations',
   mapPointLimitNotice:
     'Map point limit reached: showing first {shown} matching geo points.',
+  mapQuery: 'Map query',
   medium: 'Medium',
   mediaSourceOriginal: 'original',
   mediaSourceThumbnail: 'thumbnail',
@@ -117,8 +123,13 @@ const en = {
   privacy: 'Privacy Policy',
   pruned: 'Pruned',
   query: 'Query',
+  clientWait: 'Client wait',
+  paint: 'Paint',
   reveal: 'Reveal',
+  render: 'Render',
   resident: 'Resident',
+  resultsQuery: 'Results query',
+  roundTrip: 'Round trip',
   resizeLeftToolsAndResults: 'Resize left tools and results',
   resizeMapAndQueryPanels: 'Resize map and query panels',
   rebuildCatalogIndexes: 'Rebuild indexes',
@@ -150,6 +161,7 @@ const en = {
   videos: 'Videos',
   visible: 'visible',
   visited: 'Visited',
+  worker: 'Worker',
 } as const
 
 export type TranslationKey = keyof typeof en
@@ -178,7 +190,7 @@ const de: Record<TranslationKey, string> = {
   clearAreaFilter: 'Bereichsfilter löschen',
   clearCatalog: 'Katalog leeren',
   clearCatalogConfirm:
-    'Katalog leeren? Dadurch werden indizierte Elemente, Quellen und generierte Vorschaubilder aus dieser App entfernt. Originaldateien bleiben auf der Festplatte.',
+    'Katalog leeren? Dadurch werden indizierte Elemente, Quellen und generierte Vorschaubilder aus dieser App entfent. Originaldateien bleiben auf der Festplatte.',
   clearSearch: 'Suche löschen',
   closeViewer: 'Viewer schließen',
   countingFilesIn: 'Import aus {sourceLabel} wird vorbereitet',
@@ -191,9 +203,11 @@ const de: Record<TranslationKey, string> = {
   distanceEngine: 'Distanz-Engine',
   segmentedBallTree: 'Segmentierter Ball-Tree',
   deltas: 'Deltas',
+  assetRead: 'Asset-Lesen',
   engine: 'Engine',
   filesCouldNotBeRead: '{count} Dateien konnten nicht gelesen werden.',
   filesFound: '{count} Elemente gefunden',
+  filter: 'Filter',
   from: 'Von',
   geoPoints: 'Geo-Punkte',
   geo_point: 'Geo-Punkt',
@@ -205,7 +219,7 @@ const de: Record<TranslationKey, string> = {
   images: 'Bilder',
   imprint: 'Impressum',
   cancelImport: 'Abbrechen',
-  commitImport: 'Jetzt speichern',
+  commitImport: 'Jetzt speichen',
   importFolder: 'Ordner importieren',
   importGeoFile: 'Geo importieren',
   importItemsAcceptedSkipped:
@@ -213,6 +227,9 @@ const de: Record<TranslationKey, string> = {
   importProgress: 'Importfortschritt',
   catalogVersion: 'Katalogversion',
   indexSize: 'Indexgröße',
+  indexDetails: 'Indexdetails',
+  indexReady: 'Index bereit',
+  indexScan: 'Index-Scan',
   indexStatusBuilding: 'Wird aktualisiert',
   indexStatusCurrent: 'Aktuell',
   indexStatusFailed: 'Fehlgeschlagen',
@@ -235,6 +252,7 @@ const de: Record<TranslationKey, string> = {
   locations: 'Speicherorte',
   mapPointLimitNotice:
     'Kartenlimit erreicht: Es werden die ersten {shown} passenden Geo-Punkte angezeigt.',
+  mapQuery: 'Kartenabfrage',
   medium: 'Mittel',
   mediaSourceOriginal: 'Original',
   mediaSourceThumbnail: 'Vorschaubild',
@@ -258,15 +276,20 @@ const de: Record<TranslationKey, string> = {
   privacy: 'Datenschutzerklärung',
   pruned: 'Ausgefiltert',
   query: 'Abfrage',
+  clientWait: 'Client-Wartezeit',
+  paint: 'Paint',
   reveal: 'Anzeigen',
+  render: 'Render',
   resizeLeftToolsAndResults:
-    'Linke Werkzeuge und Ergebnisse in der Breite ändern',
-  resizeMapAndQueryPanels: 'Karten- und Suchbereich in der Höhe ändern',
+    'Linke Werkzeuge und Ergebnisse in der Breite änden',
+  resizeMapAndQueryPanels: 'Karten- und Suchbereich in der Höhe änden',
   rebuildCatalogIndexes: 'Indizes neu aufbauen',
   rebuildDistanceIndex: 'Index neu aufbauen',
+  resultsQuery: 'Ergebnisabfrage',
   resultDisplayMode: 'Ergebnisansicht',
   resultPages: 'Ergebnisseiten',
   resultRangeOf: '{start}-{end} von {total}',
+  roundTrip: 'Roundtrip',
   savingMediaFiles: '{count} Elemente werden gespeichert',
   scanningSource: '{sourceLabel} wird gescannt',
   searchMap: 'Suchkarte',
@@ -290,6 +313,7 @@ const de: Record<TranslationKey, string> = {
   video: 'Video',
   videos: 'Videos',
   visible: 'sichtbar',
+  worker: 'Worker',
   cacheHits: 'Cache-Treffer',
   cacheMisses: 'Cache-Fehltreffer',
   diskRead: 'Von Platte gelesen',
@@ -306,11 +330,11 @@ const dictionaries: Record<Language, Record<TranslationKey, string>> = {
 }
 
 export function isLanguage(value: string | null): value is Language {
-  return LANGUAGES.some((language) => language.id === value)
+  retun LANGUAGES.some((language) => language.id === value)
 }
 
 export function languageLocale(language: Language): string {
-  return language === 'de' ? 'de-DE' : 'en-US'
+  retun language === 'de' ? 'de-DE' : 'en-US'
 }
 
 export function translate(
@@ -318,7 +342,7 @@ export function translate(
   key: TranslationKey,
   values: TranslationValues = {},
 ): string {
-  return dictionaries[language][key].replace(/\{(\w+)\}/g, (_, token) =>
+  retun dictionaries[language][key].replace(/\{(\w+)\}/g, (_, token) =>
     String(values[token] ?? ''),
   )
 }

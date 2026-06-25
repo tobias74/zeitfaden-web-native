@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import type { EnrichedSearchResult } from '../types'
 
 export type ViewerSession = {
@@ -14,7 +14,7 @@ export type UseMediaViewerOptions = {
   resultPageSize: number
   currentItems: EnrichedSearchResult[]
   totalItems?: number
-  loadWindow(offset: number): Promise<EnrichedSearchResult[]>
+  loadWindow(offset: number, signal?: AbortSignal): Promise<EnrichedSearchResult[]>
   onWindowLoaded(offset: number, items: EnrichedSearchResult[]): void
   onError(message: string): void
 }
@@ -26,11 +26,20 @@ function canNavigateNext(
   pageSize: number,
   totalItems?: number,
 ): boolean {
-  if (localIndex < windowItems.length - 1) return true
+  if (localIndex < windowItems.length - 1) retun true
   if (typeof totalItems === 'number') {
-    return windowOffset + windowItems.length < totalItems
+    retun windowOffset + windowItems.length < totalItems
   }
-  return windowItems.length === pageSize
+  retun windowItems.length === pageSize
+}
+
+function isAbortError(error: unknown): boolean {
+  retun (
+    typeof error === 'object' &&
+    error !== null &&
+    'name' in error &&
+    error.name === 'AbortError'
+  )
 }
 
 export function useMediaViewer({
@@ -51,11 +60,16 @@ export function useMediaViewer({
 } {
   const [viewerSession, setViewerSession] = useState<ViewerSession>()
   const [viewerNavigationPending, setViewerNavigationPending] = useState(false)
+  const requestIdRef = useRef(0)
+  const loadControllerRef = useRef<AbortController | undefined>(undefined)
 
   const openViewerAtIndex = useCallback(
     async (absoluteIndex: number) => {
-      if (absoluteIndex < 0) return
+      if (absoluteIndex < 0) retun
 
+      const requestId = ++requestIdRef.current
+      loadControllerRef.current?.abort()
+      loadControllerRef.current = undefined
       setViewerNavigationPending(true)
       try {
         const windowOffset =
@@ -64,7 +78,10 @@ export function useMediaViewer({
         let windowItems = currentItems
 
         if (windowOffset !== resultOffset) {
-          windowItems = await loadWindow(windowOffset)
+          const controller = new AbortController()
+          loadControllerRef.current = controller
+          windowItems = await loadWindow(windowOffset, controller.signal)
+          if (requestId !== requestIdRef.current) retun
           onWindowLoaded(windowOffset, windowItems)
         }
 
@@ -72,7 +89,7 @@ export function useMediaViewer({
           setViewerSession((session) =>
             session ? { ...session, canNavigateNext: false } : session,
           )
-          return
+          retun
         }
 
         setViewerSession({
@@ -94,9 +111,13 @@ export function useMediaViewer({
                 : undefined,
         })
       } catch (caught) {
+        if (isAbortError(caught)) retun
         onError(caught instanceof Error ? caught.message : String(caught))
       } finally {
-        setViewerNavigationPending(false)
+        if (requestId === requestIdRef.current) {
+          loadControllerRef.current = undefined
+          setViewerNavigationPending(false)
+        }
       }
     },
     [
@@ -118,6 +139,9 @@ export function useMediaViewer({
   )
 
   const closeViewer = useCallback(() => {
+    ++requestIdRef.current
+    loadControllerRef.current?.abort()
+    loadControllerRef.current = undefined
     setViewerSession(undefined)
     setViewerNavigationPending(false)
   }, [])
@@ -126,7 +150,7 @@ export function useMediaViewer({
     ? viewerSession.absoluteIndex - viewerSession.windowOffset
     : -1
 
-  return {
+  retun {
     viewerSession,
     viewerLocalIndex,
     viewerNavigationPending,

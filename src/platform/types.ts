@@ -4,6 +4,7 @@ import type {
   GeoIndexStats,
   GeoSearchQuery,
   GeoSearchResult,
+  MapPointPage,
   MediaItem,
   MediaLocation,
   MediaSource,
@@ -48,6 +49,10 @@ export type ImportOptions = {
   signal?: AbortSignal
 }
 
+export type CatalogSearchOptions = {
+  signal?: AbortSignal
+}
+
 export type GeoIndexBuildProgress = {
   phase: 'loading' | 'building' | 'ready'
   pointCount: number
@@ -79,7 +84,11 @@ export interface CatalogBackend {
   init(): Promise<CatalogInfo>
   upsertSource(source: MediaSource): Promise<void>
   upsertMedia(items: MediaItem[]): Promise<number>
-  searchMedia(spec: SearchSpec): Promise<SearchPage>
+  searchMedia(spec: SearchSpec, options?: CatalogSearchOptions): Promise<SearchPage>
+  searchMapPoints(
+    spec: SearchSpec,
+    options?: CatalogSearchOptions,
+  ): Promise<MapPointPage>
   buildSearchIndexes(
     indexId: string,
     onProgress?: (progress: GeoIndexBuildProgress) => void,

@@ -65,6 +65,21 @@ export type GeoIndexPoint = {
   timestamp?: number
 }
 
+export type MapPoint = {
+  mediaId?: string
+  assetId?: number
+  kind?: MediaKind
+  lat: number
+  lon: number
+  timestamp?: number
+}
+
+export type MapPointPage = {
+  points: MapPoint[]
+  limitReached?: boolean
+  resultMetrics?: SearchResultMetrics
+}
+
 export type GeoSearchQuery = TimeRange & {
   lat: number
   lon: number
@@ -168,7 +183,15 @@ export type SearchIndexStats = GeoIndexStats & {
   queryPurpose?: SearchPurpose
   storageMode?: SearchStorageMode
   queryTimeMs?: number
-  rowsReturned?: number
+  queryRoundTripMs?: number
+  queryTransferMs?: number
+  queryPaintMs?: number
+  queryRenderMs?: number
+  queryIndexReadyMs?: number
+  queryIndexScanMs?: number
+  queryAssetReadMs?: number
+  queryAssetFilterMs?: number
+  rowsRetuned?: number
   limit?: number
   offset?: number
   limitReached?: boolean

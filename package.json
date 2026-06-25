@@ -10,6 +10,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:e2e": "RUN_E2E_TESTS=1 vitest run e2e/import-query.e2e.test.ts",
+    "test:perf": "RUN_PERF_TESTS=1 vitest run src/geo/geoIndexes.perf.test.ts src/platform/web/catalog.worker.perf.test.ts",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
   },
