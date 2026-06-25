@@ -99,6 +99,9 @@ const en = {
   locations: 'Locations',
   mapPointLimitNotice:
     'Map point limit reached: showing first {shown} matching geo points.',
+  mapPointLimit: 'Map bubble limit',
+  mapPointLimitHint:
+    'Higher values show more map points but can make map updates slower.',
   mapQuery: 'Map query',
   medium: 'Medium',
   mediaSourceOriginal: 'original',
@@ -252,6 +255,9 @@ const de: Record<TranslationKey, string> = {
   locations: 'Speicherorte',
   mapPointLimitNotice:
     'Kartenlimit erreicht: Es werden die ersten {shown} passenden Geo-Punkte angezeigt.',
+  mapPointLimit: 'Limit für Kartenpunkte',
+  mapPointLimitHint:
+    'Höhere Werte zeigen mehr Kartenpunkte, können Kartenaktualisierungen aber verlangsamen.',
   mapQuery: 'Kartenabfrage',
   medium: 'Mittel',
   mediaSourceOriginal: 'Original',

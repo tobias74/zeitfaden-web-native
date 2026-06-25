@@ -359,6 +359,28 @@ describe('App pagination', () => {
     })
   })
 
+  it('uses the configured map bubble limit for map searches', async () => {
+    const { default: App } = await import('./App')
+
+    render(<App />)
+
+    expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
+
+    fireEvent.change(screen.getByLabelText('Map bubble limit'), {
+      target: { value: '10000' },
+    })
+
+    await waitFor(() => {
+      expect(window.localStorage.getItem('geo-media-index-lab:map-point-limit'))
+        .toBe('10000')
+      expect(
+        searchMapPointCalls.some(
+          (query) => query.purpose === 'map' && query.limit === 10_000,
+        ),
+      ).toBe(true)
+    })
+  })
+
   it('aborts the previous map search when the map moves again', async () => {
     let releaseMapSearch!: () => void
     mapSearchDelay = new Promise((resolve) => {

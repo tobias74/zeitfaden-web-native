@@ -88,9 +88,11 @@ const RESULT_DISPLAY_MODE_KEY = 'geo-media-index-lab:result-display-mode'
 const RESULT_THUMBNAIL_SIZE_KEY = 'geo-media-index-lab:result-thumbnail-size'
 const RESULT_METADATA_KEY = 'geo-media-index-lab:result-metadata'
 const RESULT_PAGE_SIZE_KEY = 'geo-media-index-lab:result-page-size'
+const MAP_POINT_LIMIT_KEY = 'geo-media-index-lab:map-point-limit'
 const RESULT_PAGE_SIZE_OPTIONS = [50, 100, 250, 500] as const
+const MAP_POINT_LIMIT_OPTIONS = [1_000, 2_500, 5_000, 10_000, 25_000] as const
 const DEFAULT_RESULT_PAGE_SIZE = 100
-const MAP_POINT_LIMIT = 5000
+const DEFAULT_MAP_POINT_LIMIT = 5_000
 const DEFAULT_DISTANCE_ENGINE_ID = 'segmented-ball-tree'
 const CATALOG_QUERY_INDEX_ID = 'file-time-geo'
 const DISTANCE_ENGINE_IDS = [
@@ -141,6 +143,15 @@ function storedString<T extends string>(
   allowed: readonly T[],
 ): T {
   const stored = window.localStorage.getItem(key)
+  return allowed.includes(stored as T) ? (stored as T) : fallback
+}
+
+function storedNumberOption<T extends number>(
+  key: string,
+  fallback: T,
+  allowed: readonly T[],
+): T {
+  const stored = storedNumber(key, fallback)
   return allowed.includes(stored as T) ? (stored as T) : fallback
 }
 
@@ -575,6 +586,15 @@ function App() {
       translate(language, key, values),
     [language],
   )
+  const [mapPointLimit, setMapPointLimitState] = useState<
+    (typeof MAP_POINT_LIMIT_OPTIONS)[number]
+  >(() =>
+    storedNumberOption(
+      MAP_POINT_LIMIT_KEY,
+      DEFAULT_MAP_POINT_LIMIT,
+      MAP_POINT_LIMIT_OPTIONS,
+    ),
+  )
   const search = useSearchState({
     allowedIndexIds: DISTANCE_ENGINE_IDS,
     defaultSelectedIndexId: DEFAULT_DISTANCE_ENGINE_ID,
@@ -582,7 +602,7 @@ function App() {
     defaultResultPageSize: DEFAULT_RESULT_PAGE_SIZE,
     allowedPageSizes: RESULT_PAGE_SIZE_OPTIONS,
     pageSizeStorageKey: RESULT_PAGE_SIZE_KEY,
-    mapPointLimit: MAP_POINT_LIMIT,
+    mapPointLimit,
   })
   const {
     selectedIndexId,
@@ -758,11 +778,11 @@ function App() {
         sort: catalogSort,
         engineId: CATALOG_QUERY_INDEX_ID,
       },
-      limit: MAP_POINT_LIMIT,
+      limit: mapPointLimit,
       offset: 0,
       purpose: 'map',
     }) : undefined,
-    [catalogSort, kindFilter, timeRange, visibleMapBounds],
+    [catalogSort, kindFilter, mapPointLimit, timeRange, visibleMapBounds],
   )
   const {
     results: resultItems,
@@ -1011,6 +1031,16 @@ function App() {
   const setThumbnailSize = useCallback((size: ResultThumbnailSize) => {
     setResultThumbnailSize(size)
     window.localStorage.setItem(RESULT_THUMBNAIL_SIZE_KEY, size)
+  }, [])
+
+  const setMapPointLimit = useCallback((limit: number) => {
+    const nextLimit = MAP_POINT_LIMIT_OPTIONS.includes(
+      limit as (typeof MAP_POINT_LIMIT_OPTIONS)[number],
+    )
+      ? (limit as (typeof MAP_POINT_LIMIT_OPTIONS)[number])
+      : DEFAULT_MAP_POINT_LIMIT
+    setMapPointLimitState(nextLimit)
+    window.localStorage.setItem(MAP_POINT_LIMIT_KEY, String(nextLimit))
   }, [])
 
   const toggleMetadata = useCallback((enabled: boolean) => {
@@ -1303,6 +1333,24 @@ function App() {
               </summary>
               <div className="display-popover settings-popover">
                 <div className="display-section">
+                  <label className="settings-select-row">
+                    {t('mapPointLimit')}
+                    <select
+                      value={mapPointLimit}
+                      onChange={(event) =>
+                        setMapPointLimit(Number(event.target.value))
+                      }
+                    >
+                      {MAP_POINT_LIMIT_OPTIONS.map((limit) => (
+                        <option key={limit} value={limit}>
+                          {limit.toLocaleString(locale)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="settings-hint">{t('mapPointLimitHint')}</p>
+                </div>
+                <div className="display-section">
                   <span>{t('activityLog')}</span>
                   <div className="activity-log" aria-label={t('activityLog')}>
                     {activityLog.map((entry) => (
@@ -1481,7 +1529,7 @@ function App() {
                 {mapPointLimitReached && (
                   <div className="map-limit-notice">
                     {t('mapPointLimitNotice', {
-                      shown: MAP_POINT_LIMIT.toLocaleString(locale),
+                      shown: mapPointLimit.toLocaleString(locale),
                     })}
                   </div>
                 )}
