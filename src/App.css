@@ -26,7 +26,7 @@
 .topbar {
   min-height: 56px;
   display: grid;
-  grid-template-columns: minmax(260px, 420px) minmax(0, 1fr);
+  grid-template-columns: max-content minmax(0, 1fr);
   align-items: center;
   gap: 16px;
   padding: 12px 14px;
@@ -140,20 +140,20 @@
 
 .topbar-tools {
   min-width: 0;
-  display: grid;
-  grid-template-columns: auto minmax(320px, 1fr) auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 18px;
+  justify-content: flex-end;
+  gap: 10px 16px;
 }
 
 .topbar-nav {
-  grid-column: 1;
-  grid-row: 1;
   min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 16px;
   justify-content: flex-start;
+  flex: 0 0 auto;
 }
 
 .topbar-link {
@@ -165,6 +165,7 @@
   color: #4f5b56;
   font-size: 13px;
   font-weight: 620;
+  white-space: nowrap;
 }
 
 .topbar-link:hover:not(:disabled),
@@ -177,12 +178,12 @@
 }
 
 .topbar-actions {
-  grid-column: 3;
-  grid-row: 1;
+  min-width: 0;
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+  flex: 0 1 auto;
 }
 
 .topbar-actions button,
@@ -190,11 +191,21 @@
   white-space: nowrap;
 }
 
+.topbar-actions button,
+.topbar-actions .display-menu,
+.language-control {
+  flex: 0 0 auto;
+}
+
 .topbar-progress-slot {
-  grid-column: 2;
-  grid-row: 1;
+  flex: 1 0 100%;
   min-height: 32px;
-  min-width: 320px;
+  min-width: 0;
+  order: 3;
+}
+
+.topbar-progress-slot.idle {
+  display: none;
 }
 
 .language-control {
@@ -1506,33 +1517,6 @@
   line-height: 1.35;
 }
 
-@media (max-width: 1500px) {
-  .topbar-tools {
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: 10px 16px;
-  }
-
-  .topbar-nav {
-    grid-column: 1;
-    grid-row: 1;
-  }
-
-  .topbar-actions {
-    grid-column: 2;
-    grid-row: 1;
-  }
-
-  .topbar-progress-slot {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    min-width: 0;
-  }
-
-  .topbar-progress-slot.idle {
-    min-height: 0;
-  }
-}
-
 @media (max-width: 980px) {
   .app-shell {
     height: auto;
@@ -1550,42 +1534,29 @@
   }
 
   .topbar {
-    min-height: 116px;
+    min-height: 0;
   }
 
   .topbar-tools {
-    grid-template-columns: 1fr;
-  }
-
-  .topbar-nav,
-  .topbar-actions,
-  .topbar-progress-slot {
-    grid-column: 1;
+    align-items: stretch;
+    justify-content: flex-start;
   }
 
   .topbar-nav {
-    grid-row: 1;
+    width: 100%;
     flex-wrap: wrap;
     gap: 12px;
     padding: 2px 0;
   }
 
   .topbar-actions {
-    grid-row: 2;
+    width: 100%;
     flex-wrap: wrap;
+    justify-content: stretch;
   }
 
   .topbar-progress-slot {
-    grid-row: 3;
     min-height: 24px;
-  }
-
-  .topbar-progress-slot.idle {
-    display: none;
-  }
-
-  .topbar-actions {
-    justify-content: stretch;
   }
 
   .topbar-actions button {

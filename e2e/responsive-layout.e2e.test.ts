@@ -17,6 +17,17 @@ const VIEWPORTS = [
   { name: 'tablet', width: 768, height: 1024 },
   { name: 'desktop', width: 1280, height: 720 },
 ] as const
+const APPBAR_VIEWPORTS = [
+  { name: 'narrow phone', width: 360, height: 780 },
+  { name: 'phone', width: 390, height: 844 },
+  { name: 'small tablet', width: 640, height: 900 },
+  { name: 'tablet', width: 768, height: 1024 },
+  { name: 'large tablet', width: 980, height: 900 },
+  { name: 'small desktop', width: 1024, height: 720 },
+  { name: 'desktop', width: 1280, height: 720 },
+  { name: 'wide desktop', width: 1440, height: 900 },
+  { name: 'large desktop', width: 1600, height: 900 },
+] as const
 
 let server: ViteDevServer | undefined
 let baseUrl = ''
@@ -197,6 +208,70 @@ async function layoutReport(page: Page): Promise<{
   })
 }
 
+async function appbarReport(page: Page): Promise<{
+  controlsOutside: string[]
+  wrappedLegalLinks: string[]
+  topbarOverflowPx: number
+  viewportWidth: number
+}> {
+  return page.evaluate(() => {
+    const topbar = document.querySelector('.topbar')
+    if (!topbar) {
+      return {
+        controlsOutside: ['missing .topbar'],
+        wrappedLegalLinks: [],
+        topbarOverflowPx: 0,
+        viewportWidth: window.innerWidth,
+      }
+    }
+    const topbarRect = topbar.getBoundingClientRect()
+    const viewportLeft = -(window.visualViewport?.offsetLeft ?? 0)
+    const viewportRight = viewportLeft + window.innerWidth
+    const left = Math.max(topbarRect.left, viewportLeft)
+    const right = Math.min(topbarRect.right, viewportRight)
+    const controlSummary = (element: Element, rect: DOMRect) =>
+      `${element.tagName.toLowerCase()}.${
+        typeof element.className === 'string'
+          ? element.className.replace(/\s+/g, '.')
+          : ''
+      } "${element.textContent?.replace(/\s+/g, ' ').trim() ?? ''}" ${Math.round(
+        rect.left,
+      )}-${Math.round(rect.right)}`
+
+    const controlsOutside = Array.from(
+      topbar.querySelectorAll('button, select, summary'),
+    ).flatMap((element) => {
+      const rect = element.getBoundingClientRect()
+      if (
+        rect.width <= 1 ||
+        rect.height <= 1 ||
+        (rect.left >= left - 2 && rect.right <= right + 2)
+      ) {
+        return []
+      }
+      return [controlSummary(element, rect)]
+    })
+
+    const wrappedLegalLinks = Array.from(
+      topbar.querySelectorAll('.topbar-nav .topbar-link'),
+    ).flatMap((element) => {
+      const rect = element.getBoundingClientRect()
+      return rect.height > 32 ? [controlSummary(element, rect)] : []
+    })
+
+    return {
+      controlsOutside,
+      wrappedLegalLinks,
+      topbarOverflowPx: Math.max(
+        0,
+        topbar.scrollWidth - topbar.clientWidth,
+        document.documentElement.scrollWidth - window.innerWidth,
+      ),
+      viewportWidth: window.innerWidth,
+    }
+  })
+}
+
 describeE2E('responsive layout e2e', () => {
   beforeAll(async () => {
     const port = 6000 + Math.floor(Math.random() * 500)
@@ -215,6 +290,33 @@ describeE2E('responsive layout e2e', () => {
   afterAll(async () => {
     await server?.close()
   })
+
+  it('keeps the appbar controls inside the header across common widths', async () => {
+    const { context, userDataDir } = await createContext({
+      width: 1600,
+      height: 900,
+    })
+    const page = await context.newPage()
+    try {
+      for (const viewport of APPBAR_VIEWPORTS) {
+        await page.setViewportSize(viewport)
+        await page.goto(baseUrl)
+        const report = await appbarReport(page)
+        expect(report.controlsOutside, `${viewport.name} ${JSON.stringify(report)}`).toEqual(
+          [],
+        )
+        expect(
+          report.wrappedLegalLinks,
+          `${viewport.name} ${JSON.stringify(report)}`,
+        ).toEqual([])
+        expect(report.topbarOverflowPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
+      }
+    } finally {
+      await page.close().catch(() => undefined)
+      await context.close()
+      await rm(userDataDir, { force: true, recursive: true })
+    }
+  }, TEST_TIMEOUT_MS)
 
   for (const viewport of VIEWPORTS) {
     it(`keeps app controls usable on ${viewport.name}`, async () => {
