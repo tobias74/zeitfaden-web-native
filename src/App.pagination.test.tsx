@@ -88,6 +88,7 @@ let searchMediaCalls: SearchSpec[]
 let searchMapPointCalls: SearchSpec[]
 let resultSearchDelay: Promise<void> | undefined
 let resultSearchSignals: AbortSignal[]
+let resultSearchError: Error | undefined
 let mapSearchDelay: Promise<void> | undefined
 let mapSearchSignals: AbortSignal[]
 
@@ -186,6 +187,9 @@ function createPlatform(): PlatformBackend {
               options?.signal?.removeEventListener('abort', abort)
             })
         })
+      }
+      if (resultSearchError && spec.purpose === 'results') {
+        throw resultSearchError
       }
       return createSearchPage(
         createItems(spec.offset ?? 0, spec.limit ?? 100),
@@ -305,6 +309,7 @@ describe('App pagination', () => {
     window.history.replaceState(null, '', '/')
     resultSearchDelay = undefined
     resultSearchSignals = []
+    resultSearchError = undefined
     mapSearchDelay = undefined
     mapSearchSignals = []
   })
@@ -474,6 +479,26 @@ describe('App pagination', () => {
     })
 
     releaseResultSearch()
+  })
+
+  it('clears stale result rows when the selected result index cannot handle the query', async () => {
+    const { default: App } = await import('./App')
+
+    render(<App />)
+
+    expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
+
+    resultSearchError = new Error(
+      'No exact search index engine can handle this query.',
+    )
+    fireEvent.change(screen.getByLabelText('Sort'), {
+      target: { value: 'distance' },
+    })
+
+    expect((await screen.findByRole('alert')).textContent).toContain(
+      'No exact search index engine can handle this query.',
+    )
+    expect(screen.queryByText('item-0.jpg')).toBeNull()
   })
 
   it('does not refetch map points when only the distance query point changes', async () => {

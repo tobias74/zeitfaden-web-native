@@ -216,6 +216,11 @@ export function useSearchResults({
       } catch (caught) {
         if (isAbortError(caught)) return
         if (requestId === pageRequestIdRef.current) {
+          setResultsState([])
+          setPageLimitReached(false)
+          setResultMetrics(defaultResultMetrics)
+          onStats(defaultResultMetrics)
+          setValidation(undefined)
           setLoading(false)
           onError(caught instanceof Error ? caught.message : String(caught))
         }

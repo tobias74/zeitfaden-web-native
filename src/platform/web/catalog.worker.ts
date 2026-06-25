@@ -881,8 +881,7 @@ function activeResidentDistanceIndex(indexId: string): ResidentPackedDistanceInd
   return residentDistanceIndexInstances.get(residentDistanceRuntimeKey(indexId))
 }
 
-async function clearResidentDistanceIndexCaches(store: CatalogStore): Promise<void> {
-  await store.residentDistanceIndexStore().clear('segmented-ball-tree')
+function clearResidentDistanceRuntimeCaches(): void {
   residentDistanceIndexInstances.delete(residentDistanceRuntimeKey('segmented-ball-tree'))
 }
 
@@ -2187,7 +2186,7 @@ class FileCatalogStore implements CatalogStore {
     }
     this.importSource = { sourceId: source.id, generation }
     await this.markDirty()
-    await clearResidentDistanceIndexCaches(this)
+    clearResidentDistanceRuntimeCaches()
   }
 
   async writeMediaBatch(items: MediaItem[]): Promise<MediaBatchWriteResult> {

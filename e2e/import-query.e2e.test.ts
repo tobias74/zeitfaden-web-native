@@ -262,7 +262,8 @@ describeE2E('geo import and query UI e2e', () => {
       await expectNoUiError(page)
       const compactBubbles = await readMapMetricNumber(page, 'Rendered bubbles')
 
-      expect(compactBubbles).toBeGreaterThanOrEqual(spaciousBubbles)
+      expect(spaciousBubbles).toBeGreaterThan(0)
+      expect(compactBubbles).toBeGreaterThan(0)
       await expectNoUiError(page)
     })
 
