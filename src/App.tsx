@@ -88,7 +88,7 @@ const RESULT_METADATA_KEY = 'geo-media-index-lab:result-metadata'
 const RESULT_PAGE_SIZE_KEY = 'geo-media-index-lab:result-page-size'
 const RESULT_PAGE_SIZE_OPTIONS = [50, 100, 250, 500] as const
 const DEFAULT_RESULT_PAGE_SIZE = 100
-const MAP_POINT_LIMIT = 500
+const MAP_POINT_LIMIT = 5000
 const DEFAULT_DISTANCE_ENGINE_ID = 'segmented-ball-tree'
 const CATALOG_QUERY_INDEX_ID = 'file-time-geo'
 const DISTANCE_ENGINE_IDS = [
@@ -1293,17 +1293,7 @@ function App() {
               onGeoBoundsChange={setMapGeoBounds}
             />
             <div className="map-area-tools">
-              <button
-                type="button"
-                className={boundsDrawing ? 'active' : undefined}
-                aria-pressed={boundsDrawing}
-                onClick={toggleBoundsDrawing}
-                title={t('areaFilter')}
-              >
-                <BoxSelect size={16} />
-                {t('area')}
-              </button>
-              {geoBounds && (
+              {geoBounds ? (
                 <button
                   type="button"
                   onClick={clearMapGeoBounds}
@@ -1311,6 +1301,17 @@ function App() {
                 >
                   <Trash2 size={16} />
                   {t('clear')}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className={boundsDrawing ? 'active' : undefined}
+                  aria-pressed={boundsDrawing}
+                  onClick={toggleBoundsDrawing}
+                  title={t('areaFilter')}
+                >
+                  <BoxSelect size={16} />
+                  {t('area')}
                 </button>
               )}
             </div>

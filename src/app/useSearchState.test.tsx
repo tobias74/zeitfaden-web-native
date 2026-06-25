@@ -22,7 +22,23 @@ function SearchHarness() {
       <output data-testid="page">{search.values.resultPage}</output>
       <output data-testid="page-size">{search.values.resultPageSize}</output>
       <output data-testid="kind">{search.values.kindFilter}</output>
+      <output data-testid="bounds-drawing">
+        {search.values.boundsDrawing ? 'on' : 'off'}
+      </output>
       <output data-testid="href">{search.values.appHref}</output>
+      <button
+        type="button"
+        onClick={() =>
+          search.actions.setGeoBounds({
+            minLat: 47,
+            maxLat: 48,
+            minLon: 8,
+            maxLon: 9,
+          })
+        }
+      >
+        set area
+      </button>
       <button
         type="button"
         onClick={() => search.actions.setPage((page) => page + 1)}
@@ -76,5 +92,28 @@ describe('useSearchState', () => {
       expect(screen.getByTestId('kind').textContent).toBe('geo_point')
     })
     expect(pushState).not.toHaveBeenCalled()
+  })
+
+  it('activates area mode when area bounds are set', async () => {
+    render(<SearchHarness />)
+
+    expect(screen.getByTestId('bounds-drawing').textContent).toBe('off')
+    fireEvent.click(screen.getByText('set area'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('bounds-drawing').textContent).toBe('on')
+    })
+  })
+
+  it('activates area mode when area bounds are restored from the URL', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?minLat=47&maxLat=48&minLon=8&maxLon=9',
+    )
+
+    render(<SearchHarness />)
+
+    expect(screen.getByTestId('bounds-drawing').textContent).toBe('on')
   })
 })

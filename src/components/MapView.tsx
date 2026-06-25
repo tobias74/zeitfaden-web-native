@@ -185,6 +185,14 @@ function currentExtent(interaction: ExtentInteraction): Extent | undefined {
   ).getExtent() ?? undefined
 }
 
+function setExtentDragEnabled(
+  interaction: ExtentInteraction,
+  enabled: boolean,
+): void {
+  const draggableInteraction = interaction as unknown as { drag_: boolean }
+  draggableInteraction.drag_ = enabled
+}
+
 function isPixelBetween(value: number, min: number, max: number): boolean {
   return (
     value >= min - AREA_CURSOR_TOLERANCE_PX &&
@@ -274,7 +282,7 @@ export function MapView({
       style: queryStyle,
     })
     const extentInteraction = new ExtentInteraction({
-      drag: true,
+      drag: false,
       boxStyle: boundsStyle,
       pointerStyle: hiddenBoundsHandleStyle,
       pixelTolerance: 10,
@@ -309,6 +317,7 @@ export function MapView({
       if (syncingBoundsRef.current || !event.extent) return
       const extent = event.extent.slice() as Extent
       if (extent[0] === extent[2] || extent[1] === extent[3]) return
+      setExtentDragEnabled(extentInteraction, true)
       pendingBoundsExtentRef.current = extent
     })
     document.addEventListener('pointerup', commitPendingBounds)
@@ -426,7 +435,9 @@ export function MapView({
     syncingBoundsRef.current = true
     if (geoBounds) {
       extentInteraction.setExtent(mapExtentFromBounds(geoBounds))
+      setExtentDragEnabled(extentInteraction, true)
     } else {
+      setExtentDragEnabled(extentInteraction, false)
       clearExtentInteraction(extentInteraction)
     }
     syncingBoundsRef.current = false

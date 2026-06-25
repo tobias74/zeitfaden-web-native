@@ -169,7 +169,9 @@ export function useSearchState(options: UseSearchStateOptions): {
   const [geoBounds, setGeoBoundsState] = useState<GeoBounds | undefined>(
     initialSearchState.geoBounds,
   )
-  const [boundsDrawing, setBoundsDrawing] = useState(false)
+  const [boundsDrawing, setBoundsDrawing] = useState(
+    Boolean(initialSearchState.geoBounds),
+  )
   const [resultPage, setResultPageState] = useState(
     initialSearchState.resultPage,
   )
@@ -218,6 +220,7 @@ export function useSearchState(options: UseSearchStateOptions): {
 
   const setGeoBounds = useCallback((bounds: GeoBounds) => {
     setGeoBoundsState(bounds)
+    setBoundsDrawing(true)
     resetPage()
   }, [resetPage])
 
@@ -336,7 +339,7 @@ export function useSearchState(options: UseSearchStateOptions): {
     setSortState(nextState.sort)
     setKindFilterState(nextState.kindFilter)
     setGeoBoundsState(nextState.geoBounds)
-    setBoundsDrawing(false)
+    setBoundsDrawing(Boolean(nextState.geoBounds))
     setResultPageState(clampPage(nextState.resultPage))
     setResultPageSizeState(nextState.resultPageSize)
   }, [])
