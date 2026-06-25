@@ -75,9 +75,15 @@ async function waitForMapIdle(page: Page): Promise<void> {
   )
 }
 
-async function waitForIndexCurrent(page: Page, panelTitle: string): Promise<void> {
-  const panel = page.locator('section.panel').filter({ hasText: panelTitle })
-  await panel.locator('.index-status-badge.current').first().waitFor({
+function indexesPanel(page: Page) {
+  return page.locator('section.panel').filter({ hasText: 'Indexes' })
+}
+
+async function waitForIndexCurrent(page: Page, indexId: string): Promise<void> {
+  await indexesPanel(page)
+    .locator(`[data-index-id="${indexId}"] .index-status-badge.current`)
+    .first()
+    .waitFor({
     timeout: STEP_TIMEOUT_MS,
   })
 }
@@ -123,8 +129,7 @@ async function appDiagnostic(page: Page): Promise<string> {
       {
         alert: text('[role="alert"]'),
         topbarProgress: text('.topbar-progress-slot'),
-        catalogPanel: panelText('Catalog indexes'),
-        distancePanel: panelText('Distance index'),
+        indexesPanel: panelText('Indexes'),
         mediaCards: document.querySelectorAll('.media-card').length,
         mediaGridBusy: document.querySelector('.media-grid')?.getAttribute('aria-busy') ?? '',
         mapLoading: Boolean(document.querySelector('.map-loading-strip')),
@@ -234,7 +239,7 @@ describeE2E('geo import and query UI e2e', () => {
     })
 
     await runStep(page, 'Wait for catalog index build', async () => {
-      await waitForIndexCurrent(page, 'Catalog indexes')
+      await waitForIndexCurrent(page, 'file-time-geo')
     })
 
     await runStep(page, 'Run initial timestamp query', async () => {
@@ -276,13 +281,10 @@ describeE2E('geo import and query UI e2e', () => {
     })
 
     await runStep(page, 'Build distance index and run distance query', async () => {
-      const distancePanel = page.locator('section.panel').filter({
-        hasText: 'Distance index',
-      })
-      await distancePanel.getByRole('button', {
-        name: /Update index|Rebuild index/i,
-      }).click()
-      await waitForIndexCurrent(page, 'Distance index')
+      await indexesPanel(page)
+        .getByRole('button', { name: /Update indexes|Rebuild indexes/i })
+        .click()
+      await waitForIndexCurrent(page, 'segmented-ball-tree')
       await page.getByLabel('Sort').selectOption('distance')
       await waitForResultCards(page)
       await waitForMapIdle(page)

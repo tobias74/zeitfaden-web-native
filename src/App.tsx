@@ -389,15 +389,6 @@ function indexStatusLabel(
   return t('indexStatusUnknown')
 }
 
-function indexUpdateButtonLabel(
-  status: SearchIndexStats['indexStatus'] | undefined,
-  t: (key: TranslationKey, values?: TranslationValues) => string,
-): string {
-  if (status === 'current') return t('rebuildDistanceIndex')
-  if (status === 'building' || status === 'indexing') return t('updatingDistanceIndex')
-  return t('updateDistanceIndex')
-}
-
 function catalogIndexStatus(
   stats: SearchIndexStats | undefined,
   progress: GeoIndexBuildProgress | undefined,
@@ -406,7 +397,19 @@ function catalogIndexStatus(
   return stats?.indexStatus ?? 'missing'
 }
 
-function catalogIndexButtonLabel(
+function combinedIndexStatus(
+  statuses: Array<SearchIndexStats['indexStatus'] | undefined>,
+): SearchIndexStats['indexStatus'] {
+  if (statuses.some((status) => status === 'failed')) return 'failed'
+  if (statuses.some((status) => status === 'building')) return 'building'
+  if (statuses.some((status) => status === 'indexing')) return 'indexing'
+  if (statuses.some((status) => status === 'pending')) return 'pending'
+  if (statuses.some((status) => status === 'stale')) return 'stale'
+  if (statuses.some((status) => status === 'missing' || !status)) return 'missing'
+  return 'current'
+}
+
+function combinedIndexButtonLabel(
   status: SearchIndexStats['indexStatus'] | undefined,
   t: (key: TranslationKey, values?: TranslationValues) => string,
 ): string {
@@ -892,9 +895,24 @@ function App() {
     timeGeoIndexStats,
     geoIndexProgress,
   )
-  const regularIndexProgress = geoIndexProgress?.currentIndexId?.startsWith('file-')
-    ? geoIndexProgress
-    : undefined
+  const combinedIndexesStatus = combinedIndexStatus([
+    regularIndexStatus,
+    selectedIndexStatus,
+  ])
+  const handleUpdateIndexes = async () => {
+    if (combinedIndexesStatus === 'current') {
+      await updateCatalogIndexes()
+      await optimizeIndex()
+      return
+    }
+
+    if (regularIndexStatus !== 'current') {
+      await updateCatalogIndexes()
+    }
+    if (selectedIndexStatus !== 'current') {
+      await updateIndex()
+    }
+  }
   const handleImported = useCallback(() => {
     setResultPage(0)
     markCatalogChanged()
@@ -1793,46 +1811,46 @@ function App() {
             <section className="panel index-panel">
               <div className="panel-title">
                 <Activity size={17} />
-                <h2>{t('catalogIndexes')}</h2>
+                <h2>{t('indexes')}</h2>
               </div>
               <div className="index-status-row">
-                <span className={`index-status-badge ${regularIndexStatus}`}>
-                  {indexStatusLabel(regularIndexStatus, t)}
+                <span className={`index-status-badge ${combinedIndexesStatus}`}>
+                  {indexStatusLabel(combinedIndexesStatus, t)}
                 </span>
                 <button
                   type="button"
                   className="secondary"
                   disabled={!catalogInfo || Boolean(geoIndexProgress)}
                   onClick={() => {
-                    void updateCatalogIndexes().catch(reportError)
+                    void handleUpdateIndexes().catch(reportError)
                   }}
                 >
-                  {catalogIndexButtonLabel(regularIndexStatus, t)}
+                  {combinedIndexButtonLabel(combinedIndexesStatus, t)}
                 </button>
               </div>
-              {regularIndexProgress && (
+              {geoIndexProgress && (
                 <div className="index-progress">
                   <div className="index-progress-copy">
-                    <span>{geoIndexProgressLabel(regularIndexProgress, t)}</span>
+                    <span>{geoIndexProgressLabel(geoIndexProgress, t)}</span>
                     <strong>
-                      {geoIndexProgressDetail(regularIndexProgress, t, locale)}
+                      {geoIndexProgressDetail(geoIndexProgress, t, locale)}
                     </strong>
                   </div>
                   <div
                     className={`progress-track ${
-                      regularIndexProgress.phase === 'loading' ? 'indeterminate' : ''
+                      geoIndexProgress.phase === 'loading' ? 'indeterminate' : ''
                     }`}
                     role="progressbar"
-                    aria-label={geoIndexProgressLabel(regularIndexProgress, t)}
+                    aria-label={geoIndexProgressLabel(geoIndexProgress, t)}
                     aria-valuemax={100}
                     aria-valuemin={0}
                     aria-valuenow={
-                      regularIndexProgress.phase === 'loading'
+                      geoIndexProgress.phase === 'loading'
                         ? undefined
-                        : geoIndexProgressPercent(regularIndexProgress)
+                        : geoIndexProgressPercent(geoIndexProgress)
                     }
                     aria-valuetext={geoIndexProgressDetail(
-                      regularIndexProgress,
+                      geoIndexProgress,
                       t,
                       locale,
                     )}
@@ -1841,19 +1859,21 @@ function App() {
                       className="progress-fill"
                       style={{
                         width:
-                          geoIndexProgressPercent(regularIndexProgress) === undefined
+                          geoIndexProgressPercent(geoIndexProgress) === undefined
                             ? undefined
-                            : `${geoIndexProgressPercent(regularIndexProgress)}%`,
+                            : `${geoIndexProgressPercent(geoIndexProgress)}%`,
                       }}
                     />
                   </div>
                 </div>
               )}
               <dl className="index-status-grid">
-                <div>
+                <div data-index-id="file-time-geo">
                   <dt>{t('timeFirstIndex')}</dt>
                   <dd>
-                    {indexStatusLabel(timeGeoIndexStats?.indexStatus, t)}
+                    <span className={`index-status-badge ${regularIndexStatus}`}>
+                      {indexStatusLabel(regularIndexStatus, t)}
+                    </span>
                   </dd>
                 </div>
                 <div>
@@ -1896,35 +1916,16 @@ function App() {
                     </dd>
                   </div>
                 )}
-              </dl>
-            </section>
-
-            <section className="panel index-panel">
-              <div className="panel-title">
-                <Activity size={17} />
-                <h2>{t('distanceIndex')}</h2>
-              </div>
-              <div className="index-status-row">
-                <span className={`index-status-badge ${selectedIndexStatus}`}>
-                  {indexStatusLabel(selectedIndexStatus, t)}
-                </span>
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={!catalogInfo || Boolean(geoIndexProgress)}
-                  onClick={() => {
-                    void (selectedIndexStatus === 'current'
-                      ? optimizeIndex()
-                      : updateIndex()
-                    ).catch(reportError)
-                  }}
-                >
-                  {indexUpdateButtonLabel(selectedIndexStatus, t)}
-                </button>
-              </div>
-              <dl className="index-status-grid">
-                <div>
+                <div data-index-id={selectedIndexId}>
                   <dt>{t('engine')}</dt>
+                  <dd>
+                    <span className={`index-status-badge ${selectedIndexStatus}`}>
+                      {indexStatusLabel(selectedIndexStatus, t)}
+                    </span>
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t('distanceEngine')}</dt>
                   <dd>{indexStats.engineLabel ?? indexStats.engineId}</dd>
                 </div>
                 <div>

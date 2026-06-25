@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { chromium, type BrowserContext, type Page } from 'playwright-core'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createServer, type ViteDevServer } from 'vite'
 
 const env = process.env
@@ -101,26 +101,50 @@ function panel(activePage: Page, title: string) {
   return activePage.locator('section.panel').filter({ hasText: title })
 }
 
-async function waitForPanelStatus(
+function indexesPanel(activePage: Page) {
+  return panel(activePage, 'Indexes')
+}
+
+async function waitForCombinedIndexStatus(
   activePage: Page,
-  title: string,
   status: 'current' | 'missing' | 'stale' | 'failed' | 'indexing' | 'pending',
 ): Promise<void> {
-  await panel(activePage, title)
+  await indexesPanel(activePage)
+    .locator('.index-status-row')
     .locator(`.index-status-badge.${status}`)
     .first()
     .waitFor({ timeout: STEP_TIMEOUT_MS })
 }
 
-async function waitForAnyPanelStatus(
+async function waitForAnyCombinedIndexStatus(
   activePage: Page,
-  title: string,
   statuses: Array<'current' | 'missing' | 'stale' | 'failed' | 'indexing' | 'pending'>,
 ): Promise<void> {
-  await panel(activePage, title)
+  await indexesPanel(activePage)
+    .locator('.index-status-row')
     .locator(statuses.map((status) => `.index-status-badge.${status}`).join(', '))
     .first()
     .waitFor({ timeout: STEP_TIMEOUT_MS })
+}
+
+async function waitForIndexStatus(
+  activePage: Page,
+  indexId: string,
+  status: 'current' | 'missing' | 'stale' | 'failed' | 'indexing' | 'pending' | 'building',
+): Promise<void> {
+  await indexesPanel(activePage)
+    .locator(`[data-index-id="${indexId}"] .index-status-badge.${status}`)
+    .first()
+    .waitFor({ timeout: STEP_TIMEOUT_MS })
+}
+
+async function expectIndexButtonLabel(
+  activePage: Page,
+  pattern: RegExp,
+): Promise<void> {
+  const button = indexesPanel(activePage).getByRole('button', { name: pattern })
+  await button.waitFor({ timeout: STEP_TIMEOUT_MS })
+  expect((await button.innerText()).trim()).toMatch(pattern)
 }
 
 async function waitForResultCardCount(
@@ -174,17 +198,19 @@ async function waitForNoAlert(activePage: Page): Promise<void> {
 }
 
 async function buildDistanceIndex(activePage: Page): Promise<void> {
-  await panel(activePage, 'Distance index')
-    .getByRole('button', { name: /Update index|Rebuild index/i })
+  await indexesPanel(activePage)
+    .getByRole('button', { name: /Update indexes|Rebuild indexes/i })
     .click()
-  await waitForPanelStatus(activePage, 'Distance index', 'current')
+  await waitForIndexStatus(activePage, 'segmented-ball-tree', 'current')
+  await waitForCombinedIndexStatus(activePage, 'current')
 }
 
 async function buildCatalogIndexes(activePage: Page): Promise<void> {
-  await panel(activePage, 'Catalog indexes')
+  await indexesPanel(activePage)
     .getByRole('button', { name: /Update indexes|Rebuild indexes/i })
     .click()
-  await waitForPanelStatus(activePage, 'Catalog indexes', 'current')
+  await waitForIndexStatus(activePage, 'file-time-geo', 'current')
+  await waitForCombinedIndexStatus(activePage, 'current')
 }
 
 async function deletePackedCatalogIndex(activePage: Page): Promise<void> {
@@ -254,7 +280,8 @@ describeE2E('index state and query result e2e', () => {
     if (!page) throw new Error('Page was not initialized.')
 
     await importGeoFile(page, 'catalog-index-a.json', pointsNearZurich(3))
-    await waitForPanelStatus(page, 'Catalog indexes', 'current')
+    await waitForIndexStatus(page, 'file-time-geo', 'current')
+    await expectIndexButtonLabel(page, /Update indexes/i)
     await page.getByLabel('Kind').selectOption('geo_point')
     await page.getByLabel('Sort').selectOption('timestamp_asc')
     await waitForResultCardCount(page, 3)
@@ -267,7 +294,7 @@ describeE2E('index state and query result e2e', () => {
       /Catalog indexes|Time-first packed index|missing|loaded into memory/,
     )
     await waitForResultCardCount(page, 0)
-    await waitForAnyPanelStatus(page, 'Catalog indexes', ['missing', 'failed'])
+    await waitForAnyCombinedIndexStatus(page, ['missing', 'failed'])
 
     await buildCatalogIndexes(page)
     await waitForNoAlert(page)
@@ -278,23 +305,27 @@ describeE2E('index state and query result e2e', () => {
     if (!page) throw new Error('Page was not initialized.')
 
     await importGeoFile(page, 'distance-index-a.json', pointsNearZurich(4))
-    await waitForPanelStatus(page, 'Catalog indexes', 'current')
+    await waitForIndexStatus(page, 'file-time-geo', 'current')
     await page.getByLabel('Kind').selectOption('geo_point')
     await page.getByLabel('Sort').selectOption('timestamp_asc')
     await waitForResultCardCount(page, 4)
-    await waitForPanelStatus(page, 'Distance index', 'missing')
+    await waitForIndexStatus(page, 'segmented-ball-tree', 'missing')
+    await expectIndexButtonLabel(page, /Update indexes/i)
 
     await page.getByLabel('Sort').selectOption('distance')
     await waitForAlert(page, /index is missing|No exact search index/i)
     await waitForResultCardCount(page, 0)
 
     await buildDistanceIndex(page)
+    await waitForCombinedIndexStatus(page, 'current')
+    await expectIndexButtonLabel(page, /Rebuild indexes/i)
     await waitForNoAlert(page)
     await waitForResultCardCount(page, 4)
 
     await importGeoFile(page, 'distance-index-b.json', pointsNearZurich(2, 60))
-    await waitForPanelStatus(page, 'Catalog indexes', 'current')
-    await waitForPanelStatus(page, 'Distance index', 'stale')
+    await waitForIndexStatus(page, 'file-time-geo', 'current')
+    await waitForIndexStatus(page, 'segmented-ball-tree', 'stale')
+    await expectIndexButtonLabel(page, /Update indexes/i)
     await waitForAlert(page, /index is stale|No exact search index/i)
     await waitForResultCardCount(page, 0)
 
