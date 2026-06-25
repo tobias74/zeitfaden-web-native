@@ -29,6 +29,7 @@ type VisibleMapViewport = {
 
 type MapViewProps = {
   queryPoint?: QueryPoint
+  hoverPoint?: QueryPoint
   geoItems: MapPoint[]
   renderBatchSize: number
   bubbleScale: number
@@ -45,6 +46,14 @@ const queryStyle = new Style({
     radius: 8,
     fill: new Fill({ color: '#d84d2a' }),
     stroke: new Stroke({ color: '#ffffff', width: 2.5 }),
+  }),
+})
+
+const hoverStyle = new Style({
+  image: new CircleStyle({
+    radius: 10,
+    fill: new Fill({ color: 'rgba(255, 255, 255, 0.94)' }),
+    stroke: new Stroke({ color: '#d84d2a', width: 3 }),
   }),
 })
 
@@ -280,6 +289,7 @@ function pointFeature(lon: number, lat: number): Feature {
 
 export function MapView({
   queryPoint,
+  hoverPoint,
   geoItems,
   renderBatchSize,
   bubbleScale,
@@ -303,6 +313,7 @@ export function MapView({
   const syncingBoundsRef = useRef(false)
   const sourceRef = useRef(new VectorSource())
   const querySourceRef = useRef(new VectorSource())
+  const hoverSourceRef = useRef(new VectorSource())
   const renderJobRef = useRef(0)
 
   useEffect(() => {
@@ -316,6 +327,10 @@ export function MapView({
     const queryLayer = new VectorLayer({
       source: querySourceRef.current,
       style: queryStyle,
+    })
+    const hoverLayer = new VectorLayer({
+      source: hoverSourceRef.current,
+      style: hoverStyle,
     })
     const extentInteraction = new ExtentInteraction({
       drag: false,
@@ -334,6 +349,7 @@ export function MapView({
         }),
         pointLayer,
         queryLayer,
+        hoverLayer,
       ],
       view: new View({
         center: fromLonLat([8.5417, 47.3769]),
@@ -501,6 +517,16 @@ export function MapView({
       querySource.addFeature(feature)
     }
   }, [queryPoint])
+
+  useEffect(() => {
+    const hoverSource = hoverSourceRef.current
+    hoverSource.clear(true)
+
+    if (hoverPoint) {
+      const feature = pointFeature(hoverPoint.lon, hoverPoint.lat)
+      hoverSource.addFeature(feature)
+    }
+  }, [hoverPoint])
 
   useEffect(() => {
     hasGeoBoundsRef.current = Boolean(geoBounds)

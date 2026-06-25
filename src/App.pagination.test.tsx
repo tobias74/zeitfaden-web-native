@@ -11,6 +11,7 @@ vi.mock('./components/MapView', async () => {
     MapView: ({
       onQueryPointChange,
       onVisibleViewportChange,
+      hoverPoint,
     }: {
       onQueryPointChange?: (point: { lat: number; lon: number }) => void
       onVisibleViewportChange?: (viewport: {
@@ -24,6 +25,7 @@ vi.mock('./components/MapView', async () => {
         widthPx: number
         heightPx: number
       }) => void
+      hoverPoint?: { lat: number; lon: number }
     }) => {
       React.useEffect(() => {
         onVisibleViewportChange?.({
@@ -68,6 +70,9 @@ vi.mock('./components/MapView', async () => {
               })
             }
           />
+          <div data-testid="map-hover-point">
+            {hoverPoint ? `${hoverPoint.lat},${hoverPoint.lon}` : ''}
+          </div>
         </>
       )
     },
@@ -109,6 +114,8 @@ function item(id: number): MediaItem {
     mimeType: 'image/jpeg',
     sizeBytes: 1,
     timestamp: 1_000_000 - id,
+    latitude: 47 + id / 1000,
+    longitude: 8 + id / 1000,
     locations: [
       {
         id: `location-${id}`,
@@ -377,6 +384,22 @@ describe('App pagination', () => {
     await waitFor(() => {
       expect(container.querySelector('.map-loading-strip')).toBeNull()
     })
+  })
+
+  it('shows a transient map marker while a geotagged result is hovered', async () => {
+    const { default: App } = await import('./App')
+
+    const { container } = render(<App />)
+
+    expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
+    const firstCard = container.querySelector('.media-card')
+    if (!firstCard) throw new Error('Expected a result card.')
+
+    fireEvent.pointerEnter(firstCard)
+    expect(screen.getByTestId('map-hover-point').textContent).toBe('47,8')
+
+    fireEvent.pointerLeave(firstCard)
+    expect(screen.getByTestId('map-hover-point').textContent).toBe('')
   })
 
   it('uses the configured map bubble density for map searches', async () => {

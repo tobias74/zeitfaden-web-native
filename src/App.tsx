@@ -496,6 +496,7 @@ type ResultCardProps = {
   locale: string
   t: (key: TranslationKey, values?: TranslationValues) => string
   onOpen(index: number): void
+  onHoverResultChange(resultId: string | undefined): void
 }
 
 const ResultCard = memo(function ResultCard({
@@ -507,6 +508,7 @@ const ResultCard = memo(function ResultCard({
   locale,
   t,
   onOpen,
+  onHoverResultChange,
 }: ResultCardProps) {
   const { item } = result
 
@@ -515,6 +517,8 @@ const ResultCard = memo(function ResultCard({
       className="media-card"
       role="button"
       tabIndex={0}
+      onPointerEnter={() => onHoverResultChange(item.id)}
+      onPointerLeave={() => onHoverResultChange(undefined)}
       onClick={() => onOpen(index)}
       onKeyDown={(event) => {
         if (event.key !== 'Enter' && event.key !== ' ') return
@@ -733,6 +737,7 @@ function App() {
     Math.max(MIN_MAP_HEIGHT, storedNumber(MAP_HEIGHT_KEY, DEFAULT_MAP_HEIGHT)),
   )
   const [visibleMapViewport, setVisibleMapViewport] = useState<MapViewport>()
+  const [hoveredResultId, setHoveredResultId] = useState<string>()
   const workspaceRef = useRef<HTMLElement | null>(null)
   const leftStackRef = useRef<HTMLElement | null>(null)
   const settingsMenuRef = useRef<HTMLDetailsElement | null>(null)
@@ -886,6 +891,19 @@ function App() {
   })
   const effectiveIndexStats =
     indexStatsOverride ?? resultMetrics ?? indexStats
+  const hoveredResultPoint = useMemo<QueryPoint | undefined>(() => {
+    if (!hoveredResultId) return undefined
+    const hoveredItem = resultItems.find(
+      (result) => result.item.id === hoveredResultId,
+    )?.item
+    if (
+      typeof hoveredItem?.latitude !== 'number' ||
+      typeof hoveredItem?.longitude !== 'number'
+    ) {
+      return undefined
+    }
+    return { lat: hoveredItem.latitude, lon: hoveredItem.longitude }
+  }, [hoveredResultId, resultItems])
   const distanceIndexBuilding =
     geoIndexProgress?.currentIndexId === selectedIndexId ||
     geoIndexProgress?.currentIndexId === 'segmented-ball-tree'
@@ -1693,6 +1711,7 @@ function App() {
           >
             <MapView
               queryPoint={distanceSortActive ? queryPoint : undefined}
+              hoverPoint={hoveredResultPoint}
               geoItems={mapItems}
               renderBatchSize={mapRenderBatchSize}
               bubbleScale={mapBubbleScale}
@@ -2442,6 +2461,7 @@ function App() {
               locale={locale}
               t={t}
               onOpen={openViewer}
+              onHoverResultChange={setHoveredResultId}
             />
           ))}
         </div>
