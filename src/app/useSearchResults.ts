@@ -107,7 +107,6 @@ export function useSearchResults({
   pageLimitReached: boolean
   mapItems: MapPoint[]
   mapLoading: boolean
-  mapLimitReached: boolean
   resultMetrics: SearchIndexStats
   mapMetrics: SearchIndexStats
   validation: ValidationReport | undefined
@@ -120,7 +119,6 @@ export function useSearchResults({
   const [pageLimitReached, setPageLimitReached] = useState(false)
   const [mapItems, setMapItems] = useState<MapPoint[]>([])
   const [mapLoading, setMapLoading] = useState(false)
-  const [mapLimitReached, setMapLimitReached] = useState(false)
   const [resultMetrics, setResultMetrics] =
     useState<SearchIndexStats>(defaultResultMetrics)
   const [mapMetrics, setMapMetrics] =
@@ -137,7 +135,6 @@ export function useSearchResults({
     mapAbortControllerRef.current = undefined
     setMapItems([])
     setMapLoading(false)
-    setMapLimitReached(false)
     setMapMetrics(defaultMapMetrics)
   }, [])
 
@@ -285,7 +282,6 @@ export function useSearchResults({
           responseAt,
         )
         setMapItems(page.points)
-        setMapLimitReached(Boolean(page.limitReached))
         setMapMetrics(responseMetrics)
         onError('')
         setMapLoading(false)
@@ -329,7 +325,6 @@ export function useSearchResults({
     pageLimitReached,
     mapItems,
     mapLoading,
-    mapLimitReached,
     resultMetrics,
     mapMetrics,
     validation,

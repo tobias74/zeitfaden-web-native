@@ -219,24 +219,126 @@ describe('catalog worker packed query hot paths', () => {
       kind: 'geo_point',
       geoBounds: { minLat: -20, maxLat: 20, minLon: -70, maxLon: 70 },
       startTime: FIXTURE_START_TIME + 1_000 * 2_000,
-      endTime: FIXTURE_START_TIME + 1_000 * 18_000,
-      limit: 12,
-      offset: 5,
+      endTime: FIXTURE_START_TIME + 1_000 * 6_000,
+      limit: 5_000,
+      offset: 0,
     }
-    const expected = bruteForceAssetIds(records, query, 'asc').slice(5, 17)
+    const expected = bruteForceAssetIds(records, query, 'asc').slice(0, 5_000)
     const page = await index.scanMapPoints(
       timestampSeconds(query.startTime!),
       timestampSeconds(query.endTime!),
       'asc',
       query,
-      12,
-      5,
+      {
+        zoom: 24,
+        viewportWidthPx: 4096,
+        viewportHeightPx: 4096,
+        bubbleCellSizePx: 1,
+      },
+      5_000,
+      0,
       () => false,
     )
 
     expect(page.points.map((point) => point.assetId)).toEqual(expected)
     expect(page.points.every((point) => point.kind === 'geo_point')).toBe(true)
-    expect(page.limitReached).toBe(expected.length === 12)
+    expect(page.points.every((point) => point.cellId)).toBe(true)
+    expect(page.limitReached).toBe(false)
+    expect(page.matchedRecords).toBe(expected.length)
+    expect(page.renderedBubbles).toBe(expected.length)
+  })
+
+  it('groups dense map point results without hiding matching records', async () => {
+    const records = makePackedRecords(20_000, () => 'geo_point')
+    const index = makePackedIndex(records)
+    const query: CatalogQuery = {
+      sort: 'timestamp_asc',
+      kind: 'geo_point',
+      hasGeo: true,
+      geoBounds: { minLat: -90, maxLat: 90, minLon: -180, maxLon: 180 },
+      limit: 5_000,
+      offset: 0,
+    }
+    const page = await index.scanMapPoints(
+      0,
+      0xffffffff,
+      'asc',
+      query,
+      {
+        zoom: 4,
+        viewportWidthPx: 1024,
+        viewportHeightPx: 768,
+        bubbleCellSizePx: 64,
+      },
+      5_000,
+      0,
+      () => false,
+    )
+
+    expect(page.limitReached).toBe(false)
+    expect(page.points.length).toBeLessThanOrEqual(5_000)
+    expect(page.points.some((point) => (point.count ?? 1) > 1)).toBe(true)
+    expect(page.points.every((point) => point.cellId)).toBe(true)
+    expect(page.points.reduce((total, point) => total + (point.count ?? 1), 0)).toBe(
+      records.length,
+    )
+    expect(page.matchedRecords).toBe(records.length)
+    expect(page.renderedBubbles).toBe(page.points.length)
+    expect(page.largestBubbleCount).toBeGreaterThan(1)
+    expect(page.aggregationZoom).toBe(4)
+    expect(page.aggregationCellSizePx).toBe(64)
+    expect(
+      page.points.every(
+        (point) =>
+          point.lat >= query.geoBounds!.minLat &&
+          point.lat <= query.geoBounds!.maxLat &&
+          point.lon >= query.geoBounds!.minLon &&
+          point.lon <= query.geoBounds!.maxLon,
+      ),
+    ).toBe(true)
+  })
+
+  it('uses stable globally anchored map bucket ids at integer zoom levels', async () => {
+    const records = makePackedRecords(5_000, () => 'geo_point')
+    const index = makePackedIndex(records)
+    const query: CatalogQuery = {
+      sort: 'timestamp_asc',
+      kind: 'geo_point',
+      hasGeo: true,
+      geoBounds: { minLat: -90, maxLat: 90, minLon: -180, maxLon: 180 },
+      limit: 5_000,
+      offset: 0,
+    }
+    const scanAtZoom = (zoom: number) =>
+      index.scanMapPoints(
+        0,
+        0xffffffff,
+        'asc',
+        query,
+        {
+          zoom,
+          viewportWidthPx: 1024,
+          viewportHeightPx: 768,
+          bubbleCellSizePx: 64,
+        },
+        5_000,
+        0,
+        () => false,
+      )
+
+    const zoomSixA = await scanAtZoom(6.1)
+    const zoomSixB = await scanAtZoom(6.9)
+    const zoomSeven = await scanAtZoom(7)
+
+    const idsAtSixA = zoomSixA.points.map((point) => point.cellId).sort()
+    const idsAtSixB = zoomSixB.points.map((point) => point.cellId).sort()
+    const idsAtSeven = zoomSeven.points.map((point) => point.cellId).sort()
+
+    expect(idsAtSixA.length).toBeGreaterThan(0)
+    expect(idsAtSixA).toEqual(idsAtSixB)
+    expect(idsAtSeven).not.toEqual(idsAtSixA)
+    expect(zoomSixA.points.reduce((total, point) => total + (point.count ?? 1), 0))
+      .toBe(zoomSixA.matchedRecords)
   })
 
   it('reads selected asset records by chunk while preserving requested order', async () => {

@@ -32,7 +32,6 @@ export type UseSearchStateOptions = {
   defaultResultPageSize: number
   allowedPageSizes: readonly number[]
   pageSizeStorageKey: string
-  mapPointLimit: number
 }
 
 export type SearchStateValues = {
@@ -297,10 +296,9 @@ export function useSearchState(options: UseSearchStateOptions): {
       kind: kindFilter,
       hasGeo: true,
       sort: catalogSort,
-      limit: options.mapPointLimit + 1,
       offset: 0,
     }),
-    [catalogSort, kindFilter, options.mapPointLimit, timeRange],
+    [catalogSort, kindFilter, timeRange],
   )
   const searchUrlState = useMemo<SearchUrlState>(
     () => ({

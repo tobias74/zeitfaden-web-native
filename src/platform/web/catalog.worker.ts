@@ -211,6 +211,7 @@ const PACKED_INDEX_HEADER_SIZE = 96
 const TIME_GEO_RECORD_SIZE = 20
 const PACKED_SCAN_RECORDS = 8192
 const PACKED_MAP_SCAN_RECORDS = 131_072
+const MAX_RENDERED_MAP_BUBBLES = 5_000
 const INDEX_KIND_TIME_GEO = 1
 const KIND_FLAG_IMAGE = 0
 const KIND_FLAG_VIDEO = 1
@@ -1063,6 +1064,181 @@ type PackedAssetIdScanPage = {
 
 type PackedMapPointScanPage = MapPointPage & {
   metrics: PackedIndexMetrics
+  matchedRecords: number
+  renderedBubbles: number
+  largestBubbleCount: number
+  aggregationZoom: number
+  aggregationCellSizePx: number
+}
+
+type PackedMapPointBucket = {
+  cellId: string
+  count: number
+  sumLat: number
+  sumLon: number
+  minLat: number
+  maxLat: number
+  minLon: number
+  maxLon: number
+  centerLat: number
+  centerLon: number
+  firstPoint?: MapPoint
+}
+
+type PackedMapPointAggregation = {
+  zoom: number
+  worldSize: number
+  cellSizePx: number
+  buckets: Map<string, PackedMapPointBucket>
+}
+
+type PackedMapAggregationOptions = NonNullable<SearchSpec['mapAggregation']>
+
+type PackedWorldPixel = {
+  x: number
+  y: number
+}
+
+const WEB_MERCATOR_MAX_LAT = 85.0511287798066
+const WEB_MERCATOR_TILE_SIZE = 256
+
+function createMapPointAggregation(
+  options: PackedMapAggregationOptions | undefined,
+  limit: number,
+): PackedMapPointAggregation {
+  const zoom = Math.max(0, Math.min(24, Math.floor(options?.zoom ?? 0)))
+  const viewportWidthPx = Math.max(1, options?.viewportWidthPx ?? 1024)
+  const viewportHeightPx = Math.max(1, options?.viewportHeightPx ?? 768)
+  const requestedCellSizePx = Math.max(1, options?.bubbleCellSizePx ?? 64)
+  const budgetCellSizePx = Math.sqrt(
+    (viewportWidthPx * viewportHeightPx) / Math.max(1, limit),
+  )
+  const cellSizePx = Math.max(requestedCellSizePx, budgetCellSizePx)
+  return {
+    zoom,
+    worldSize: WEB_MERCATOR_TILE_SIZE * 2 ** zoom,
+    cellSizePx,
+    buckets: new Map(),
+  }
+}
+
+function lonLatToWorldPixel(
+  lon: number,
+  lat: number,
+  worldSize: number,
+): PackedWorldPixel {
+  const clampedLat = Math.max(
+    -WEB_MERCATOR_MAX_LAT,
+    Math.min(WEB_MERCATOR_MAX_LAT, lat),
+  )
+  const clampedLon = Math.max(-180, Math.min(180, lon))
+  const sinLat = Math.sin((clampedLat * Math.PI) / 180)
+  return {
+    x: ((clampedLon + 180) / 360) * worldSize,
+    y:
+      (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) *
+      worldSize,
+  }
+}
+
+function worldPixelToLonLat(
+  x: number,
+  y: number,
+  worldSize: number,
+): { lat: number; lon: number } {
+  const lon = (x / worldSize) * 360 - 180
+  const n = Math.PI - (2 * Math.PI * y) / worldSize
+  const lat = (180 / Math.PI) * Math.atan(Math.sinh(n))
+  return {
+    lat: Math.max(-90, Math.min(90, lat)),
+    lon: Math.max(-180, Math.min(180, lon)),
+  }
+}
+
+function mapPointBucket(
+  aggregation: PackedMapPointAggregation,
+  point: MapPoint,
+): { cellId: string; centerLat: number; centerLon: number } {
+  const pixel = lonLatToWorldPixel(point.lon, point.lat, aggregation.worldSize)
+  const cellsPerRow = Math.max(
+    1,
+    Math.ceil(aggregation.worldSize / aggregation.cellSizePx),
+  )
+  const cellX = Math.max(
+    0,
+    Math.min(cellsPerRow - 1, Math.floor(pixel.x / aggregation.cellSizePx)),
+  )
+  const cellY = Math.max(
+    0,
+    Math.min(cellsPerRow - 1, Math.floor(pixel.y / aggregation.cellSizePx)),
+  )
+  const center = worldPixelToLonLat(
+    (cellX + 0.5) * aggregation.cellSizePx,
+    (cellY + 0.5) * aggregation.cellSizePx,
+    aggregation.worldSize,
+  )
+  return {
+    cellId: `${aggregation.zoom}/${cellX}/${cellY}`,
+    centerLat: center.lat,
+    centerLon: center.lon,
+  }
+}
+
+function addMapPointToAggregation(
+  aggregation: PackedMapPointAggregation,
+  point: MapPoint,
+): number {
+  const { cellId, centerLat, centerLon } = mapPointBucket(aggregation, point)
+  const bucket = aggregation.buckets.get(cellId)
+  if (bucket) {
+    bucket.count += 1
+    bucket.sumLat += point.lat
+    bucket.sumLon += point.lon
+    bucket.minLat = Math.min(bucket.minLat, point.lat)
+    bucket.maxLat = Math.max(bucket.maxLat, point.lat)
+    bucket.minLon = Math.min(bucket.minLon, point.lon)
+    bucket.maxLon = Math.max(bucket.maxLon, point.lon)
+    return bucket.count
+  }
+
+  aggregation.buckets.set(cellId, {
+    cellId,
+    count: 1,
+    sumLat: point.lat,
+    sumLon: point.lon,
+    minLat: point.lat,
+    maxLat: point.lat,
+    minLon: point.lon,
+    maxLon: point.lon,
+    centerLat,
+    centerLon,
+    firstPoint: point,
+  })
+  return 1
+}
+
+function aggregatedMapPoints(aggregation: PackedMapPointAggregation): MapPoint[] {
+  return [...aggregation.buckets.values()].map((bucket) => {
+    if (bucket.count === 1 && bucket.firstPoint) {
+      return {
+        ...bucket.firstPoint,
+        cellId: bucket.cellId,
+      }
+    }
+
+    return {
+      cellId: bucket.cellId,
+      lat: bucket.centerLat,
+      lon: bucket.centerLon,
+      count: bucket.count,
+      bounds: {
+        minLat: bucket.minLat,
+        maxLat: bucket.maxLat,
+        minLon: bucket.minLon,
+        maxLon: bucket.maxLon,
+      },
+    }
+  })
 }
 
 type PackedIndexHeader = {
@@ -1509,16 +1685,39 @@ export class ResidentPackedGeoIndex {
     maxTimestampSec: number,
     direction: 'asc' | 'desc',
     query: CatalogQuery,
+    mapAggregation: SearchSpec['mapAggregation'] | undefined,
     limit: number,
-    offset: number,
+    _offset: number,
     isCancelled: CancellationSignal,
   ): Promise<PackedMapPointScanPage> {
     const start = this.lowerBound((record) => record.timestampSec < minTimestampSec)
     const end = this.lowerBound((record) => record.timestampSec <= maxTimestampSec)
-    const points: MapPoint[] = []
     const metrics = { pagesRead: 0, diskReadBytes: 0, candidatesInspected: 0 }
+    const aggregation = createMapPointAggregation(mapAggregation, limit)
+    let matchedRecords = 0
+    let largestBubbleCount = 0
+    const page = (): PackedMapPointScanPage => {
+      const aggregatedPoints = aggregatedMapPoints(aggregation)
+      const limitedPoints =
+        aggregatedPoints.length > limit
+          ? [...aggregatedPoints]
+              .sort((left, right) => (right.count ?? 1) - (left.count ?? 1))
+              .slice(0, limit)
+          : aggregatedPoints
+      return {
+        points: limitedPoints,
+        limitReached: aggregatedPoints.length > limit,
+        metrics,
+        matchedRecords,
+        renderedBubbles: limitedPoints.length,
+        largestBubbleCount,
+        aggregationZoom: aggregation.zoom,
+        aggregationCellSizePx: aggregation.cellSizePx,
+      }
+    }
+
     if (end <= start) {
-      return { points, limitReached: false, metrics }
+      return page()
     }
 
     const acceptedKindMask =
@@ -1546,10 +1745,27 @@ export class ResidentPackedGeoIndex {
       : 0
     const requiresGeo = query.hasGeo === true || bounds !== undefined
     const rejectsGeo = query.hasGeo === false
-    const maxPoints = limit + 1
     const view = this.view
     const recordSize = this.recordSize
-    let matched = 0
+
+    const addMatchedPoint = (
+      recordOffset: number,
+      kindFlags: number,
+      recordLatE7: number,
+      recordLonE7: number,
+    ) => {
+      const point: MapPoint = {
+        assetId: view.getUint32(recordOffset + 12, true),
+        kind: kindFromFlags(kindFlags),
+        lat: coordinateFromE7(recordLatE7),
+        lon: coordinateFromE7(recordLonE7),
+        timestamp: view.getUint32(recordOffset, true) * 1000,
+      }
+
+      const bucketCount = addMapPointToAggregation(aggregation, point)
+      matchedRecords += 1
+      largestBubbleCount = Math.max(largestBubbleCount, bucketCount)
+    }
 
     if (direction === 'desc') {
       for (let chunkEnd = end; chunkEnd > start;) {
@@ -1575,28 +1791,16 @@ export class ResidentPackedGeoIndex {
             if (recordLonE7 < minLonE7 || recordLonE7 > maxLonE7) continue
           }
 
-          if (matched >= offset) {
-            if (!bounds) {
-              recordLatE7 = view.getInt32(recordOffset + 4, true)
-              recordLonE7 = view.getInt32(recordOffset + 8, true)
-            }
-            points.push({
-              assetId: view.getUint32(recordOffset + 12, true),
-              kind: kindFromFlags(kindFlags),
-              lat: coordinateFromE7(recordLatE7),
-              lon: coordinateFromE7(recordLonE7),
-              timestamp: view.getUint32(recordOffset, true) * 1000,
-            })
-            if (points.length >= maxPoints) {
-              return { points: points.slice(0, limit), limitReached: true, metrics }
-            }
+          if (!bounds) {
+            recordLatE7 = view.getInt32(recordOffset + 4, true)
+            recordLonE7 = view.getInt32(recordOffset + 8, true)
           }
-          matched += 1
+          addMatchedPoint(recordOffset, kindFlags, recordLatE7, recordLonE7)
         }
         chunkEnd = chunkStart
         if (chunkEnd > start) await yieldToEventLoop()
       }
-      return { points, limitReached: false, metrics }
+      return page()
     }
 
     for (let chunkStart = start; chunkStart < end;) {
@@ -1621,28 +1825,16 @@ export class ResidentPackedGeoIndex {
           if (recordLonE7 < minLonE7 || recordLonE7 > maxLonE7) continue
         }
 
-        if (matched >= offset) {
-          if (!bounds) {
-            recordLatE7 = view.getInt32(recordOffset + 4, true)
-            recordLonE7 = view.getInt32(recordOffset + 8, true)
-          }
-          points.push({
-            assetId: view.getUint32(recordOffset + 12, true),
-            kind: kindFromFlags(kindFlags),
-            lat: coordinateFromE7(recordLatE7),
-            lon: coordinateFromE7(recordLonE7),
-            timestamp: view.getUint32(recordOffset, true) * 1000,
-          })
-          if (points.length >= maxPoints) {
-            return { points: points.slice(0, limit), limitReached: true, metrics }
-          }
+        if (!bounds) {
+          recordLatE7 = view.getInt32(recordOffset + 4, true)
+          recordLonE7 = view.getInt32(recordOffset + 8, true)
         }
-        matched += 1
+        addMatchedPoint(recordOffset, kindFlags, recordLatE7, recordLonE7)
       }
       chunkStart = chunkEnd
       if (chunkStart < end) await yieldToEventLoop()
     }
-    return { points, limitReached: false, metrics }
+    return page()
   }
 
   async scanAssetIds(
@@ -1953,7 +2145,7 @@ class FileCatalogStore implements CatalogStore {
     const index = await this.residentPackedIndex('file-time-geo')
     const queryIndexReadyMs = performance.now() - readyStartedAt
     throwIfCancelled(isCancelled)
-    const limit = Math.max(1, Math.min(spec.limit ?? 500, 10_000))
+    const limit = Math.max(1, Math.min(spec.limit ?? 500, MAX_RENDERED_MAP_BUBBLES))
     const offset = Math.max(0, spec.offset ?? 0)
     const query = searchSpecToCatalogQuery(spec, limit + 1)
     const minTime = query.startTime === undefined ? 0 : timestampSeconds(query.startTime)
@@ -1965,6 +2157,7 @@ class FileCatalogStore implements CatalogStore {
       maxTime,
       query.sort === 'timestamp_asc' ? 'asc' : 'desc',
       query,
+      spec.mapAggregation,
       limit,
       offset,
       isCancelled,
@@ -1993,6 +2186,11 @@ class FileCatalogStore implements CatalogStore {
         {
           queryIndexReadyMs,
           queryIndexScanMs,
+          matchedRecords: page.matchedRecords,
+          renderedBubbles: page.renderedBubbles,
+          largestBubbleCount: page.largestBubbleCount,
+          aggregationZoom: page.aggregationZoom,
+          aggregationCellSizePx: page.aggregationCellSizePx,
         },
       ),
     }

@@ -1,20 +1,17 @@
 import Feature from 'ol/Feature'
 import Map from 'ol/Map'
 import View from 'ol/View'
-import { boundingExtent } from 'ol/extent'
 import Point from 'ol/geom/Point'
 import ExtentInteraction from 'ol/interaction/Extent'
 import TileLayer from 'ol/layer/Tile'
 import VectorLayer from 'ol/layer/Vector'
 import { fromLonLat, toLonLat } from 'ol/proj'
-import Cluster from 'ol/source/Cluster'
 import OSM from 'ol/source/OSM'
 import VectorSource from 'ol/source/Vector'
 import { Circle as CircleStyle, Fill, Stroke, Style, Text } from 'ol/style'
 import { useEffect, useRef } from 'react'
 import type { GeoBounds, MapPoint } from '../types'
 import type { FeatureLike } from 'ol/Feature'
-import type { Coordinate } from 'ol/coordinate'
 import type { Extent } from 'ol/extent'
 import type { Pixel } from 'ol/pixel'
 
@@ -23,15 +20,23 @@ type QueryPoint = {
   lon: number
 }
 
+type VisibleMapViewport = {
+  bounds: GeoBounds
+  zoom: number
+  widthPx: number
+  heightPx: number
+}
+
 type MapViewProps = {
   queryPoint?: QueryPoint
   geoItems: MapPoint[]
+  renderBatchSize: number
   geoBounds?: GeoBounds
   boundsDrawing: boolean
   label: string
   onQueryPointChange: (point: QueryPoint) => void
   onGeoBoundsChange: (bounds: GeoBounds) => void
-  onVisibleBoundsChange: (bounds: GeoBounds) => void
+  onVisibleViewportChange: (viewport: VisibleMapViewport) => void
 }
 
 const baseStyle = new Style({
@@ -57,49 +62,58 @@ const boundsStyle = new Style({
 
 const hiddenBoundsHandleStyle = new Style({})
 
-const clusterStyleCache = new globalThis.Map<string, Style>()
-const CLUSTER_BOUNDS_PADDING_RATIO = 0.12
-const MIN_CLUSTER_BOUNDS_PADDING_METERS = 250
+const mapPointStyleCache = new globalThis.Map<string, Style>()
 const AREA_CURSOR_TOLERANCE_PX = 10
 
-function clusterStyle(feature: FeatureLike): Style {
-  const clusteredFeatures = (feature.get('features') ?? []) as Feature[]
-  const size = clusteredFeatures.length
+function formatBubbleCount(count: number): string {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`
+  if (count >= 10_000) return `${Math.round(count / 1_000)}k`
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`
+  return count.toLocaleString()
+}
 
-  if (size <= 1) {
+function featureBubbleCount(feature: FeatureLike): number {
+  const count = Number(feature.get('count') ?? 1)
+  return Number.isFinite(count) && count > 0 ? count : 1
+}
+
+function mapPointStyle(feature: FeatureLike): Style {
+  const count = featureBubbleCount(feature)
+  if (count <= 1) {
     return baseStyle
   }
 
-  const bucket = size >= 100 ? 'large' : size >= 10 ? 'medium' : 'small'
-  const key = `${bucket}:${size}`
-  const cachedStyle = clusterStyleCache.get(key)
+  const sizeBucket =
+    count >= 1_000 ? 'huge' : count >= 100 ? 'large' : count >= 10 ? 'medium' : 'small'
+  const label = formatBubbleCount(count)
+  const key = `${sizeBucket}:${label}`
+  const cachedStyle = mapPointStyleCache.get(key)
   if (cachedStyle) return cachedStyle
 
-  const radius = bucket === 'large' ? 22 : bucket === 'medium' ? 18 : 15
+  const radius =
+    sizeBucket === 'huge'
+      ? 26
+      : sizeBucket === 'large'
+        ? 22
+        : sizeBucket === 'medium'
+          ? 18
+          : 15
   const style = new Style({
     image: new CircleStyle({
       radius,
-      fill: new Fill({ color: '#4f5b69' }),
+      fill: new Fill({ color: '#235d67' }),
       stroke: new Stroke({ color: '#ffffff', width: 2.5 }),
     }),
     text: new Text({
-      text: size.toLocaleString(),
+      text: label,
       fill: new Fill({ color: '#ffffff' }),
-      stroke: new Stroke({ color: '#303846', width: 2 }),
+      stroke: new Stroke({ color: '#173b43', width: 2 }),
       font: '700 12px system-ui, sans-serif',
     }),
   })
 
-  clusterStyleCache.set(key, style)
+  mapPointStyleCache.set(key, style)
   return style
-}
-
-function coordinatesForCluster(feature: FeatureLike): Coordinate[] {
-  const clusteredFeatures = (feature.get('features') ?? []) as Feature[]
-  return clusteredFeatures.flatMap((clusteredFeature) => {
-    const geometry = clusteredFeature.getGeometry()
-    return geometry instanceof Point ? [geometry.getCoordinates()] : []
-  })
 }
 
 function boundedLatitude(value: number): number {
@@ -122,29 +136,22 @@ function boundsFromMapExtent(extent: Extent): GeoBounds {
   }
 }
 
-function boundsFromClusterCoordinates(
-  coordinates: Coordinate[],
-): GeoBounds | undefined {
-  if (coordinates.length === 0) return undefined
+function pointBoundsFromFeature(feature: FeatureLike): GeoBounds | undefined {
+  const explicitBounds = feature.get('bounds') as GeoBounds | undefined
+  if (explicitBounds) return explicitBounds
 
-  const extent = boundingExtent(coordinates) as [number, number, number, number]
-  const width = extent[2] - extent[0]
-  const height = extent[3] - extent[1]
-  const paddingX = Math.max(
-    width * CLUSTER_BOUNDS_PADDING_RATIO,
-    MIN_CLUSTER_BOUNDS_PADDING_METERS,
-  )
-  const paddingY = Math.max(
-    height * CLUSTER_BOUNDS_PADDING_RATIO,
-    MIN_CLUSTER_BOUNDS_PADDING_METERS,
-  )
+  const geometry = (feature as Feature).getGeometry?.()
+  if (!(geometry instanceof Point)) return undefined
 
-  return boundsFromMapExtent([
-    extent[0] - paddingX,
-    extent[1] - paddingY,
-    extent[2] + paddingX,
-    extent[3] + paddingY,
-  ])
+  const [lon, lat] = toLonLat(geometry.getCoordinates())
+  const boundedLat = boundedLatitude(lat)
+  const boundedLon = boundedLongitude(lon)
+  return {
+    minLat: boundedLat,
+    maxLat: boundedLat,
+    minLon: boundedLon,
+    maxLon: boundedLon,
+  }
 }
 
 function mapExtentFromBounds(bounds: GeoBounds): Extent {
@@ -159,11 +166,16 @@ function mapExtentFromBounds(bounds: GeoBounds): Extent {
   ]
 }
 
-function visibleBoundsFromMap(map: Map): GeoBounds | undefined {
+function visibleViewportFromMap(map: Map): VisibleMapViewport | undefined {
   const size = map.getSize()
   if (!size || size[0] <= 0 || size[1] <= 0) return undefined
 
-  return boundsFromMapExtent(map.getView().calculateExtent(size))
+  return {
+    bounds: boundsFromMapExtent(map.getView().calculateExtent(size)),
+    zoom: map.getView().getZoom() ?? 0,
+    widthPx: Math.round(size[0]),
+    heightPx: Math.round(size[1]),
+  }
 }
 
 function clearExtentInteraction(interaction: ExtentInteraction): void {
@@ -249,12 +261,13 @@ function pointFeature(lon: number, lat: number): Feature {
 export function MapView({
   queryPoint,
   geoItems,
+  renderBatchSize,
   geoBounds,
   boundsDrawing,
   label,
   onQueryPointChange,
   onGeoBoundsChange,
-  onVisibleBoundsChange,
+  onVisibleViewportChange,
 }: MapViewProps) {
   const targetRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<Map | null>(null)
@@ -265,19 +278,15 @@ export function MapView({
   const syncingBoundsRef = useRef(false)
   const sourceRef = useRef(new VectorSource())
   const querySourceRef = useRef(new VectorSource())
+  const renderJobRef = useRef(0)
 
   useEffect(() => {
     if (!targetRef.current || mapRef.current) return
 
     const target = targetRef.current
-    const clusterSource = new Cluster({
-      distance: 42,
-      minDistance: 16,
+    const pointLayer = new VectorLayer({
       source: sourceRef.current,
-    })
-    const clusterLayer = new VectorLayer({
-      source: clusterSource,
-      style: clusterStyle,
+      style: mapPointStyle,
     })
     const queryLayer = new VectorLayer({
       source: querySourceRef.current,
@@ -298,7 +307,7 @@ export function MapView({
         new TileLayer({
           source: new OSM(),
         }),
-        clusterLayer,
+        pointLayer,
         queryLayer,
       ],
       view: new View({
@@ -309,8 +318,8 @@ export function MapView({
     map.addInteraction(extentInteraction)
 
     const reportVisibleBounds = () => {
-      const bounds = visibleBoundsFromMap(map)
-      if (bounds) onVisibleBoundsChange(bounds)
+      const viewport = visibleViewportFromMap(map)
+      if (viewport) onVisibleViewportChange(viewport)
     }
 
     const commitPendingBounds = () => {
@@ -335,17 +344,17 @@ export function MapView({
     map.on('singleclick', (event) => {
       if (boundsDrawingRef.current) return
 
-      const clickedCluster = map.forEachFeatureAtPixel(
+      const clickedPoint = map.forEachFeatureAtPixel(
         event.pixel,
-        (feature, layer) => (layer === clusterLayer ? feature : undefined),
+        (feature, layer) => (layer === pointLayer ? feature : undefined),
       )
-      if (clickedCluster) {
-        const coordinates = coordinatesForCluster(clickedCluster)
-        if (coordinates.length > 1) {
-          const bounds = boundsFromClusterCoordinates(coordinates)
-          if (bounds) onGeoBoundsChange(bounds)
-          return
-        }
+      const clickedCount = clickedPoint ? featureBubbleCount(clickedPoint) : 1
+      const clickedBounds = clickedPoint
+        ? pointBoundsFromFeature(clickedPoint)
+        : undefined
+      if (clickedCount > 1 && clickedBounds) {
+        onGeoBoundsChange(clickedBounds)
+        return
       }
 
       const [lon, lat] = toLonLat(event.coordinate)
@@ -370,16 +379,18 @@ export function MapView({
         return
       }
 
-      const hoveredCluster = map.forEachFeatureAtPixel(
+      const hoveredPoint = map.forEachFeatureAtPixel(
         event.pixel,
-        (feature, layer) => (layer === clusterLayer ? feature : undefined),
+        (feature, layer) => (layer === pointLayer ? feature : undefined),
       )
+      const hoveredCount = hoveredPoint ? featureBubbleCount(hoveredPoint) : 1
+      const hoveredBounds = hoveredPoint
+        ? pointBoundsFromFeature(hoveredPoint)
+        : undefined
       setMapCursor(
         target,
         map,
-        hoveredCluster && coordinatesForCluster(hoveredCluster).length > 1
-          ? 'pointer'
-          : '',
+        hoveredCount > 1 && hoveredBounds ? 'pointer' : '',
       )
     })
 
@@ -403,7 +414,7 @@ export function MapView({
       mapRef.current = null
       extentInteractionRef.current = null
     }
-  }, [onGeoBoundsChange, onQueryPointChange, onVisibleBoundsChange])
+  }, [onGeoBoundsChange, onQueryPointChange, onVisibleViewportChange])
 
   useEffect(() => {
     boundsDrawingRef.current = boundsDrawing
@@ -416,20 +427,44 @@ export function MapView({
 
   useEffect(() => {
     const source = sourceRef.current
-    const features: Feature[] = []
-
-    for (const item of geoItems) {
-      if (typeof item.lat !== 'number' || typeof item.lon !== 'number') {
-        continue
-      }
-      const feature = pointFeature(item.lon, item.lat)
-      feature.set('mediaId', item.mediaId ?? item.assetId, true)
-      features.push(feature)
-    }
+    const jobId = ++renderJobRef.current
+    const batchSize = Math.max(1, Math.trunc(renderBatchSize))
+    let itemIndex = 0
+    let timer: number | undefined
 
     source.clear(true)
-    source.addFeatures(features)
-  }, [geoItems])
+
+    function addNextBatch() {
+      if (jobId !== renderJobRef.current) return
+
+      const features: Feature[] = []
+      const end = Math.min(itemIndex + batchSize, geoItems.length)
+      for (; itemIndex < end; itemIndex += 1) {
+        const item = geoItems[itemIndex]
+        if (typeof item.lat !== 'number' || typeof item.lon !== 'number') {
+          continue
+        }
+        const feature = pointFeature(item.lon, item.lat)
+        feature.set('mediaId', item.mediaId ?? item.assetId, true)
+        if (item.cellId) feature.set('cellId', item.cellId, true)
+        feature.set('count', item.count ?? 1, true)
+        if (item.bounds) feature.set('bounds', item.bounds, true)
+        features.push(feature)
+      }
+
+      if (features.length > 0) source.addFeatures(features)
+      if (itemIndex < geoItems.length) {
+        timer = window.setTimeout(addNextBatch, 0)
+      }
+    }
+
+    timer = window.setTimeout(addNextBatch, 0)
+
+    return () => {
+      if (renderJobRef.current === jobId) renderJobRef.current += 1
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [geoItems, renderBatchSize])
 
   useEffect(() => {
     const querySource = querySourceRef.current

@@ -12,7 +12,6 @@ const options = {
   defaultResultPageSize: 100,
   allowedPageSizes: [50, 100, 250, 500],
   pageSizeStorageKey: 'test-page-size',
-  mapPointLimit: 500,
 }
 
 function SearchHarness() {

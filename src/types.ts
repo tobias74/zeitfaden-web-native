@@ -68,10 +68,13 @@ export type GeoIndexPoint = {
 export type MapPoint = {
   mediaId?: string
   assetId?: number
+  cellId?: string
   kind?: MediaKind
   lat: number
   lon: number
   timestamp?: number
+  count?: number
+  bounds?: GeoBounds
 }
 
 export type MapPointPage = {
@@ -115,6 +118,12 @@ export type SearchSpec = TimeRange & {
   kind?: KindFilter
   hasGeo?: boolean
   geoBounds?: GeoBounds
+  mapAggregation?: {
+    zoom: number
+    viewportWidthPx: number
+    viewportHeightPx: number
+    bubbleCellSizePx: number
+  }
   order: SearchOrder
   limit?: number
   offset?: number
@@ -191,6 +200,11 @@ export type SearchIndexStats = GeoIndexStats & {
   queryIndexScanMs?: number
   queryAssetReadMs?: number
   queryAssetFilterMs?: number
+  matchedRecords?: number
+  renderedBubbles?: number
+  largestBubbleCount?: number
+  aggregationZoom?: number
+  aggregationCellSizePx?: number
   rowsReturned?: number
   limit?: number
   offset?: number

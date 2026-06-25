@@ -10,24 +10,34 @@ vi.mock('./components/MapView', async () => {
   return {
     MapView: ({
       onQueryPointChange,
-      onVisibleBoundsChange,
+      onVisibleViewportChange,
     }: {
       onQueryPointChange?: (point: { lat: number; lon: number }) => void
-      onVisibleBoundsChange?: (bounds: {
-        minLat: number
-        maxLat: number
-        minLon: number
-        maxLon: number
+      onVisibleViewportChange?: (viewport: {
+        bounds: {
+          minLat: number
+          maxLat: number
+          minLon: number
+          maxLon: number
+        }
+        zoom: number
+        widthPx: number
+        heightPx: number
       }) => void
     }) => {
       React.useEffect(() => {
-        onVisibleBoundsChange?.({
-          minLat: 47,
-          maxLat: 48,
-          minLon: 8,
-          maxLon: 9,
+        onVisibleViewportChange?.({
+          bounds: {
+            minLat: 47,
+            maxLat: 48,
+            minLon: 8,
+            maxLon: 9,
+          },
+          zoom: 4.4,
+          widthPx: 900,
+          heightPx: 430,
         })
-      }, [onVisibleBoundsChange])
+      }, [onVisibleViewportChange])
 
       return (
         <>
@@ -35,11 +45,16 @@ vi.mock('./components/MapView', async () => {
             type="button"
             data-testid="map-view"
             onClick={() =>
-              onVisibleBoundsChange?.({
-                minLat: 49,
-                maxLat: 50,
-                minLon: 10,
-                maxLon: 11,
+              onVisibleViewportChange?.({
+                bounds: {
+                  minLat: 49,
+                  maxLat: 50,
+                  minLon: 10,
+                  maxLon: 11,
+                },
+                zoom: 5.2,
+                widthPx: 900,
+                heightPx: 430,
               })
             }
           />
@@ -359,25 +374,46 @@ describe('App pagination', () => {
     })
   })
 
-  it('uses the configured map bubble limit for map searches', async () => {
+  it('uses the configured map bubble density for map searches', async () => {
     const { default: App } = await import('./App')
 
     render(<App />)
 
     expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
 
-    fireEvent.change(screen.getByLabelText('Map bubble limit'), {
-      target: { value: '10000' },
+    fireEvent.change(screen.getByLabelText('Map bubble density'), {
+      target: { value: '48' },
     })
 
     await waitFor(() => {
-      expect(window.localStorage.getItem('geo-media-index-lab:map-point-limit'))
-        .toBe('10000')
+      expect(
+        window.localStorage.getItem(
+          'geo-media-index-lab:map-bubble-cell-size',
+        ),
+      ).toBe('48')
       expect(
         searchMapPointCalls.some(
-          (query) => query.purpose === 'map' && query.limit === 10_000,
+          (query) =>
+            query.purpose === 'map' &&
+            query.limit === 5_000 &&
+            query.mapAggregation?.bubbleCellSizePx === 48 &&
+            query.mapAggregation.zoom === 4.4 &&
+            query.mapAggregation.viewportWidthPx === 900 &&
+            query.mapAggregation.viewportHeightPx === 430,
         ),
       ).toBe(true)
+    })
+
+    fireEvent.change(screen.getByLabelText('Map render batch'), {
+      target: { value: '250' },
+    })
+
+    await waitFor(() => {
+      expect(
+        window.localStorage.getItem(
+          'geo-media-index-lab:map-render-batch-size',
+        ),
+      ).toBe('250')
     })
   })
 

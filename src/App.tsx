@@ -75,6 +75,12 @@ import type {
 type ActivePage = 'app' | 'imprint' | 'privacy'
 type ResultDisplayMode = 'images' | 'cards' | 'list'
 type ResultThumbnailSize = 'small' | 'medium' | 'large'
+type MapViewport = {
+  bounds: GeoBounds
+  zoom: number
+  widthPx: number
+  heightPx: number
+}
 type ActivityLogEntry = {
   id: number
   key: TranslationKey
@@ -88,11 +94,15 @@ const RESULT_DISPLAY_MODE_KEY = 'geo-media-index-lab:result-display-mode'
 const RESULT_THUMBNAIL_SIZE_KEY = 'geo-media-index-lab:result-thumbnail-size'
 const RESULT_METADATA_KEY = 'geo-media-index-lab:result-metadata'
 const RESULT_PAGE_SIZE_KEY = 'geo-media-index-lab:result-page-size'
-const MAP_POINT_LIMIT_KEY = 'geo-media-index-lab:map-point-limit'
+const MAP_BUBBLE_CELL_SIZE_KEY = 'geo-media-index-lab:map-bubble-cell-size'
+const MAP_RENDER_BATCH_SIZE_KEY = 'geo-media-index-lab:map-render-batch-size'
 const RESULT_PAGE_SIZE_OPTIONS = [50, 100, 250, 500] as const
-const MAP_POINT_LIMIT_OPTIONS = [1_000, 2_500, 5_000, 10_000, 25_000] as const
+const MAP_BUBBLE_CELL_SIZE_OPTIONS = [48, 64, 80] as const
+const MAP_RENDER_BATCH_SIZE_OPTIONS = [100, 250, 500, 1_000, 2_500] as const
 const DEFAULT_RESULT_PAGE_SIZE = 100
-const DEFAULT_MAP_POINT_LIMIT = 5_000
+const DEFAULT_MAP_BUBBLE_CELL_SIZE = 64
+const DEFAULT_MAP_RENDER_BATCH_SIZE = 500
+const MAX_RENDERED_MAP_BUBBLES = 5_000
 const DEFAULT_DISTANCE_ENGINE_ID = 'segmented-ball-tree'
 const CATALOG_QUERY_INDEX_ID = 'file-time-geo'
 const DISTANCE_ENGINE_IDS = [
@@ -126,6 +136,20 @@ function geoBoundsEqual(
     Math.abs(left.maxLat - right.maxLat) < 0.000001 &&
     Math.abs(left.minLon - right.minLon) < 0.000001 &&
     Math.abs(left.maxLon - right.maxLon) < 0.000001
+  )
+}
+
+function mapViewportEqual(
+  left: MapViewport | undefined,
+  right: MapViewport | undefined,
+): boolean {
+  if (!left || !right) return left === right
+
+  return (
+    geoBoundsEqual(left.bounds, right.bounds) &&
+    Math.abs(left.zoom - right.zoom) < 0.001 &&
+    left.widthPx === right.widthPx &&
+    left.heightPx === right.heightPx
   )
 }
 
@@ -586,13 +610,22 @@ function App() {
       translate(language, key, values),
     [language],
   )
-  const [mapPointLimit, setMapPointLimitState] = useState<
-    (typeof MAP_POINT_LIMIT_OPTIONS)[number]
+  const [mapBubbleCellSize, setMapBubbleCellSizeState] = useState<
+    (typeof MAP_BUBBLE_CELL_SIZE_OPTIONS)[number]
   >(() =>
     storedNumberOption(
-      MAP_POINT_LIMIT_KEY,
-      DEFAULT_MAP_POINT_LIMIT,
-      MAP_POINT_LIMIT_OPTIONS,
+      MAP_BUBBLE_CELL_SIZE_KEY,
+      DEFAULT_MAP_BUBBLE_CELL_SIZE,
+      MAP_BUBBLE_CELL_SIZE_OPTIONS,
+    ),
+  )
+  const [mapRenderBatchSize, setMapRenderBatchSizeState] = useState<
+    (typeof MAP_RENDER_BATCH_SIZE_OPTIONS)[number]
+  >(() =>
+    storedNumberOption(
+      MAP_RENDER_BATCH_SIZE_KEY,
+      DEFAULT_MAP_RENDER_BATCH_SIZE,
+      MAP_RENDER_BATCH_SIZE_OPTIONS,
     ),
   )
   const search = useSearchState({
@@ -602,7 +635,6 @@ function App() {
     defaultResultPageSize: DEFAULT_RESULT_PAGE_SIZE,
     allowedPageSizes: RESULT_PAGE_SIZE_OPTIONS,
     pageSizeStorageKey: RESULT_PAGE_SIZE_KEY,
-    mapPointLimit,
   })
   const {
     selectedIndexId,
@@ -670,7 +702,7 @@ function App() {
   const [mapHeight, setMapHeight] = useState(() =>
     Math.max(MIN_MAP_HEIGHT, storedNumber(MAP_HEIGHT_KEY, DEFAULT_MAP_HEIGHT)),
   )
-  const [visibleMapBounds, setVisibleMapBounds] = useState<GeoBounds>()
+  const [visibleMapViewport, setVisibleMapViewport] = useState<MapViewport>()
   const workspaceRef = useRef<HTMLElement | null>(null)
   const leftStackRef = useRef<HTMLElement | null>(null)
   const settingsMenuRef = useRef<HTMLDetailsElement | null>(null)
@@ -768,21 +800,27 @@ function App() {
     ],
   )
   const mapSearchSpec = useMemo<SearchSpec | undefined>(
-    () => visibleMapBounds ? ({
+    () => visibleMapViewport ? ({
       ...timeRange,
       kind: kindFilter,
       hasGeo: true,
-      geoBounds: visibleMapBounds,
+      geoBounds: visibleMapViewport.bounds,
+      mapAggregation: {
+        zoom: visibleMapViewport.zoom,
+        viewportWidthPx: visibleMapViewport.widthPx,
+        viewportHeightPx: visibleMapViewport.heightPx,
+        bubbleCellSizePx: mapBubbleCellSize,
+      },
       order: {
         kind: 'timestamp',
         sort: catalogSort,
         engineId: CATALOG_QUERY_INDEX_ID,
       },
-      limit: mapPointLimit,
+      limit: MAX_RENDERED_MAP_BUBBLES,
       offset: 0,
       purpose: 'map',
     }) : undefined,
-    [catalogSort, kindFilter, mapPointLimit, timeRange, visibleMapBounds],
+    [catalogSort, kindFilter, mapBubbleCellSize, timeRange, visibleMapViewport],
   )
   const {
     results: resultItems,
@@ -791,7 +829,6 @@ function App() {
     pageLimitReached,
     mapItems,
     mapLoading,
-    mapLimitReached: mapPointLimitReached,
     resultMetrics,
     mapMetrics,
     validation,
@@ -1005,9 +1042,9 @@ function App() {
     setGeoBounds(bounds)
   }, [setGeoBounds])
 
-  const setVisibleMapGeoBounds = useCallback((bounds: GeoBounds) => {
-    setVisibleMapBounds((currentBounds) =>
-      geoBoundsEqual(currentBounds, bounds) ? currentBounds : bounds,
+  const setVisibleMapViewportState = useCallback((viewport: MapViewport) => {
+    setVisibleMapViewport((currentViewport) =>
+      mapViewportEqual(currentViewport, viewport) ? currentViewport : viewport,
     )
   }, [])
 
@@ -1033,14 +1070,27 @@ function App() {
     window.localStorage.setItem(RESULT_THUMBNAIL_SIZE_KEY, size)
   }, [])
 
-  const setMapPointLimit = useCallback((limit: number) => {
-    const nextLimit = MAP_POINT_LIMIT_OPTIONS.includes(
-      limit as (typeof MAP_POINT_LIMIT_OPTIONS)[number],
+  const setMapBubbleCellSize = useCallback((cellSize: number) => {
+    const nextCellSize = MAP_BUBBLE_CELL_SIZE_OPTIONS.includes(
+      cellSize as (typeof MAP_BUBBLE_CELL_SIZE_OPTIONS)[number],
     )
-      ? (limit as (typeof MAP_POINT_LIMIT_OPTIONS)[number])
-      : DEFAULT_MAP_POINT_LIMIT
-    setMapPointLimitState(nextLimit)
-    window.localStorage.setItem(MAP_POINT_LIMIT_KEY, String(nextLimit))
+      ? (cellSize as (typeof MAP_BUBBLE_CELL_SIZE_OPTIONS)[number])
+      : DEFAULT_MAP_BUBBLE_CELL_SIZE
+    setMapBubbleCellSizeState(nextCellSize)
+    window.localStorage.setItem(MAP_BUBBLE_CELL_SIZE_KEY, String(nextCellSize))
+  }, [])
+
+  const setMapRenderBatchSize = useCallback((batchSize: number) => {
+    const nextBatchSize = MAP_RENDER_BATCH_SIZE_OPTIONS.includes(
+      batchSize as (typeof MAP_RENDER_BATCH_SIZE_OPTIONS)[number],
+    )
+      ? (batchSize as (typeof MAP_RENDER_BATCH_SIZE_OPTIONS)[number])
+      : DEFAULT_MAP_RENDER_BATCH_SIZE
+    setMapRenderBatchSizeState(nextBatchSize)
+    window.localStorage.setItem(
+      MAP_RENDER_BATCH_SIZE_KEY,
+      String(nextBatchSize),
+    )
   }, [])
 
   const toggleMetadata = useCallback((enabled: boolean) => {
@@ -1334,21 +1384,45 @@ function App() {
               <div className="display-popover settings-popover">
                 <div className="display-section">
                   <label className="settings-select-row">
-                    {t('mapPointLimit')}
+                    {t('mapBubbleDensity')}
                     <select
-                      value={mapPointLimit}
+                      value={mapBubbleCellSize}
                       onChange={(event) =>
-                        setMapPointLimit(Number(event.target.value))
+                        setMapBubbleCellSize(Number(event.target.value))
                       }
                     >
-                      {MAP_POINT_LIMIT_OPTIONS.map((limit) => (
-                        <option key={limit} value={limit}>
-                          {limit.toLocaleString(locale)}
+                      {MAP_BUBBLE_CELL_SIZE_OPTIONS.map((cellSize) => (
+                        <option key={cellSize} value={cellSize}>
+                          {cellSize === 48
+                            ? t('mapBubbleDensityCompact')
+                            : cellSize === 64
+                              ? t('mapBubbleDensityBalanced')
+                              : t('mapBubbleDensitySpacious')}
                         </option>
                       ))}
                     </select>
                   </label>
-                  <p className="settings-hint">{t('mapPointLimitHint')}</p>
+                  <p className="settings-hint">{t('mapBubbleDensityHint')}</p>
+                </div>
+                <div className="display-section">
+                  <label className="settings-select-row">
+                    {t('mapRenderBatchSize')}
+                    <select
+                      value={mapRenderBatchSize}
+                      onChange={(event) =>
+                        setMapRenderBatchSize(Number(event.target.value))
+                      }
+                    >
+                      {MAP_RENDER_BATCH_SIZE_OPTIONS.map((batchSize) => (
+                        <option key={batchSize} value={batchSize}>
+                          {batchSize.toLocaleString(locale)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="settings-hint">
+                    {t('mapRenderBatchSizeHint')}
+                  </p>
                 </div>
                 <div className="display-section">
                   <span>{t('activityLog')}</span>
@@ -1489,12 +1563,13 @@ function App() {
             <MapView
               queryPoint={distanceSortActive ? queryPoint : undefined}
               geoItems={mapItems}
+              renderBatchSize={mapRenderBatchSize}
               geoBounds={geoBounds}
               boundsDrawing={boundsDrawing}
               label={t('searchMap')}
               onQueryPointChange={setMapQueryPoint}
               onGeoBoundsChange={setMapGeoBounds}
-              onVisibleBoundsChange={setVisibleMapGeoBounds}
+              onVisibleViewportChange={setVisibleMapViewportState}
             />
             {mapLoading && (
               <div className="map-loading-strip" aria-hidden="true">
@@ -1524,22 +1599,13 @@ function App() {
                 </button>
               )}
             </div>
-            {(mapPointLimitReached || distanceSortActive) && (
+            {distanceSortActive && (
               <div className="map-status-stack">
-                {mapPointLimitReached && (
-                  <div className="map-limit-notice">
-                    {t('mapPointLimitNotice', {
-                      shown: mapPointLimit.toLocaleString(locale),
-                    })}
-                  </div>
-                )}
-                {distanceSortActive && (
-                  <div className="map-readout">
-                    <MapPin size={16} />
-                    <span>{queryPoint.lat.toFixed(5)}</span>
-                    <span>{queryPoint.lon.toFixed(5)}</span>
-                  </div>
-                )}
+                <div className="map-readout">
+                  <MapPin size={16} />
+                  <span>{queryPoint.lat.toFixed(5)}</span>
+                  <span>{queryPoint.lon.toFixed(5)}</span>
+                </div>
               </div>
             )}
           </div>
@@ -1908,12 +1974,37 @@ function App() {
                     <dd>{formatMilliseconds(mapMetrics.queryIndexScanMs)}</dd>
                   </div>
                   <div>
-                    <dt>{t('visible')}</dt>
+                    <dt>{t('renderedBubbles')}</dt>
                     <dd>
                       {statsNumber(
-                        mapMetrics.rowsReturned ?? mapItems.length,
+                        mapMetrics.renderedBubbles ??
+                          mapMetrics.rowsReturned ??
+                          mapItems.length,
                         locale,
                       )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{t('matchedRecords')}</dt>
+                    <dd>{statsNumber(mapMetrics.matchedRecords, locale)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('largestBubble')}</dt>
+                    <dd>{statsNumber(mapMetrics.largestBubbleCount, locale)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('aggregationZoom')}</dt>
+                    <dd>{statsNumber(mapMetrics.aggregationZoom, locale)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('cellSize')}</dt>
+                    <dd>
+                      {`${statsNumber(
+                        typeof mapMetrics.aggregationCellSizePx === 'number'
+                          ? Math.round(mapMetrics.aggregationCellSizePx)
+                          : undefined,
+                        locale,
+                      )} px`}
                     </dd>
                   </div>
                   <div>

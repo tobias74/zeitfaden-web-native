@@ -41,6 +41,9 @@ const ASSET_ID_MAP_ENTRY_SIZE: usize = 72;
 const PACKED_INDEX_HEADER_SIZE: usize = 96;
 const TIME_GEO_RECORD_SIZE: usize = 20;
 const PACKED_SCAN_RECORDS: usize = 8192;
+const MAX_RENDERED_MAP_BUBBLES: i64 = 5_000;
+const WEB_MERCATOR_MAX_LAT: f64 = 85.051_128_779_806_6;
+const WEB_MERCATOR_TILE_SIZE: f64 = 256.0;
 const INDEX_KIND_TIME_GEO: u32 = 1;
 const KIND_FLAG_IMAGE: u8 = 0;
 const KIND_FLAG_VIDEO: u8 = 1;
@@ -143,10 +146,16 @@ struct GeoIndexPoint {
 struct MapPoint {
     media_id: Option<String>,
     asset_id: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cell_id: Option<String>,
     kind: Option<String>,
     lat: f64,
     lon: f64,
     timestamp: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bounds: Option<GeoBounds>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,11 +240,21 @@ struct SearchOrder {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct MapAggregationSpec {
+    zoom: f64,
+    viewport_width_px: f64,
+    viewport_height_px: f64,
+    bubble_cell_size_px: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SearchSpec {
     kind: Option<String>,
     source_id: Option<String>,
     has_geo: Option<bool>,
     geo_bounds: Option<GeoBounds>,
+    map_aggregation: Option<MapAggregationSpec>,
     order: SearchOrder,
     limit: Option<i64>,
     offset: Option<i64>,
@@ -284,6 +303,11 @@ struct SearchIndexStats {
     storage_mode: Option<String>,
     query_time_ms: Option<f64>,
     rows_returned: Option<usize>,
+    matched_records: Option<usize>,
+    rendered_bubbles: Option<usize>,
+    largest_bubble_count: Option<usize>,
+    aggregation_zoom: Option<usize>,
+    aggregation_cell_size_px: Option<f64>,
     limit: Option<i64>,
     offset: Option<i64>,
     limit_reached: Option<bool>,
@@ -625,6 +649,11 @@ fn empty_search_index_stats(engine_id: &str, engine_label: &str) -> SearchIndexS
         storage_mode: None,
         query_time_ms: None,
         rows_returned: None,
+        matched_records: None,
+        rendered_bubbles: None,
+        largest_bubble_count: None,
+        aggregation_zoom: None,
+        aggregation_cell_size_px: None,
         limit: None,
         offset: None,
         limit_reached: None,
@@ -675,6 +704,11 @@ fn search_stats_from_geo(
         storage_mode: None,
         query_time_ms: None,
         rows_returned: None,
+        matched_records: None,
+        rendered_bubbles: None,
+        largest_bubble_count: None,
+        aggregation_zoom: None,
+        aggregation_cell_size_px: None,
         limit: None,
         offset: None,
         limit_reached: None,
@@ -4271,41 +4305,195 @@ fn scan_packed_asset_ids(
     ))
 }
 
+#[derive(Clone)]
+struct NativeMapPointBucket {
+    cell_id: String,
+    count: usize,
+    sum_lat: f64,
+    sum_lon: f64,
+    min_lat: f64,
+    max_lat: f64,
+    min_lon: f64,
+    max_lon: f64,
+    center_lat: f64,
+    center_lon: f64,
+    first_point: Option<MapPoint>,
+}
+
+struct NativeMapPointAggregation {
+    zoom: usize,
+    world_size: f64,
+    cell_size_px: f64,
+    buckets: HashMap<String, NativeMapPointBucket>,
+}
+
+fn create_map_point_aggregation(
+    options: Option<&MapAggregationSpec>,
+    limit: usize,
+) -> NativeMapPointAggregation {
+    let zoom = options
+        .map(|options| options.zoom.floor().clamp(0.0, 24.0) as usize)
+        .unwrap_or(0);
+    let viewport_width_px = options
+        .map(|options| options.viewport_width_px.max(1.0))
+        .unwrap_or(1024.0);
+    let viewport_height_px = options
+        .map(|options| options.viewport_height_px.max(1.0))
+        .unwrap_or(768.0);
+    let requested_cell_size_px = options
+        .map(|options| options.bubble_cell_size_px.max(1.0))
+        .unwrap_or(64.0);
+    let budget_cell_size_px =
+        ((viewport_width_px * viewport_height_px) / limit.max(1) as f64).sqrt();
+    let cell_size_px = requested_cell_size_px.max(budget_cell_size_px);
+    let world_size = WEB_MERCATOR_TILE_SIZE * 2_f64.powi(zoom as i32);
+    NativeMapPointAggregation {
+        zoom,
+        world_size,
+        cell_size_px,
+        buckets: HashMap::new(),
+    }
+}
+
+fn lon_lat_to_world_pixel(lon: f64, lat: f64, world_size: f64) -> (f64, f64) {
+    let clamped_lat = lat.clamp(-WEB_MERCATOR_MAX_LAT, WEB_MERCATOR_MAX_LAT);
+    let clamped_lon = lon.clamp(-180.0, 180.0);
+    let sin_lat = to_radians(clamped_lat).sin();
+    let x = ((clamped_lon + 180.0) / 360.0) * world_size;
+    let y = (0.5 - ((1.0 + sin_lat) / (1.0 - sin_lat)).ln() / (4.0 * std::f64::consts::PI))
+        * world_size;
+    (x, y)
+}
+
+fn world_pixel_to_lon_lat(x: f64, y: f64, world_size: f64) -> (f64, f64) {
+    let lon = (x / world_size) * 360.0 - 180.0;
+    let n = std::f64::consts::PI - (2.0 * std::f64::consts::PI * y) / world_size;
+    let lat = n.sinh().atan().to_degrees();
+    (lat.clamp(-90.0, 90.0), lon.clamp(-180.0, 180.0))
+}
+
+fn map_point_bucket(
+    aggregation: &NativeMapPointAggregation,
+    point: &MapPoint,
+) -> (String, f64, f64) {
+    let (pixel_x, pixel_y) =
+        lon_lat_to_world_pixel(point.lon, point.lat, aggregation.world_size);
+    let cells_per_row = (aggregation.world_size / aggregation.cell_size_px)
+        .ceil()
+        .max(1.0) as usize;
+    let cell_x = ((pixel_x / aggregation.cell_size_px).floor().max(0.0) as usize)
+        .min(cells_per_row.saturating_sub(1));
+    let cell_y = ((pixel_y / aggregation.cell_size_px).floor().max(0.0) as usize)
+        .min(cells_per_row.saturating_sub(1));
+    let (center_lat, center_lon) = world_pixel_to_lon_lat(
+        (cell_x as f64 + 0.5) * aggregation.cell_size_px,
+        (cell_y as f64 + 0.5) * aggregation.cell_size_px,
+        aggregation.world_size,
+    );
+    (
+        format!("{}/{}/{}", aggregation.zoom, cell_x, cell_y),
+        center_lat,
+        center_lon,
+    )
+}
+
+fn add_map_point_to_aggregation(
+    aggregation: &mut NativeMapPointAggregation,
+    point: MapPoint,
+) -> usize {
+    let (cell_id, center_lat, center_lon) = map_point_bucket(aggregation, &point);
+    if let Some(bucket) = aggregation.buckets.get_mut(&cell_id) {
+        bucket.count += 1;
+        bucket.sum_lat += point.lat;
+        bucket.sum_lon += point.lon;
+        bucket.min_lat = bucket.min_lat.min(point.lat);
+        bucket.max_lat = bucket.max_lat.max(point.lat);
+        bucket.min_lon = bucket.min_lon.min(point.lon);
+        bucket.max_lon = bucket.max_lon.max(point.lon);
+        return bucket.count;
+    }
+
+    aggregation.buckets.insert(
+        cell_id.clone(),
+        NativeMapPointBucket {
+            cell_id,
+            count: 1,
+            sum_lat: point.lat,
+            sum_lon: point.lon,
+            min_lat: point.lat,
+            max_lat: point.lat,
+            min_lon: point.lon,
+            max_lon: point.lon,
+            center_lat,
+            center_lon,
+            first_point: Some(point),
+        },
+    );
+    1
+}
+
+fn aggregated_map_points(aggregation: NativeMapPointAggregation) -> Vec<MapPoint> {
+    aggregation
+        .buckets
+        .into_values()
+        .map(|bucket| {
+            if bucket.count == 1 {
+                if let Some(point) = bucket.first_point {
+                    return MapPoint {
+                        cell_id: Some(bucket.cell_id),
+                        ..point
+                    };
+                }
+            }
+            MapPoint {
+                media_id: None,
+                asset_id: None,
+                cell_id: Some(bucket.cell_id),
+                kind: None,
+                lat: bucket.center_lat,
+                lon: bucket.center_lon,
+                timestamp: None,
+                count: Some(bucket.count),
+                bounds: Some(GeoBounds {
+                    min_lat: bucket.min_lat,
+                    max_lat: bucket.max_lat,
+                    min_lon: bucket.min_lon,
+                    max_lon: bucket.max_lon,
+                }),
+            }
+        })
+        .collect()
+}
+
 fn visit_packed_map_record(
     record: NativePackedIndexRecord,
     query: &CatalogQuery,
-    limit: usize,
-    offset: usize,
-    matched: &mut usize,
-    points: &mut Vec<MapPoint>,
-) -> bool {
+    aggregation: &mut NativeMapPointAggregation,
+) -> Option<usize> {
     if !packed_record_matches_query(record, query) {
-        return true;
+        return None;
     }
-    if *matched >= offset {
-        points.push(MapPoint {
-            media_id: None,
-            asset_id: Some(record.asset_id),
-            kind: Some(kind_from_flags(record.kind_flags)),
-            lat: coordinate_from_e7(record.lat_e7),
-            lon: coordinate_from_e7(record.lon_e7),
-            timestamp: Some(record.timestamp_sec as i64 * 1000),
-        });
-        if points.len() > limit {
-            points.truncate(limit);
-            return false;
-        }
-    }
-    *matched += 1;
-    true
+    let point = MapPoint {
+        media_id: None,
+        asset_id: Some(record.asset_id),
+        cell_id: None,
+        kind: Some(kind_from_flags(record.kind_flags)),
+        lat: coordinate_from_e7(record.lat_e7),
+        lon: coordinate_from_e7(record.lon_e7),
+        timestamp: Some(record.timestamp_sec as i64 * 1000),
+        count: None,
+        bounds: None,
+    };
+    Some(add_map_point_to_aggregation(aggregation, point))
 }
 
 fn scan_packed_map_points(
     app: &AppHandle,
     query: &CatalogQuery,
+    map_aggregation: Option<&MapAggregationSpec>,
     limit: usize,
-    offset: usize,
-) -> AppResult<(MapPointPage, usize, usize, usize)> {
+    _offset: usize,
+) -> AppResult<(MapPointPage, usize, usize, usize, usize, usize, usize, usize, f64)> {
     let indexes_dir = catalog_indexes_dir(app)?;
     let (header, bytes) = read_packed_index_bytes(
         &indexes_dir.join(FILE_CATALOG_TIME_GEO_INDEX),
@@ -4317,11 +4505,12 @@ fn scan_packed_map_points(
     let end = packed_lower_bound(&bytes, header.entry_count, |timestamp| {
         timestamp <= max_time
     });
-    let mut points = Vec::<MapPoint>::new();
-    let mut matched = 0_usize;
+    let mut matched_records = 0_usize;
+    let mut largest_bubble_count = 0_usize;
     let mut pages_read = 0_usize;
     let mut candidates_inspected = 0_usize;
     let disk_read_bytes = bytes.len();
+    let mut aggregation = create_map_point_aggregation(map_aggregation, limit);
 
     if query.sort != "timestamp_asc" {
         let mut chunk_end = end;
@@ -4332,24 +4521,11 @@ fn scan_packed_map_points(
             for index in (chunk_start..chunk_end).rev() {
                 candidates_inspected += 1;
                 if let Some(record) = packed_record_at(&bytes, index) {
-                    if !visit_packed_map_record(
-                        record,
-                        query,
-                        limit,
-                        offset,
-                        &mut matched,
-                        &mut points,
-                    ) {
-                        return Ok((
-                            MapPointPage {
-                                points,
-                                limit_reached: Some(true),
-                                result_metrics: None,
-                            },
-                            pages_read,
-                            disk_read_bytes,
-                            candidates_inspected,
-                        ));
+                    if let Some(bucket_count) =
+                        visit_packed_map_record(record, query, &mut aggregation)
+                    {
+                        matched_records += 1;
+                        largest_bubble_count = largest_bubble_count.max(bucket_count);
                     }
                 }
             }
@@ -4363,24 +4539,11 @@ fn scan_packed_map_points(
             for index in chunk_start..chunk_end {
                 candidates_inspected += 1;
                 if let Some(record) = packed_record_at(&bytes, index) {
-                    if !visit_packed_map_record(
-                        record,
-                        query,
-                        limit,
-                        offset,
-                        &mut matched,
-                        &mut points,
-                    ) {
-                        return Ok((
-                            MapPointPage {
-                                points,
-                                limit_reached: Some(true),
-                                result_metrics: None,
-                            },
-                            pages_read,
-                            disk_read_bytes,
-                            candidates_inspected,
-                        ));
+                    if let Some(bucket_count) =
+                        visit_packed_map_record(record, query, &mut aggregation)
+                    {
+                        matched_records += 1;
+                        largest_bubble_count = largest_bubble_count.max(bucket_count);
                     }
                 }
             }
@@ -4388,15 +4551,32 @@ fn scan_packed_map_points(
         }
     }
 
+    let aggregation_zoom = aggregation.zoom;
+    let aggregation_cell_size_px = aggregation.cell_size_px;
+    let mut points = aggregated_map_points(aggregation);
+    let limit_reached = points.len() > limit;
+    if limit_reached {
+        points.sort_by(|left, right| {
+            (right.count.unwrap_or(1)).cmp(&left.count.unwrap_or(1))
+        });
+        points.truncate(limit);
+    }
+    let rendered_bubbles = points.len();
+
     Ok((
         MapPointPage {
             points,
-            limit_reached: Some(false),
+            limit_reached: Some(limit_reached),
             result_metrics: None,
         },
         pages_read,
         disk_read_bytes,
         candidates_inspected,
+        matched_records,
+        rendered_bubbles,
+        largest_bubble_count,
+        aggregation_zoom,
+        aggregation_cell_size_px,
     ))
 }
 
@@ -4594,15 +4774,27 @@ fn search_map_points(app: AppHandle, spec: SearchSpec) -> AppResult<MapPointPage
     let started_at = Instant::now();
     let (engine_id, engine_label) = file_search_engine(&spec)?;
     let mut index_stats = require_search_index_current(&app, engine_id, engine_label)?;
-    let limit = spec.limit.unwrap_or(500).clamp(1, 10_000) as usize;
+    let limit = spec
+        .limit
+        .unwrap_or(500)
+        .clamp(1, MAX_RENDERED_MAP_BUBBLES) as usize;
     let offset = spec.offset.unwrap_or(0).max(0) as usize;
     let query = search_spec_to_catalog_query(&spec, limit.saturating_add(1) as i64);
-    let (mut page, pages_read, disk_read_bytes, candidates_inspected) =
-        scan_packed_map_points(&app, &query, limit, offset)?;
+    let (
+        mut page,
+        pages_read,
+        disk_read_bytes,
+        candidates_inspected,
+        matched_records,
+        rendered_bubbles,
+        largest_bubble_count,
+        aggregation_zoom,
+        aggregation_cell_size_px,
+    ) = scan_packed_map_points(&app, &query, spec.map_aggregation.as_ref(), limit, offset)?;
     index_stats.pages_read = pages_read as i64;
     index_stats.disk_read_bytes = Some(disk_read_bytes);
     index_stats.candidates_inspected = candidates_inspected as i64;
-    page.result_metrics = Some(with_query_metrics(
+    let mut result_metrics = with_query_metrics(
         index_stats,
         &spec,
         "native",
@@ -4611,7 +4803,13 @@ fn search_map_points(app: AppHandle, spec: SearchSpec) -> AppResult<MapPointPage
         limit as i64,
         offset as i64,
         page.limit_reached.unwrap_or(false),
-    ));
+    );
+    result_metrics.matched_records = Some(matched_records);
+    result_metrics.rendered_bubbles = Some(rendered_bubbles);
+    result_metrics.largest_bubble_count = Some(largest_bubble_count);
+    result_metrics.aggregation_zoom = Some(aggregation_zoom);
+    result_metrics.aggregation_cell_size_px = Some(aggregation_cell_size_px);
+    page.result_metrics = Some(result_metrics);
     Ok(page)
 }
 

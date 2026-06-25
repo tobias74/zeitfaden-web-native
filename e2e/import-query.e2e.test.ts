@@ -82,6 +82,29 @@ async function waitForIndexCurrent(page: Page, panelTitle: string): Promise<void
   })
 }
 
+async function readMapMetricNumber(page: Page, label: string): Promise<number> {
+  return page.evaluate((metricLabel) => {
+    const mapSection = Array.from(document.querySelectorAll('.metrics-section'))
+      .find((section) =>
+        section.querySelector('.metrics-section-title')?.textContent?.trim() ===
+          'Map query',
+      )
+    if (!mapSection) throw new Error('Map query metrics section not found')
+
+    const metric = Array.from(mapSection.querySelectorAll('dl.metrics-grid > div'))
+      .find((row) => row.querySelector('dt')?.textContent?.trim() === metricLabel)
+    const value = metric?.querySelector('dd')?.textContent?.trim()
+    if (!value) throw new Error(`Map metric not found: ${metricLabel}`)
+
+    const normalized = value.replace(/[^\d.,-]/g, '').replace(/,/g, '')
+    const parsed = Number(normalized)
+    if (!Number.isFinite(parsed)) {
+      throw new Error(`Map metric is not numeric: ${metricLabel}=${value}`)
+    }
+    return parsed
+  }, label)
+}
+
 async function appDiagnostic(page: Page): Promise<string> {
   return page.evaluate(() => {
     const text = (selector: string) =>
@@ -140,9 +163,15 @@ function installGeneratedGeoFile(pageContext: BrowserContext): Promise<void> {
       window.localStorage.setItem('geo-media-index-lab:result-display-mode', 'cards')
       window.__ZEITFADEN_E2E_GEO_FILE__ = () => {
         const baseTime = new Date(2024, 0, 1, 0, 0, 0).getTime()
+        const columns = 400
         const locations = Array.from({ length: pointCount }, (_, index) => ({
-          latitudeE7: Math.round((47 + (index % 1_000) / 10_000) * 10_000_000),
-          longitudeE7: Math.round((8 + (index % 1_000) / 10_000) * 10_000_000),
+          latitudeE7: Math.round(
+            (35 + ((index % columns) / columns) * 25) * 10_000_000,
+          ),
+          longitudeE7: Math.round(
+            (-10 + ((Math.floor(index / columns) % 250) / 250) * 40) *
+              10_000_000,
+          ),
           timestamp: new Date(baseTime + index * 60_000).toISOString(),
         }))
         return new File(
@@ -218,6 +247,23 @@ describeE2E('geo import and query UI e2e', () => {
         page.locator('.media-card').filter({ hasText: 'zeitfaden-e2e' }).first()
           .innerText(),
       ).resolves.toContain('#1')
+    })
+
+    await runStep(page, 'Change map bubble density without warnings or stalls', async () => {
+      await page.locator('details.settings-menu summary').click()
+
+      await page.getByLabel('Map bubble density').selectOption('80')
+      await waitForMapIdle(page)
+      await expectNoUiError(page)
+      const spaciousBubbles = await readMapMetricNumber(page, 'Rendered bubbles')
+
+      await page.getByLabel('Map bubble density').selectOption('48')
+      await waitForMapIdle(page)
+      await expectNoUiError(page)
+      const compactBubbles = await readMapMetricNumber(page, 'Rendered bubbles')
+
+      expect(compactBubbles).toBeGreaterThanOrEqual(spaciousBubbles)
+      await expectNoUiError(page)
     })
 
     await runStep(page, 'Run bounded timeframe query', async () => {
