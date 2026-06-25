@@ -236,7 +236,7 @@ function areaCursorForPixel(map: Map, extent: Extent, pixel: Pixel): string {
     return 'move'
   }
 
-  return 'crosshair'
+  return 'grab'
 }
 
 function setMapCursor(target: HTMLElement, map: Map, cursor: string): void {
@@ -284,6 +284,7 @@ export function MapView({
     const extentInteraction = new ExtentInteraction({
       drag: false,
       boxStyle: boundsStyle,
+      createCondition: () => !hasGeoBoundsRef.current,
       pointerStyle: hiddenBoundsHandleStyle,
       pixelTolerance: 10,
     })
