@@ -397,6 +397,47 @@ describe('catalog worker packed query hot paths', () => {
     expect(minEdgeGap).toBeGreaterThanOrEqual(-1e-6)
   })
 
+  it('merges more bubbles as the bubble scale grows', async () => {
+    const records = makePackedRecords(20_000, () => 'geo_point')
+    const index = makePackedIndex(records)
+    const query: CatalogQuery = {
+      sort: 'timestamp_asc',
+      kind: 'geo_point',
+      hasGeo: true,
+      geoBounds: { minLat: -90, maxLat: 90, minLon: -180, maxLon: 180 },
+      limit: 5_000,
+      offset: 0,
+    }
+    const scanAtScale = (bubbleScale: number) =>
+      index.scanMapPoints(
+        0,
+        0xffffffff,
+        'asc',
+        query,
+        {
+          zoom: 4,
+          viewportWidthPx: 1024,
+          viewportHeightPx: 768,
+          bubbleCellSizePx: 64,
+          bubbleScale,
+        },
+        5_000,
+        0,
+        () => false,
+      )
+
+    const small = await scanAtScale(0.75)
+    const large = await scanAtScale(1.35)
+
+    // Bigger bubbles overlap (and therefore merge) more, so fewer remain.
+    expect(large.points.length).toBeLessThan(small.points.length)
+    // Merging never drops records: every point is still accounted for.
+    const totalCount = (page: typeof small) =>
+      page.points.reduce((sum, point) => sum + (point.count ?? 1), 0)
+    expect(totalCount(small)).toBe(records.length)
+    expect(totalCount(large)).toBe(records.length)
+  })
+
   it('uses stable globally anchored map bucket ids at integer zoom levels', async () => {
     const records = makePackedRecords(5_000, () => 'geo_point')
     const index = makePackedIndex(records)

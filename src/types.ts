@@ -123,6 +123,9 @@ export type SearchSpec = TimeRange & {
     viewportWidthPx: number
     viewportHeightPx: number
     bubbleCellSizePx: number
+    // Multiplier applied to cluster bubble radii. Drives both rendering and the
+    // worker's overlap-merge geometry, so they must use the same value.
+    bubbleScale?: number
   }
   order: SearchOrder
   limit?: number

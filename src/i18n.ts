@@ -103,6 +103,12 @@ const en = {
   mapBubbleDensitySpacious: 'Spacious (80 px)',
   mapBubbleDensityHint:
     'Controls stable map bubble spacing. Denser settings show more bubbles.',
+  mapBubbleSize: 'Map bubble size',
+  mapBubbleSizeHint:
+    'Scales cluster bubbles. Larger bubbles merge more aggressively, so fewer are shown.',
+  mapMaxBubbles: 'Max map bubbles',
+  mapMaxBubblesHint:
+    'Upper limit on bubbles drawn at once. Higher shows more detail but costs performance.',
   matchedRecords: 'Matched records',
   mapRenderBatchSize: 'Map render batch',
   mapRenderBatchSizeHint:
@@ -268,6 +274,12 @@ const de: Record<TranslationKey, string> = {
   mapBubbleDensitySpacious: 'Großzuegig (80 px)',
   mapBubbleDensityHint:
     'Steuert den stabilen Abstand der Kartenblasen. Dichtere Einstellungen zeigen mehr Blasen.',
+  mapBubbleSize: 'Größe der Kartenblasen',
+  mapBubbleSizeHint:
+    'Skaliert die Cluster-Blasen. Größere Blasen werden stärker zusammengefasst, daher werden weniger angezeigt.',
+  mapMaxBubbles: 'Max. Kartenblasen',
+  mapMaxBubblesHint:
+    'Obergrenze für gleichzeitig gezeichnete Blasen. Höher zeigt mehr Details, kostet aber Leistung.',
   matchedRecords: 'Treffer',
   mapRenderBatchSize: 'Karten-Render-Batch',
   mapRenderBatchSizeHint:

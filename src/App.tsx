@@ -96,13 +96,18 @@ const RESULT_METADATA_KEY = 'geo-media-index-lab:result-metadata'
 const RESULT_PAGE_SIZE_KEY = 'geo-media-index-lab:result-page-size'
 const MAP_BUBBLE_CELL_SIZE_KEY = 'geo-media-index-lab:map-bubble-cell-size'
 const MAP_RENDER_BATCH_SIZE_KEY = 'geo-media-index-lab:map-render-batch-size'
+const MAP_BUBBLE_SCALE_KEY = 'geo-media-index-lab:map-bubble-scale'
+const MAP_MAX_BUBBLES_KEY = 'geo-media-index-lab:map-max-bubbles'
 const RESULT_PAGE_SIZE_OPTIONS = [50, 100, 250, 500] as const
 const MAP_BUBBLE_CELL_SIZE_OPTIONS = [48, 64, 80] as const
 const MAP_RENDER_BATCH_SIZE_OPTIONS = [100, 250, 500, 1_000, 2_500] as const
+const MAP_BUBBLE_SCALE_OPTIONS = [0.75, 1, 1.35] as const
+const MAP_MAX_BUBBLES_OPTIONS = [2_000, 5_000, 10_000] as const
 const DEFAULT_RESULT_PAGE_SIZE = 100
 const DEFAULT_MAP_BUBBLE_CELL_SIZE = 64
 const DEFAULT_MAP_RENDER_BATCH_SIZE = 500
-const MAX_RENDERED_MAP_BUBBLES = 5_000
+const DEFAULT_MAP_BUBBLE_SCALE = 1
+const DEFAULT_MAP_MAX_BUBBLES = 5_000
 const DEFAULT_DISTANCE_ENGINE_ID = 'segmented-ball-tree'
 const CATALOG_QUERY_INDEX_ID = 'file-time-geo'
 const DISTANCE_ENGINE_IDS = [
@@ -628,6 +633,24 @@ function App() {
       MAP_RENDER_BATCH_SIZE_OPTIONS,
     ),
   )
+  const [mapBubbleScale, setMapBubbleScaleState] = useState<
+    (typeof MAP_BUBBLE_SCALE_OPTIONS)[number]
+  >(() =>
+    storedNumberOption(
+      MAP_BUBBLE_SCALE_KEY,
+      DEFAULT_MAP_BUBBLE_SCALE,
+      MAP_BUBBLE_SCALE_OPTIONS,
+    ),
+  )
+  const [mapMaxBubbles, setMapMaxBubblesState] = useState<
+    (typeof MAP_MAX_BUBBLES_OPTIONS)[number]
+  >(() =>
+    storedNumberOption(
+      MAP_MAX_BUBBLES_KEY,
+      DEFAULT_MAP_MAX_BUBBLES,
+      MAP_MAX_BUBBLES_OPTIONS,
+    ),
+  )
   const search = useSearchState({
     allowedIndexIds: DISTANCE_ENGINE_IDS,
     defaultSelectedIndexId: DEFAULT_DISTANCE_ENGINE_ID,
@@ -810,17 +833,26 @@ function App() {
         viewportWidthPx: visibleMapViewport.widthPx,
         viewportHeightPx: visibleMapViewport.heightPx,
         bubbleCellSizePx: mapBubbleCellSize,
+        bubbleScale: mapBubbleScale,
       },
       order: {
         kind: 'timestamp',
         sort: catalogSort,
         engineId: CATALOG_QUERY_INDEX_ID,
       },
-      limit: MAX_RENDERED_MAP_BUBBLES,
+      limit: mapMaxBubbles,
       offset: 0,
       purpose: 'map',
     }) : undefined,
-    [catalogSort, kindFilter, mapBubbleCellSize, timeRange, visibleMapViewport],
+    [
+      catalogSort,
+      kindFilter,
+      mapBubbleCellSize,
+      mapBubbleScale,
+      mapMaxBubbles,
+      timeRange,
+      visibleMapViewport,
+    ],
   )
   const {
     results: resultItems,
@@ -1091,6 +1123,26 @@ function App() {
       MAP_RENDER_BATCH_SIZE_KEY,
       String(nextBatchSize),
     )
+  }, [])
+
+  const setMapBubbleScale = useCallback((scale: number) => {
+    const nextScale = MAP_BUBBLE_SCALE_OPTIONS.includes(
+      scale as (typeof MAP_BUBBLE_SCALE_OPTIONS)[number],
+    )
+      ? (scale as (typeof MAP_BUBBLE_SCALE_OPTIONS)[number])
+      : DEFAULT_MAP_BUBBLE_SCALE
+    setMapBubbleScaleState(nextScale)
+    window.localStorage.setItem(MAP_BUBBLE_SCALE_KEY, String(nextScale))
+  }, [])
+
+  const setMapMaxBubbles = useCallback((value: number) => {
+    const nextValue = MAP_MAX_BUBBLES_OPTIONS.includes(
+      value as (typeof MAP_MAX_BUBBLES_OPTIONS)[number],
+    )
+      ? (value as (typeof MAP_MAX_BUBBLES_OPTIONS)[number])
+      : DEFAULT_MAP_MAX_BUBBLES
+    setMapMaxBubblesState(nextValue)
+    window.localStorage.setItem(MAP_MAX_BUBBLES_KEY, String(nextValue))
   }, [])
 
   const toggleMetadata = useCallback((enabled: boolean) => {
@@ -1406,6 +1458,46 @@ function App() {
                 </div>
                 <div className="display-section">
                   <label className="settings-select-row">
+                    {t('mapBubbleSize')}
+                    <select
+                      value={mapBubbleScale}
+                      onChange={(event) =>
+                        setMapBubbleScale(Number(event.target.value))
+                      }
+                    >
+                      {MAP_BUBBLE_SCALE_OPTIONS.map((scale) => (
+                        <option key={scale} value={scale}>
+                          {scale === 0.75
+                            ? t('small')
+                            : scale === 1
+                              ? t('medium')
+                              : t('large')}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="settings-hint">{t('mapBubbleSizeHint')}</p>
+                </div>
+                <div className="display-section">
+                  <label className="settings-select-row">
+                    {t('mapMaxBubbles')}
+                    <select
+                      value={mapMaxBubbles}
+                      onChange={(event) =>
+                        setMapMaxBubbles(Number(event.target.value))
+                      }
+                    >
+                      {MAP_MAX_BUBBLES_OPTIONS.map((value) => (
+                        <option key={value} value={value}>
+                          {value.toLocaleString(locale)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="settings-hint">{t('mapMaxBubblesHint')}</p>
+                </div>
+                <div className="display-section">
+                  <label className="settings-select-row">
                     {t('mapRenderBatchSize')}
                     <select
                       value={mapRenderBatchSize}
@@ -1564,6 +1656,7 @@ function App() {
               queryPoint={distanceSortActive ? queryPoint : undefined}
               geoItems={mapItems}
               renderBatchSize={mapRenderBatchSize}
+              bubbleScale={mapBubbleScale}
               geoBounds={geoBounds}
               boundsDrawing={boundsDrawing}
               label={t('searchMap')}

@@ -1087,6 +1087,7 @@ type PackedMapPointAggregation = {
   zoom: number
   worldSize: number
   cellSizePx: number
+  bubbleScale: number
   buckets: Map<string, PackedMapPointBucket>
 }
 
@@ -1112,10 +1113,12 @@ function createMapPointAggregation(
     (viewportWidthPx * viewportHeightPx) / Math.max(1, limit),
   )
   const cellSizePx = Math.max(requestedCellSizePx, budgetCellSizePx)
+  const bubbleScale = Math.max(0.1, options?.bubbleScale ?? 1)
   return {
     zoom,
     worldSize: WEB_MERCATOR_TILE_SIZE * 2 ** zoom,
     cellSizePx,
+    bubbleScale,
     buckets: new Map(),
   }
 }
@@ -1145,14 +1148,16 @@ function lonLatToWorldPixel(
 const BUBBLE_STROKE_PX = 2
 const SINGLE_POINT_RADIUS_PX = 4 + 1.5
 
-function bubbleRadiusForCount(count: number): number {
+function bubbleRadiusForCount(count: number, scale: number): number {
   if (count <= 1) return SINGLE_POINT_RADIUS_PX
   const radius = count >= 1_000 ? 18 : count >= 100 ? 15 : count >= 10 ? 12 : 10
-  return radius + BUBBLE_STROKE_PX
+  return radius * scale + BUBBLE_STROKE_PX
 }
 
 // Upper bound on any bubble radius, used to size the collision spatial hash.
-const MAX_BUBBLE_RADIUS_PX = bubbleRadiusForCount(Number.MAX_SAFE_INTEGER)
+function maxBubbleRadius(scale: number): number {
+  return bubbleRadiusForCount(Number.MAX_SAFE_INTEGER, scale)
+}
 
 function mapPointBucket(
   aggregation: PackedMapPointAggregation,
@@ -1228,6 +1233,7 @@ function mergeBuckets(
 function mergeOverlappingClusters(
   clusters: PackedMapPointBucket[],
   worldSize: number,
+  bubbleScale: number,
 ): PackedMapPointBucket[] {
   let current = clusters
   while (current.length > 1) {
@@ -1244,7 +1250,7 @@ function mergeOverlappingClusters(
       )
       px[i] = pixel.x
       py[i] = pixel.y
-      radius[i] = bubbleRadiusForCount(cluster.count)
+      radius[i] = bubbleRadiusForCount(cluster.count, bubbleScale)
     }
 
     const parent = new Int32Array(n)
@@ -1264,7 +1270,7 @@ function mergeOverlappingClusters(
     // hash with that cell size only needs to compare each bubble with its 3x3
     // neighbourhood. Each bubble is inserted after it is queried, so every
     // unordered pair is considered exactly once.
-    const gridSize = 2 * MAX_BUBBLE_RADIUS_PX
+    const gridSize = 2 * maxBubbleRadius(bubbleScale)
     const grid = new Map<string, number[]>()
     let merged = false
     for (let i = 0; i < n; i += 1) {
@@ -1308,6 +1314,7 @@ function aggregatedMapPoints(aggregation: PackedMapPointAggregation): MapPoint[]
   const clusters = mergeOverlappingClusters(
     [...aggregation.buckets.values()],
     aggregation.worldSize,
+    aggregation.bubbleScale,
   )
   return clusters.map((cluster) => {
     if (cluster.count === 1 && cluster.firstPoint) {

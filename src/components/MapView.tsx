@@ -31,6 +31,7 @@ type MapViewProps = {
   queryPoint?: QueryPoint
   geoItems: MapPoint[]
   renderBatchSize: number
+  bubbleScale: number
   geoBounds?: GeoBounds
   boundsDrawing: boolean
   label: string
@@ -77,7 +78,7 @@ function featureBubbleCount(feature: FeatureLike): number {
   return Number.isFinite(count) && count > 0 ? count : 1
 }
 
-function mapPointStyle(feature: FeatureLike): Style {
+function mapPointStyle(feature: FeatureLike, scale: number): Style {
   const count = featureBubbleCount(feature)
   if (count <= 1) {
     return baseStyle
@@ -86,13 +87,13 @@ function mapPointStyle(feature: FeatureLike): Style {
   const sizeBucket =
     count >= 1_000 ? 'huge' : count >= 100 ? 'large' : count >= 10 ? 'medium' : 'small'
   const label = formatBubbleCount(count)
-  const key = `${sizeBucket}:${label}`
+  const key = `${scale}:${sizeBucket}:${label}`
   const cachedStyle = mapPointStyleCache.get(key)
   if (cachedStyle) return cachedStyle
 
   // Radii must stay in sync with bubbleRadiusForCount() in
   // platform/web/catalog.worker.ts, which uses them to merge overlapping bubbles.
-  const radius =
+  const baseRadius =
     sizeBucket === 'huge'
       ? 18
       : sizeBucket === 'large'
@@ -100,6 +101,7 @@ function mapPointStyle(feature: FeatureLike): Style {
         : sizeBucket === 'medium'
           ? 12
           : 10
+  const radius = baseRadius * scale
   const style = new Style({
     image: new CircleStyle({
       radius,
@@ -264,6 +266,7 @@ export function MapView({
   queryPoint,
   geoItems,
   renderBatchSize,
+  bubbleScale,
   geoBounds,
   boundsDrawing,
   label,
@@ -273,6 +276,10 @@ export function MapView({
 }: MapViewProps) {
   const targetRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<Map | null>(null)
+  // Read by the point-layer style closure; kept current so a bubble-size change
+  // restyles features on the next render without re-creating the map.
+  const bubbleScaleRef = useRef(bubbleScale)
+  bubbleScaleRef.current = bubbleScale
   const extentInteractionRef = useRef<ExtentInteraction | null>(null)
   const boundsDrawingRef = useRef(boundsDrawing)
   const hasGeoBoundsRef = useRef(Boolean(geoBounds))
@@ -288,7 +295,7 @@ export function MapView({
     const target = targetRef.current
     const pointLayer = new VectorLayer({
       source: sourceRef.current,
-      style: mapPointStyle,
+      style: (feature) => mapPointStyle(feature, bubbleScaleRef.current),
     })
     const queryLayer = new VectorLayer({
       source: querySourceRef.current,
