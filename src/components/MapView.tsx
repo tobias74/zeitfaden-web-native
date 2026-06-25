@@ -90,25 +90,27 @@ function mapPointStyle(feature: FeatureLike): Style {
   const cachedStyle = mapPointStyleCache.get(key)
   if (cachedStyle) return cachedStyle
 
+  // Radii must stay in sync with bubbleRadiusForCount() in
+  // platform/web/catalog.worker.ts, which uses them to merge overlapping bubbles.
   const radius =
     sizeBucket === 'huge'
-      ? 26
+      ? 18
       : sizeBucket === 'large'
-        ? 22
+        ? 15
         : sizeBucket === 'medium'
-          ? 18
-          : 15
+          ? 12
+          : 10
   const style = new Style({
     image: new CircleStyle({
       radius,
       fill: new Fill({ color: '#235d67' }),
-      stroke: new Stroke({ color: '#ffffff', width: 2.5 }),
+      stroke: new Stroke({ color: '#ffffff', width: 2 }),
     }),
     text: new Text({
       text: label,
       fill: new Fill({ color: '#ffffff' }),
       stroke: new Stroke({ color: '#173b43', width: 2 }),
-      font: '700 12px system-ui, sans-serif',
+      font: '700 10px system-ui, sans-serif',
     }),
   })
 

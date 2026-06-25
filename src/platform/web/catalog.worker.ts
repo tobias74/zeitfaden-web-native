@@ -1080,8 +1080,6 @@ type PackedMapPointBucket = {
   maxLat: number
   minLon: number
   maxLon: number
-  centerLat: number
-  centerLon: number
   firstPoint?: MapPoint
 }
 
@@ -1141,24 +1139,25 @@ function lonLatToWorldPixel(
   }
 }
 
-function worldPixelToLonLat(
-  x: number,
-  y: number,
-  worldSize: number,
-): { lat: number; lon: number } {
-  const lon = (x / worldSize) * 360 - 180
-  const n = Math.PI - (2 * Math.PI * y) / worldSize
-  const lat = (180 / Math.PI) * Math.atan(Math.sinh(n))
-  return {
-    lat: Math.max(-90, Math.min(90, lat)),
-    lon: Math.max(-180, Math.min(180, lon)),
-  }
+// Cluster bubble radii in CSS pixels, mirroring mapPointStyle()/baseStyle in
+// components/MapView.tsx (circle radius + stroke). Used to detect when two
+// rendered bubbles overlap so they can be merged.
+const BUBBLE_STROKE_PX = 2
+const SINGLE_POINT_RADIUS_PX = 4 + 1.5
+
+function bubbleRadiusForCount(count: number): number {
+  if (count <= 1) return SINGLE_POINT_RADIUS_PX
+  const radius = count >= 1_000 ? 18 : count >= 100 ? 15 : count >= 10 ? 12 : 10
+  return radius + BUBBLE_STROKE_PX
 }
+
+// Upper bound on any bubble radius, used to size the collision spatial hash.
+const MAX_BUBBLE_RADIUS_PX = bubbleRadiusForCount(Number.MAX_SAFE_INTEGER)
 
 function mapPointBucket(
   aggregation: PackedMapPointAggregation,
   point: MapPoint,
-): { cellId: string; centerLat: number; centerLon: number } {
+): string {
   const pixel = lonLatToWorldPixel(point.lon, point.lat, aggregation.worldSize)
   const cellsPerRow = Math.max(
     1,
@@ -1172,23 +1171,14 @@ function mapPointBucket(
     0,
     Math.min(cellsPerRow - 1, Math.floor(pixel.y / aggregation.cellSizePx)),
   )
-  const center = worldPixelToLonLat(
-    (cellX + 0.5) * aggregation.cellSizePx,
-    (cellY + 0.5) * aggregation.cellSizePx,
-    aggregation.worldSize,
-  )
-  return {
-    cellId: `${aggregation.zoom}/${cellX}/${cellY}`,
-    centerLat: center.lat,
-    centerLon: center.lon,
-  }
+  return `${aggregation.zoom}/${cellX}/${cellY}`
 }
 
 function addMapPointToAggregation(
   aggregation: PackedMapPointAggregation,
   point: MapPoint,
 ): number {
-  const { cellId, centerLat, centerLon } = mapPointBucket(aggregation, point)
+  const cellId = mapPointBucket(aggregation, point)
   const bucket = aggregation.buckets.get(cellId)
   if (bucket) {
     bucket.count += 1
@@ -1210,32 +1200,135 @@ function addMapPointToAggregation(
     maxLat: point.lat,
     minLon: point.lon,
     maxLon: point.lon,
-    centerLat,
-    centerLon,
     firstPoint: point,
   })
   return 1
 }
 
+function mergeBuckets(
+  target: PackedMapPointBucket,
+  source: PackedMapPointBucket,
+): void {
+  target.count += source.count
+  target.sumLat += source.sumLat
+  target.sumLon += source.sumLon
+  target.minLat = Math.min(target.minLat, source.minLat)
+  target.maxLat = Math.max(target.maxLat, source.maxLat)
+  target.minLon = Math.min(target.minLon, source.minLon)
+  target.maxLon = Math.max(target.maxLon, source.maxLon)
+  // A merged cluster no longer represents a single openable media item.
+  target.firstPoint = undefined
+}
+
+// Grid binning splits points along hard cell boundaries, so two clusters either
+// side of a boundary can render on top of each other. Repeatedly merge any
+// clusters whose rendered circles overlap, re-placing the result at the
+// count-weighted centroid of its members. Merging grows a cluster's radius and
+// can create new overlaps, so iterate until a pass merges nothing.
+function mergeOverlappingClusters(
+  clusters: PackedMapPointBucket[],
+  worldSize: number,
+): PackedMapPointBucket[] {
+  let current = clusters
+  while (current.length > 1) {
+    const n = current.length
+    const px = new Float64Array(n)
+    const py = new Float64Array(n)
+    const radius = new Float64Array(n)
+    for (let i = 0; i < n; i += 1) {
+      const cluster = current[i]
+      const pixel = lonLatToWorldPixel(
+        cluster.sumLon / cluster.count,
+        cluster.sumLat / cluster.count,
+        worldSize,
+      )
+      px[i] = pixel.x
+      py[i] = pixel.y
+      radius[i] = bubbleRadiusForCount(cluster.count)
+    }
+
+    const parent = new Int32Array(n)
+    for (let i = 0; i < n; i += 1) parent[i] = i
+    const find = (value: number): number => {
+      let root = value
+      while (parent[root] !== root) root = parent[root]
+      while (parent[value] !== root) {
+        const next = parent[value]
+        parent[value] = root
+        value = next
+      }
+      return root
+    }
+
+    // Any overlapping pair is closer than 2*MAX_BUBBLE_RADIUS_PX, so a spatial
+    // hash with that cell size only needs to compare each bubble with its 3x3
+    // neighbourhood. Each bubble is inserted after it is queried, so every
+    // unordered pair is considered exactly once.
+    const gridSize = 2 * MAX_BUBBLE_RADIUS_PX
+    const grid = new Map<string, number[]>()
+    let merged = false
+    for (let i = 0; i < n; i += 1) {
+      const gx = Math.floor(px[i] / gridSize)
+      const gy = Math.floor(py[i] / gridSize)
+      for (let dx = -1; dx <= 1; dx += 1) {
+        for (let dy = -1; dy <= 1; dy += 1) {
+          const neighbours = grid.get(`${gx + dx}/${gy + dy}`)
+          if (!neighbours) continue
+          for (const j of neighbours) {
+            if (find(i) === find(j)) continue
+            const dist = Math.hypot(px[i] - px[j], py[i] - py[j])
+            if (dist < radius[i] + radius[j]) {
+              parent[find(i)] = find(j)
+              merged = true
+            }
+          }
+        }
+      }
+      const key = `${gx}/${gy}`
+      const own = grid.get(key)
+      if (own) own.push(i)
+      else grid.set(key, [i])
+    }
+
+    if (!merged) break
+
+    const groups = new Map<number, PackedMapPointBucket>()
+    for (let i = 0; i < n; i += 1) {
+      const root = find(i)
+      const existing = groups.get(root)
+      if (existing) mergeBuckets(existing, current[i])
+      else groups.set(root, { ...current[i] })
+    }
+    current = [...groups.values()]
+  }
+  return current
+}
+
 function aggregatedMapPoints(aggregation: PackedMapPointAggregation): MapPoint[] {
-  return [...aggregation.buckets.values()].map((bucket) => {
-    if (bucket.count === 1 && bucket.firstPoint) {
+  const clusters = mergeOverlappingClusters(
+    [...aggregation.buckets.values()],
+    aggregation.worldSize,
+  )
+  return clusters.map((cluster) => {
+    if (cluster.count === 1 && cluster.firstPoint) {
       return {
-        ...bucket.firstPoint,
-        cellId: bucket.cellId,
+        ...cluster.firstPoint,
+        cellId: cluster.cellId,
       }
     }
 
+    // Natural placement at the count-weighted centroid of the cluster's members.
+    // Overlaps have already been resolved by mergeOverlappingClusters.
     return {
-      cellId: bucket.cellId,
-      lat: bucket.centerLat,
-      lon: bucket.centerLon,
-      count: bucket.count,
+      cellId: cluster.cellId,
+      lat: cluster.sumLat / cluster.count,
+      lon: cluster.sumLon / cluster.count,
+      count: cluster.count,
       bounds: {
-        minLat: bucket.minLat,
-        maxLat: bucket.maxLat,
-        minLon: bucket.minLon,
-        maxLon: bucket.maxLon,
+        minLat: cluster.minLat,
+        maxLat: cluster.maxLat,
+        minLon: cluster.minLon,
+        maxLon: cluster.maxLon,
       },
     }
   })
@@ -1695,9 +1788,12 @@ export class ResidentPackedGeoIndex {
     const metrics = { pagesRead: 0, diskReadBytes: 0, candidatesInspected: 0 }
     const aggregation = createMapPointAggregation(mapAggregation, limit)
     let matchedRecords = 0
-    let largestBubbleCount = 0
     const page = (): PackedMapPointScanPage => {
       const aggregatedPoints = aggregatedMapPoints(aggregation)
+      const largestBubbleCount = aggregatedPoints.reduce(
+        (largest, point) => Math.max(largest, point.count ?? 1),
+        0,
+      )
       const limitedPoints =
         aggregatedPoints.length > limit
           ? [...aggregatedPoints]
@@ -1762,9 +1858,8 @@ export class ResidentPackedGeoIndex {
         timestamp: view.getUint32(recordOffset, true) * 1000,
       }
 
-      const bucketCount = addMapPointToAggregation(aggregation, point)
+      addMapPointToAggregation(aggregation, point)
       matchedRecords += 1
-      largestBubbleCount = Math.max(largestBubbleCount, bucketCount)
     }
 
     if (direction === 'desc') {

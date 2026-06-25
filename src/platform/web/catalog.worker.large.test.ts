@@ -19,6 +19,33 @@ import {
 const LARGE_RECORD_COUNT = 100_000
 const textEncoder = new TextEncoder()
 
+const MAP_TILE_SIZE = 256
+const MAP_MERCATOR_MAX_LAT = 85.0511287798066
+
+// Independent re-implementations of the worker's Web-Mercator projection and the
+// MapView bubble radii, so the overlap assertion below is a true black-box check.
+function lonLatToScreenPixel(
+  lon: number,
+  lat: number,
+  worldSize: number,
+): { x: number; y: number } {
+  const clampedLat = Math.max(
+    -MAP_MERCATOR_MAX_LAT,
+    Math.min(MAP_MERCATOR_MAX_LAT, lat),
+  )
+  const sinLat = Math.sin((clampedLat * Math.PI) / 180)
+  return {
+    x: ((Math.max(-180, Math.min(180, lon)) + 180) / 360) * worldSize,
+    y: (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * worldSize,
+  }
+}
+
+function bubbleRadiusPx(count: number): number {
+  if (count <= 1) return 4 + 1.5
+  const radius = count >= 1_000 ? 18 : count >= 100 ? 15 : count >= 10 ? 12 : 10
+  return radius + 2
+}
+
 type MemoryFileHandle = {
   getFile(): Promise<File>
 }
@@ -296,6 +323,78 @@ describe('catalog worker packed query hot paths', () => {
           point.lon <= query.geoBounds!.maxLon,
       ),
     ).toBe(true)
+  })
+
+  it('places aggregated bubbles so they never overlap on screen', async () => {
+    const records = makePackedRecords(20_000, () => 'geo_point')
+    const index = makePackedIndex(records)
+    const query: CatalogQuery = {
+      sort: 'timestamp_asc',
+      kind: 'geo_point',
+      hasGeo: true,
+      geoBounds: { minLat: -90, maxLat: 90, minLon: -180, maxLon: 180 },
+      limit: 5_000,
+      offset: 0,
+    }
+    const page = await index.scanMapPoints(
+      0,
+      0xffffffff,
+      'asc',
+      query,
+      {
+        zoom: 4,
+        viewportWidthPx: 1024,
+        viewportHeightPx: 768,
+        bubbleCellSizePx: 64,
+      },
+      5_000,
+      0,
+      () => false,
+    )
+
+    const worldSize = MAP_TILE_SIZE * 2 ** page.aggregationZoom
+    const cellSize = page.aggregationCellSizePx
+    const bubbles = page.points.map((point) => ({
+      ...lonLatToScreenPixel(point.lon, point.lat, worldSize),
+      radius: bubbleRadiusPx(point.count ?? 1),
+    }))
+
+    // Bucket bubbles by cell so each is only compared against nearby ones. Any
+    // overlapping pair is within 2*maxRadius (< cellSize) of each other, so it
+    // always lands in an adjacent bucket and is checked.
+    const grid = new Map<string, typeof bubbles>()
+    for (const bubble of bubbles) {
+      const key = `${Math.floor(bubble.x / cellSize)}/${Math.floor(bubble.y / cellSize)}`
+      const list = grid.get(key)
+      if (list) list.push(bubble)
+      else grid.set(key, [bubble])
+    }
+
+    let minEdgeGap = Number.POSITIVE_INFINITY
+    for (const bubble of bubbles) {
+      const gx = Math.floor(bubble.x / cellSize)
+      const gy = Math.floor(bubble.y / cellSize)
+      for (let dx = -1; dx <= 1; dx += 1) {
+        for (let dy = -1; dy <= 1; dy += 1) {
+          const neighbours = grid.get(`${gx + dx}/${gy + dy}`)
+          if (!neighbours) continue
+          for (const other of neighbours) {
+            if (other === bubble) continue
+            const distance = Math.hypot(bubble.x - other.x, bubble.y - other.y)
+            minEdgeGap = Math.min(
+              minEdgeGap,
+              distance - bubble.radius - other.radius,
+            )
+          }
+        }
+      }
+    }
+
+    expect(page.points.some((point) => (point.count ?? 1) > 1)).toBe(true)
+    // Guard against a vacuous pass: at least one neighbouring pair was compared.
+    expect(Number.isFinite(minEdgeGap)).toBe(true)
+    // No bubble fills overlap: closest edge-to-edge gap stays non-negative.
+    expect(minEdgeGap).toBeGreaterThanOrEqual(-1e-6)
   })
 
   it('uses stable globally anchored map bucket ids at integer zoom levels', async () => {
