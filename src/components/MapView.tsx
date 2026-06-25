@@ -63,13 +63,7 @@ const boundsStyle = new Style({
   stroke: new Stroke({ color: '#d84d2a', width: 2 }),
 })
 
-const boundsHandleStyle = new Style({
-  image: new CircleStyle({
-    radius: 5,
-    fill: new Fill({ color: '#ffffff' }),
-    stroke: new Stroke({ color: '#d84d2a', width: 2 }),
-  }),
-})
+const hiddenBoundsHandleStyle = new Style({})
 
 const clusterStyleCache = new globalThis.Map<string, Style>()
 const CLUSTER_BOUNDS_PADDING_RATIO = 0.12
@@ -282,7 +276,7 @@ export function MapView({
     const extentInteraction = new ExtentInteraction({
       drag: true,
       boxStyle: boundsStyle,
-      pointerStyle: boundsHandleStyle,
+      pointerStyle: hiddenBoundsHandleStyle,
       pixelTolerance: 10,
     })
     extentInteraction.setActive(boundsDrawingRef.current)
