@@ -1,5 +1,6 @@
 export type MediaKind = 'image' | 'video' | 'geo_point'
 export type KindFilter = MediaKind | 'all' | 'media'
+export type MapDisplayMode = 'bubbles' | 'polyline'
 
 export type MediaLocation = {
   id: string
@@ -77,8 +78,22 @@ export type MapPoint = {
   bounds?: GeoBounds
 }
 
+export type MapPolylinePoint = {
+  lat: number
+  lon: number
+}
+
+export type MapPolyline = {
+  points: MapPolylinePoint[]
+  bounds?: GeoBounds
+  sourcePointCount: number
+  simplifiedPointCount: number
+  tolerancePx: number
+}
+
 export type MapPointPage = {
   points: MapPoint[]
+  polyline?: MapPolyline
   limitReached?: boolean
   resultMetrics?: SearchResultMetrics
 }
@@ -126,6 +141,11 @@ export type SearchSpec = TimeRange & {
     // Multiplier applied to cluster bubble radii. Drives both rendering and the
     // worker's overlap-merge geometry, so they must use the same value.
     bubbleScale?: number
+  }
+  mapMode?: MapDisplayMode
+  mapPolyline?: {
+    tolerancePx: number
+    maxPoints: number
   }
   order: SearchOrder
   limit?: number
@@ -206,6 +226,9 @@ export type SearchIndexStats = GeoIndexStats & {
   matchedRecords?: number
   renderedBubbles?: number
   largestBubbleCount?: number
+  sourceLinePoints?: number
+  renderedLinePoints?: number
+  simplificationTolerancePx?: number
   aggregationZoom?: number
   aggregationCellSizePx?: number
   rowsReturned?: number

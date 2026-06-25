@@ -3,6 +3,7 @@ import type { CatalogBackend } from '../platform/types'
 import type {
   EnrichedSearchResult,
   MapPoint,
+  MapPolyline,
   SearchIndexStats,
   SearchSpec,
   ValidationReport,
@@ -77,6 +78,7 @@ function clientTimedMetrics(
 function mapFallbackMetrics(
   spec: SearchSpec,
   points: MapPoint[],
+  polyline: MapPolyline | undefined,
   limitReached: boolean,
 ): SearchIndexStats {
   return {
@@ -84,7 +86,7 @@ function mapFallbackMetrics(
     engineId: spec.order.engineId ?? 'file-time-geo',
     engineLabel: 'Time-first packed index',
     queryPurpose: 'map',
-    rowsReturned: points.length,
+    rowsReturned: polyline?.simplifiedPointCount ?? points.length,
     limit: spec.limit ?? 0,
     offset: spec.offset ?? 0,
     limitReached,
@@ -106,6 +108,7 @@ export function useSearchResults({
   setResults(results: EnrichedSearchResult[]): void
   pageLimitReached: boolean
   mapItems: MapPoint[]
+  mapPolyline: MapPolyline | undefined
   mapLoading: boolean
   resultMetrics: SearchIndexStats
   mapMetrics: SearchIndexStats
@@ -118,6 +121,7 @@ export function useSearchResults({
   const [loading, setLoading] = useState(false)
   const [pageLimitReached, setPageLimitReached] = useState(false)
   const [mapItems, setMapItems] = useState<MapPoint[]>([])
+  const [mapPolyline, setMapPolyline] = useState<MapPolyline>()
   const [mapLoading, setMapLoading] = useState(false)
   const [resultMetrics, setResultMetrics] =
     useState<SearchIndexStats>(defaultResultMetrics)
@@ -134,6 +138,7 @@ export function useSearchResults({
     mapAbortControllerRef.current?.abort()
     mapAbortControllerRef.current = undefined
     setMapItems([])
+    setMapPolyline(undefined)
     setMapLoading(false)
     setMapMetrics(defaultMapMetrics)
   }, [])
@@ -279,6 +284,7 @@ export function useSearchResults({
           mapFallbackMetrics(
             activeMapSpec,
             page.points,
+            page.polyline,
             Boolean(page.limitReached),
           )
         const responseMetrics = clientTimedMetrics(
@@ -287,6 +293,7 @@ export function useSearchResults({
           responseAt,
         )
         setMapItems(page.points)
+        setMapPolyline(page.polyline)
         setMapMetrics(responseMetrics)
         onError('')
         setMapLoading(false)
@@ -329,6 +336,7 @@ export function useSearchResults({
     setResults,
     pageLimitReached,
     mapItems,
+    mapPolyline,
     mapLoading,
     resultMetrics,
     mapMetrics,

@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { dateInputEndToMillis, dateInputToMillis } from './lib/time'
 import type { CatalogBackend, CatalogInfo, PlatformBackend } from './platform/types'
-import type { MediaItem, SearchPage, SearchSpec } from './types'
+import type { MapDisplayMode, MapPolyline, MediaItem, SearchPage, SearchSpec } from './types'
 
 vi.mock('./components/MapView', async () => {
   const React = await import('react')
@@ -12,6 +12,8 @@ vi.mock('./components/MapView', async () => {
       onQueryPointChange,
       onVisibleViewportChange,
       hoverPoint,
+      mapMode,
+      polyline,
     }: {
       onQueryPointChange?: (point: { lat: number; lon: number }) => void
       onVisibleViewportChange?: (viewport: {
@@ -26,6 +28,8 @@ vi.mock('./components/MapView', async () => {
         heightPx: number
       }) => void
       hoverPoint?: { lat: number; lon: number }
+      mapMode?: MapDisplayMode
+      polyline?: MapPolyline
     }) => {
       React.useEffect(() => {
         onVisibleViewportChange?.({
@@ -72,6 +76,10 @@ vi.mock('./components/MapView', async () => {
           />
           <div data-testid="map-hover-point">
             {hoverPoint ? `${hoverPoint.lat},${hoverPoint.lon}` : ''}
+          </div>
+          <div data-testid="map-mode">{mapMode}</div>
+          <div data-testid="map-polyline-count">
+            {polyline?.points.length ?? 0}
           </div>
         </>
       )
@@ -222,6 +230,22 @@ function createPlatform(): PlatformBackend {
             })
         })
       }
+      if (spec.mapMode === 'polyline') {
+        return {
+          points: [],
+          polyline: {
+            points: [
+              { lat: 47, lon: 8 },
+              { lat: 47.2, lon: 8.2 },
+            ],
+            bounds: { minLat: 47, maxLat: 47.2, minLon: 8, maxLon: 8.2 },
+            sourcePointCount: 25,
+            simplifiedPointCount: 2,
+            tolerancePx: spec.mapPolyline?.tolerancePx ?? 2,
+          },
+          limitReached: false,
+        }
+      }
       return {
         points: createMapPoints(spec.offset ?? 0, spec.limit ?? 100),
         limitReached: false,
@@ -338,6 +362,7 @@ describe('App pagination', () => {
         searchMapPointCalls.some(
           (query) =>
             query.purpose === 'map' &&
+            query.mapMode === 'bubbles' &&
             query.limit === 5000 &&
             query.geoBounds?.minLat === 47 &&
             query.geoBounds.maxLat === 48 &&
@@ -424,6 +449,7 @@ describe('App pagination', () => {
         searchMapPointCalls.some(
           (query) =>
             query.purpose === 'map' &&
+            query.mapMode === 'bubbles' &&
             query.limit === 5_000 &&
             query.mapAggregation?.bubbleCellSizePx === 48 &&
             query.mapAggregation.zoom === 4.4 &&
@@ -444,6 +470,69 @@ describe('App pagination', () => {
         ),
       ).toBe('250')
     })
+  })
+
+  it('persists the map display mode and sends a polyline map query', async () => {
+    const { default: App } = await import('./App')
+
+    render(<App />)
+
+    expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
+    await waitFor(() => {
+      expect(screen.getByTestId('map-mode').textContent).toBe('bubbles')
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Line' }))
+
+    await waitFor(() => {
+      expect(
+        window.localStorage.getItem('geo-media-index-lab:map-display-mode'),
+      ).toBe('polyline')
+      expect(screen.getByTestId('map-mode').textContent).toBe('polyline')
+      expect(screen.getByTestId('map-polyline-count').textContent).toBe('2')
+      expect(
+        searchMapPointCalls.some(
+          (query) =>
+            query.purpose === 'map' &&
+            query.mapMode === 'polyline' &&
+            query.kind === 'geo_point' &&
+            query.order.kind === 'timestamp' &&
+            query.order.sort === 'timestamp_asc' &&
+            query.limit === 10_000 &&
+            query.mapPolyline?.tolerancePx === 2 &&
+            query.mapPolyline.maxPoints === 10_000,
+        ),
+      ).toBe(true)
+    })
+  })
+
+  it('aborts stale map searches when switching map display modes', async () => {
+    let releaseMapSearch!: () => void
+    mapSearchDelay = new Promise((resolve) => {
+      releaseMapSearch = resolve
+    })
+    const { default: App } = await import('./App')
+
+    render(<App />)
+
+    expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
+    await waitFor(() => {
+      expect(mapSearchSignals).toHaveLength(1)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Line' }))
+
+    await waitFor(() => {
+      expect(mapSearchSignals[0].aborted).toBe(true)
+      expect(mapSearchSignals).toHaveLength(2)
+      expect(
+        searchMapPointCalls.some(
+          (query) => query.purpose === 'map' && query.mapMode === 'polyline',
+        ),
+      ).toBe(true)
+    })
+
+    releaseMapSearch()
   })
 
   it('aborts the previous map search when the map moves again', async () => {
@@ -469,6 +558,7 @@ describe('App pagination', () => {
         searchMapPointCalls.some(
           (query) =>
             query.purpose === 'map' &&
+            query.mapMode === 'bubbles' &&
             query.geoBounds?.minLat === 49 &&
             query.geoBounds.maxLat === 50 &&
             query.geoBounds.minLon === 10 &&
@@ -579,6 +669,7 @@ describe('App pagination', () => {
         searchMapPointCalls.some(
           (query) =>
             query.purpose === 'map' &&
+            query.mapMode === 'bubbles' &&
             query.kind === 'video' &&
             query.startTime === dateInputToMillis('2020-01-02T03:04') &&
             query.endTime === dateInputEndToMillis('2020-01-03T04:05') &&

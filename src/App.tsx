@@ -4,6 +4,7 @@ import {
   Calendar,
   ChevronLeft,
   ChevronRight,
+  CircleDot,
   FileText,
   FolderOpen,
   Images,
@@ -12,6 +13,7 @@ import {
   List,
   MapPin,
   RefreshCw,
+  Route,
   Save,
   Settings2,
   Trash2,
@@ -68,6 +70,7 @@ import type {
   EnrichedSearchResult,
   GeoBounds,
   KindFilter,
+  MapDisplayMode,
   MediaItem,
   SearchIndexStats,
   SearchSpec,
@@ -96,6 +99,7 @@ const RESULT_THUMBNAIL_SIZE_KEY = 'geo-media-index-lab:result-thumbnail-size'
 const RESULT_METADATA_KEY = 'geo-media-index-lab:result-metadata'
 const DEBUG_DATA_KEY = 'geo-media-index-lab:debug-data'
 const RESULT_PAGE_SIZE_KEY = 'geo-media-index-lab:result-page-size'
+const MAP_DISPLAY_MODE_KEY = 'geo-media-index-lab:map-display-mode'
 const MAP_BUBBLE_CELL_SIZE_KEY = 'geo-media-index-lab:map-bubble-cell-size'
 const MAP_RENDER_BATCH_SIZE_KEY = 'geo-media-index-lab:map-render-batch-size'
 const MAP_BUBBLE_SCALE_KEY = 'geo-media-index-lab:map-bubble-scale'
@@ -110,6 +114,8 @@ const DEFAULT_MAP_BUBBLE_CELL_SIZE = 64
 const DEFAULT_MAP_RENDER_BATCH_SIZE = 500
 const DEFAULT_MAP_BUBBLE_SCALE = 1
 const DEFAULT_MAP_MAX_BUBBLES = 5_000
+const MAP_POLYLINE_TOLERANCE_PX = 2
+const MAP_POLYLINE_MAX_POINTS = 10_000
 const DEFAULT_DISTANCE_ENGINE_ID = 'segmented-ball-tree'
 const CATALOG_QUERY_INDEX_ID = 'file-time-geo'
 const DISTANCE_ENGINE_IDS = [
@@ -737,6 +743,9 @@ function App() {
   const [mapHeight, setMapHeight] = useState(() =>
     Math.max(MIN_MAP_HEIGHT, storedNumber(MAP_HEIGHT_KEY, DEFAULT_MAP_HEIGHT)),
   )
+  const [mapDisplayMode, setMapDisplayModeState] = useState<MapDisplayMode>(() =>
+    storedString(MAP_DISPLAY_MODE_KEY, 'bubbles', ['bubbles', 'polyline']),
+  )
   const [visibleMapViewport, setVisibleMapViewport] = useState<MapViewport>()
   const [hoveredResultId, setHoveredResultId] = useState<string>()
   const workspaceRef = useRef<HTMLElement | null>(null)
@@ -836,32 +845,63 @@ function App() {
     ],
   )
   const mapSearchSpec = useMemo<SearchSpec | undefined>(
-    () => visibleMapViewport ? ({
-      ...timeRange,
-      kind: kindFilter,
-      hasGeo: true,
-      geoBounds: visibleMapViewport.bounds,
-      mapAggregation: {
+    () => {
+      if (!visibleMapViewport) return undefined
+
+      const mapAggregation = {
         zoom: visibleMapViewport.zoom,
         viewportWidthPx: visibleMapViewport.widthPx,
         viewportHeightPx: visibleMapViewport.heightPx,
         bubbleCellSizePx: mapBubbleCellSize,
         bubbleScale: mapBubbleScale,
-      },
-      order: {
-        kind: 'timestamp',
-        sort: catalogSort,
-        engineId: CATALOG_QUERY_INDEX_ID,
-      },
-      limit: mapMaxBubbles,
-      offset: 0,
-      purpose: 'map',
-    }) : undefined,
+      }
+
+      if (mapDisplayMode === 'polyline') {
+        return {
+          ...timeRange,
+          kind: 'geo_point',
+          hasGeo: true,
+          geoBounds: visibleMapViewport.bounds,
+          mapAggregation,
+          mapMode: 'polyline',
+          mapPolyline: {
+            tolerancePx: MAP_POLYLINE_TOLERANCE_PX,
+            maxPoints: MAP_POLYLINE_MAX_POINTS,
+          },
+          order: {
+            kind: 'timestamp',
+            sort: 'timestamp_asc',
+            engineId: CATALOG_QUERY_INDEX_ID,
+          },
+          limit: MAP_POLYLINE_MAX_POINTS,
+          offset: 0,
+          purpose: 'map',
+        }
+      }
+
+      return {
+        ...timeRange,
+        kind: kindFilter,
+        hasGeo: true,
+        geoBounds: visibleMapViewport.bounds,
+        mapAggregation,
+        mapMode: 'bubbles',
+        order: {
+          kind: 'timestamp',
+          sort: catalogSort,
+          engineId: CATALOG_QUERY_INDEX_ID,
+        },
+        limit: mapMaxBubbles,
+        offset: 0,
+        purpose: 'map',
+      }
+    },
     [
       catalogSort,
       kindFilter,
       mapBubbleCellSize,
       mapBubbleScale,
+      mapDisplayMode,
       mapMaxBubbles,
       timeRange,
       visibleMapViewport,
@@ -873,6 +913,7 @@ function App() {
     setResults: setSearchResults,
     pageLimitReached,
     mapItems,
+    mapPolyline,
     mapLoading,
     resultMetrics,
     mapMetrics,
@@ -1142,6 +1183,11 @@ function App() {
   const setThumbnailSize = useCallback((size: ResultThumbnailSize) => {
     setResultThumbnailSize(size)
     window.localStorage.setItem(RESULT_THUMBNAIL_SIZE_KEY, size)
+  }, [])
+
+  const setMapDisplayMode = useCallback((mode: MapDisplayMode) => {
+    setMapDisplayModeState(mode)
+    window.localStorage.setItem(MAP_DISPLAY_MODE_KEY, mode)
   }, [])
 
   const setMapBubbleCellSize = useCallback((cellSize: number) => {
@@ -1723,6 +1769,8 @@ function App() {
               queryPoint={distanceSortActive ? queryPoint : undefined}
               hoverPoint={hoveredResultPoint}
               geoItems={mapItems}
+              mapMode={mapDisplayMode}
+              polyline={mapPolyline}
               renderBatchSize={mapRenderBatchSize}
               bubbleScale={mapBubbleScale}
               geoBounds={geoBounds}
@@ -1738,6 +1786,32 @@ function App() {
               </div>
             )}
             <div className="map-area-tools">
+              <div
+                className="map-mode-control"
+                role="group"
+                aria-label={t('mapDisplayMode')}
+              >
+                <button
+                  type="button"
+                  className={mapDisplayMode === 'bubbles' ? 'active' : undefined}
+                  aria-pressed={mapDisplayMode === 'bubbles'}
+                  onClick={() => setMapDisplayMode('bubbles')}
+                  title={t('mapDisplayBubbles')}
+                >
+                  <CircleDot size={16} />
+                  {t('mapDisplayBubbles')}
+                </button>
+                <button
+                  type="button"
+                  className={mapDisplayMode === 'polyline' ? 'active' : undefined}
+                  aria-pressed={mapDisplayMode === 'polyline'}
+                  onClick={() => setMapDisplayMode('polyline')}
+                  title={t('mapDisplayLine')}
+                >
+                  <Route size={16} />
+                  {t('mapDisplayLine')}
+                </button>
+              </div>
               {geoBounds ? (
                 <button
                   type="button"
@@ -2132,6 +2206,25 @@ function App() {
                   <div>
                     <dt>{t('matchedRecords')}</dt>
                     <dd>{statsNumber(mapMetrics.matchedRecords, locale)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('sourceLinePoints')}</dt>
+                    <dd>{statsNumber(mapMetrics.sourceLinePoints, locale)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('renderedLinePoints')}</dt>
+                    <dd>{statsNumber(mapMetrics.renderedLinePoints, locale)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('simplificationTolerance')}</dt>
+                    <dd>
+                      {`${statsNumber(
+                        typeof mapMetrics.simplificationTolerancePx === 'number'
+                          ? Number(mapMetrics.simplificationTolerancePx.toFixed(2))
+                          : undefined,
+                        locale,
+                      )} px`}
+                    </dd>
                   </div>
                   <div>
                     <dt>{t('largestBubble')}</dt>

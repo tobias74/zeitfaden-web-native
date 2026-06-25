@@ -160,8 +160,28 @@ struct MapPoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct MapPolylinePoint {
+    lat: f64,
+    lon: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MapPolyline {
+    points: Vec<MapPolylinePoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bounds: Option<GeoBounds>,
+    source_point_count: usize,
+    simplified_point_count: usize,
+    tolerance_px: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MapPointPage {
     points: Vec<MapPoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    polyline: Option<MapPolyline>,
     limit_reached: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     result_metrics: Option<SearchIndexStats>,
@@ -249,12 +269,21 @@ struct MapAggregationSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct MapPolylineSpec {
+    tolerance_px: f64,
+    max_points: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SearchSpec {
     kind: Option<String>,
     source_id: Option<String>,
     has_geo: Option<bool>,
     geo_bounds: Option<GeoBounds>,
     map_aggregation: Option<MapAggregationSpec>,
+    map_mode: Option<String>,
+    map_polyline: Option<MapPolylineSpec>,
     order: SearchOrder,
     limit: Option<i64>,
     offset: Option<i64>,
@@ -306,6 +335,9 @@ struct SearchIndexStats {
     matched_records: Option<usize>,
     rendered_bubbles: Option<usize>,
     largest_bubble_count: Option<usize>,
+    source_line_points: Option<usize>,
+    rendered_line_points: Option<usize>,
+    simplification_tolerance_px: Option<f64>,
     aggregation_zoom: Option<usize>,
     aggregation_cell_size_px: Option<f64>,
     limit: Option<i64>,
@@ -652,6 +684,9 @@ fn empty_search_index_stats(engine_id: &str, engine_label: &str) -> SearchIndexS
         matched_records: None,
         rendered_bubbles: None,
         largest_bubble_count: None,
+        source_line_points: None,
+        rendered_line_points: None,
+        simplification_tolerance_px: None,
         aggregation_zoom: None,
         aggregation_cell_size_px: None,
         limit: None,
@@ -707,6 +742,9 @@ fn search_stats_from_geo(
         matched_records: None,
         rendered_bubbles: None,
         largest_bubble_count: None,
+        source_line_points: None,
+        rendered_line_points: None,
+        simplification_tolerance_px: None,
         aggregation_zoom: None,
         aggregation_cell_size_px: None,
         limit: None,
@@ -4372,6 +4410,222 @@ fn world_pixel_to_lon_lat(x: f64, y: f64, world_size: f64) -> (f64, f64) {
     (lat.clamp(-90.0, 90.0), lon.clamp(-180.0, 180.0))
 }
 
+struct NativePolylineAccumulator {
+    lat: Vec<f64>,
+    lon: Vec<f64>,
+    x: Vec<f64>,
+    y: Vec<f64>,
+    min_lat: f64,
+    max_lat: f64,
+    min_lon: f64,
+    max_lon: f64,
+}
+
+impl NativePolylineAccumulator {
+    fn new() -> Self {
+        Self {
+            lat: Vec::new(),
+            lon: Vec::new(),
+            x: Vec::new(),
+            y: Vec::new(),
+            min_lat: f64::INFINITY,
+            max_lat: f64::NEG_INFINITY,
+            min_lon: f64::INFINITY,
+            max_lon: f64::NEG_INFINITY,
+        }
+    }
+
+    fn push(&mut self, lat: f64, lon: f64, world_size: f64) {
+        let (x, y) = lon_lat_to_world_pixel(lon, lat, world_size);
+        self.lat.push(lat);
+        self.lon.push(lon);
+        self.x.push(x);
+        self.y.push(y);
+        self.min_lat = self.min_lat.min(lat);
+        self.max_lat = self.max_lat.max(lat);
+        self.min_lon = self.min_lon.min(lon);
+        self.max_lon = self.max_lon.max(lon);
+    }
+
+    fn len(&self) -> usize {
+        self.lat.len()
+    }
+}
+
+fn radial_distance_simplify(
+    accumulator: &NativePolylineAccumulator,
+    tolerance_px: f64,
+) -> Vec<usize> {
+    let count = accumulator.len();
+    if count <= 2 || tolerance_px <= 0.0 {
+        return (0..count).collect();
+    }
+
+    let tolerance_sq = tolerance_px * tolerance_px;
+    let mut kept = vec![0_usize];
+    let mut previous = 0_usize;
+    for index in 1..count - 1 {
+        let dx = accumulator.x[index] - accumulator.x[previous];
+        let dy = accumulator.y[index] - accumulator.y[previous];
+        if dx * dx + dy * dy >= tolerance_sq {
+            kept.push(index);
+            previous = index;
+        }
+    }
+    kept.push(count - 1);
+    kept
+}
+
+fn perpendicular_distance_sq(
+    px: f64,
+    py: f64,
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
+) -> f64 {
+    let dx = bx - ax;
+    let dy = by - ay;
+    if dx == 0.0 && dy == 0.0 {
+        let point_dx = px - ax;
+        let point_dy = py - ay;
+        return point_dx * point_dx + point_dy * point_dy;
+    }
+    let t = (((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+    let closest_x = ax + t * dx;
+    let closest_y = ay + t * dy;
+    let point_dx = px - closest_x;
+    let point_dy = py - closest_y;
+    point_dx * point_dx + point_dy * point_dy
+}
+
+fn douglas_peucker_simplify(
+    accumulator: &NativePolylineAccumulator,
+    candidate_indices: &[usize],
+    tolerance_px: f64,
+) -> Vec<usize> {
+    if candidate_indices.len() <= 2 || tolerance_px <= 0.0 {
+        return candidate_indices.to_vec();
+    }
+
+    let tolerance_sq = tolerance_px * tolerance_px;
+    let mut keep = vec![false; candidate_indices.len()];
+    keep[0] = true;
+    keep[candidate_indices.len() - 1] = true;
+    let mut stack = vec![(0_usize, candidate_indices.len() - 1)];
+
+    while let Some((start, end)) = stack.pop() {
+        if end <= start + 1 {
+            continue;
+        }
+
+        let start_index = candidate_indices[start];
+        let end_index = candidate_indices[end];
+        let ax = accumulator.x[start_index];
+        let ay = accumulator.y[start_index];
+        let bx = accumulator.x[end_index];
+        let by = accumulator.y[end_index];
+        let mut max_distance_sq = -1.0_f64;
+        let mut max_index = None;
+
+        for index in start + 1..end {
+            let point_index = candidate_indices[index];
+            let distance_sq = perpendicular_distance_sq(
+                accumulator.x[point_index],
+                accumulator.y[point_index],
+                ax,
+                ay,
+                bx,
+                by,
+            );
+            if distance_sq > max_distance_sq {
+                max_distance_sq = distance_sq;
+                max_index = Some(index);
+            }
+        }
+
+        if max_distance_sq > tolerance_sq {
+            if let Some(index) = max_index {
+                keep[index] = true;
+                stack.push((start, index));
+                stack.push((index, end));
+            }
+        }
+    }
+
+    candidate_indices
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| keep[index].then_some(*value))
+        .collect()
+}
+
+fn simplify_polyline(
+    accumulator: &NativePolylineAccumulator,
+    requested_tolerance_px: f64,
+    max_points: usize,
+) -> (Vec<usize>, f64) {
+    let count = accumulator.len();
+    if count <= 2 {
+        return ((0..count).collect(), requested_tolerance_px.max(0.0));
+    }
+
+    let safe_max_points = max_points.max(2);
+    let mut tolerance_px = requested_tolerance_px.max(0.0);
+    let mut indices = Vec::<usize>::new();
+    for _ in 0..16 {
+        let radial = radial_distance_simplify(accumulator, tolerance_px);
+        indices = douglas_peucker_simplify(accumulator, &radial, tolerance_px);
+        if indices.len() <= safe_max_points {
+            return (indices, tolerance_px);
+        }
+        tolerance_px = (tolerance_px + 0.5)
+            .max(tolerance_px * ((indices.len() as f64 / safe_max_points as f64).sqrt()) * 1.25);
+    }
+
+    if indices.len() <= safe_max_points {
+        return (indices, tolerance_px);
+    }
+
+    let last = count - 1;
+    let mut sampled = Vec::<usize>::with_capacity(safe_max_points);
+    sampled.push(0);
+    for index in 1..safe_max_points - 1 {
+        sampled.push(((index as f64 / (safe_max_points - 1) as f64) * last as f64).round() as usize);
+    }
+    sampled.push(last);
+    sampled.sort_unstable();
+    sampled.dedup();
+    (sampled, tolerance_px)
+}
+
+fn polyline_from_accumulator(
+    accumulator: &NativePolylineAccumulator,
+    requested_tolerance_px: f64,
+    max_points: usize,
+) -> MapPolyline {
+    let (indices, tolerance_px) =
+        simplify_polyline(accumulator, requested_tolerance_px, max_points);
+    MapPolyline {
+        points: indices
+            .iter()
+            .map(|index| MapPolylinePoint {
+                lat: accumulator.lat[*index],
+                lon: accumulator.lon[*index],
+            })
+            .collect(),
+        bounds: (accumulator.len() > 0).then_some(GeoBounds {
+            min_lat: accumulator.min_lat,
+            max_lat: accumulator.max_lat,
+            min_lon: accumulator.min_lon,
+            max_lon: accumulator.max_lon,
+        }),
+        source_point_count: accumulator.len(),
+        simplified_point_count: indices.len(),
+        tolerance_px,
+    }
+}
+
 fn map_point_bucket(
     aggregation: &NativeMapPointAggregation,
     point: &MapPoint,
@@ -4573,6 +4827,7 @@ fn scan_packed_map_points(
     Ok((
         MapPointPage {
             points,
+            polyline: None,
             limit_reached: Some(limit_reached),
             result_metrics: None,
         },
@@ -4584,6 +4839,105 @@ fn scan_packed_map_points(
         largest_bubble_count,
         aggregation_zoom,
         aggregation_cell_size_px,
+    ))
+}
+
+fn scan_packed_map_polyline(
+    app: &AppHandle,
+    query: &CatalogQuery,
+    map_aggregation: Option<&MapAggregationSpec>,
+    map_polyline: Option<&MapPolylineSpec>,
+) -> AppResult<(MapPointPage, usize, usize, usize, usize, usize, usize, f64)> {
+    let indexes_dir = catalog_indexes_dir(app)?;
+    let (header, bytes) = read_packed_index_bytes(
+        &indexes_dir.join(FILE_CATALOG_TIME_GEO_INDEX),
+        INDEX_KIND_TIME_GEO,
+    )?;
+    let min_time = query.start_time.map(timestamp_seconds).unwrap_or(0);
+    let max_time = query.end_time.map(timestamp_seconds).unwrap_or(u32::MAX);
+    let start = packed_lower_bound(&bytes, header.entry_count, |timestamp| timestamp < min_time);
+    let end = packed_lower_bound(&bytes, header.entry_count, |timestamp| {
+        timestamp <= max_time
+    });
+    let zoom = map_aggregation
+        .map(|options| options.zoom.floor().clamp(0.0, 24.0) as i32)
+        .unwrap_or(0);
+    let world_size = WEB_MERCATOR_TILE_SIZE * 2_f64.powi(zoom);
+    let requested_tolerance_px = map_polyline
+        .map(|options| options.tolerance_px.max(0.0))
+        .unwrap_or(2.0);
+    let max_points = map_polyline
+        .map(|options| options.max_points)
+        .unwrap_or(10_000)
+        .clamp(2, 100_000);
+    let mut accumulator = NativePolylineAccumulator::new();
+    let mut pages_read = 0_usize;
+    let mut candidates_inspected = 0_usize;
+    let disk_read_bytes = bytes.len();
+
+    if query.sort != "timestamp_asc" {
+        let mut chunk_end = end;
+        while chunk_end > start {
+            let count = PACKED_SCAN_RECORDS.min(chunk_end - start);
+            let chunk_start = chunk_end - count;
+            pages_read += 1;
+            for index in (chunk_start..chunk_end).rev() {
+                candidates_inspected += 1;
+                let Some(record) = packed_record_at(&bytes, index) else {
+                    continue;
+                };
+                if !packed_record_matches_query(record, query) {
+                    continue;
+                }
+                accumulator.push(
+                    coordinate_from_e7(record.lat_e7),
+                    coordinate_from_e7(record.lon_e7),
+                    world_size,
+                );
+            }
+            chunk_end = chunk_start;
+        }
+    } else {
+        let mut chunk_start = start;
+        while chunk_start < end {
+            let chunk_end = (chunk_start + PACKED_SCAN_RECORDS).min(end);
+            pages_read += 1;
+            for index in chunk_start..chunk_end {
+                candidates_inspected += 1;
+                let Some(record) = packed_record_at(&bytes, index) else {
+                    continue;
+                };
+                if !packed_record_matches_query(record, query) {
+                    continue;
+                }
+                accumulator.push(
+                    coordinate_from_e7(record.lat_e7),
+                    coordinate_from_e7(record.lon_e7),
+                    world_size,
+                );
+            }
+            chunk_start = chunk_end;
+        }
+    }
+
+    let polyline = polyline_from_accumulator(&accumulator, requested_tolerance_px, max_points);
+    let source_line_points = polyline.source_point_count;
+    let rendered_line_points = polyline.simplified_point_count;
+    let simplification_tolerance_px = polyline.tolerance_px;
+    Ok((
+        MapPointPage {
+            points: Vec::new(),
+            polyline: Some(polyline),
+            limit_reached: Some(false),
+            result_metrics: None,
+        },
+        pages_read,
+        disk_read_bytes,
+        candidates_inspected,
+        accumulator.len(),
+        source_line_points,
+        rendered_line_points,
+        simplification_tolerance_px,
     ))
 }
 
@@ -4787,6 +5141,46 @@ fn search_map_points(app: AppHandle, spec: SearchSpec) -> AppResult<MapPointPage
         .clamp(1, MAX_RENDERED_MAP_BUBBLES) as usize;
     let offset = spec.offset.unwrap_or(0).max(0) as usize;
     let query = search_spec_to_catalog_query(&spec, limit.saturating_add(1) as i64);
+    if spec.map_mode.as_deref() == Some("polyline") {
+        let (
+            mut page,
+            pages_read,
+            disk_read_bytes,
+            candidates_inspected,
+            matched_records,
+            source_line_points,
+            rendered_line_points,
+            simplification_tolerance_px,
+        ) = scan_packed_map_polyline(
+            &app,
+            &query,
+            spec.map_aggregation.as_ref(),
+            spec.map_polyline.as_ref(),
+        )?;
+        index_stats.pages_read = pages_read as i64;
+        index_stats.disk_read_bytes = Some(disk_read_bytes);
+        index_stats.candidates_inspected = candidates_inspected as i64;
+        let mut result_metrics = with_query_metrics(
+            index_stats,
+            &spec,
+            "native",
+            started_at.elapsed().as_secs_f64() * 1000.0,
+            rendered_line_points,
+            spec.map_polyline
+                .as_ref()
+                .map(|options| options.max_points as i64)
+                .unwrap_or(limit as i64),
+            offset as i64,
+            false,
+        );
+        result_metrics.matched_records = Some(matched_records);
+        result_metrics.source_line_points = Some(source_line_points);
+        result_metrics.rendered_line_points = Some(rendered_line_points);
+        result_metrics.simplification_tolerance_px = Some(simplification_tolerance_px);
+        page.result_metrics = Some(result_metrics);
+        return Ok(page);
+    }
+
     let (
         mut page,
         pages_read,

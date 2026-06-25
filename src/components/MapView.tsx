@@ -1,6 +1,7 @@
 import Feature from 'ol/Feature'
 import Map from 'ol/Map'
 import View from 'ol/View'
+import LineString from 'ol/geom/LineString'
 import Point from 'ol/geom/Point'
 import ExtentInteraction from 'ol/interaction/Extent'
 import TileLayer from 'ol/layer/Tile'
@@ -10,7 +11,7 @@ import OSM from 'ol/source/OSM'
 import VectorSource from 'ol/source/Vector'
 import { Circle as CircleStyle, Fill, Stroke, Style, Text } from 'ol/style'
 import { useEffect, useRef } from 'react'
-import type { GeoBounds, MapPoint } from '../types'
+import type { GeoBounds, MapDisplayMode, MapPoint, MapPolyline } from '../types'
 import type { FeatureLike } from 'ol/Feature'
 import type { Extent } from 'ol/extent'
 import type { Pixel } from 'ol/pixel'
@@ -31,6 +32,8 @@ type MapViewProps = {
   queryPoint?: QueryPoint
   hoverPoint?: QueryPoint
   geoItems: MapPoint[]
+  mapMode: MapDisplayMode
+  polyline?: MapPolyline
   renderBatchSize: number
   bubbleScale: number
   geoBounds?: GeoBounds
@@ -63,6 +66,21 @@ const boundsStyle = new Style({
 })
 
 const hiddenBoundsHandleStyle = new Style({})
+
+const polylineStyle = [
+  new Style({
+    stroke: new Stroke({
+      color: 'rgba(255, 255, 255, 0.92)',
+      width: 6,
+    }),
+  }),
+  new Style({
+    stroke: new Stroke({
+      color: '#1b6571',
+      width: 3,
+    }),
+  }),
+]
 
 const mapPointStyleCache = new globalThis.Map<string, Style>()
 const AREA_CURSOR_TOLERANCE_PX = 10
@@ -291,6 +309,8 @@ export function MapView({
   queryPoint,
   hoverPoint,
   geoItems,
+  mapMode,
+  polyline,
   renderBatchSize,
   bubbleScale,
   geoBounds,
@@ -312,6 +332,7 @@ export function MapView({
   const pendingBoundsExtentRef = useRef<Extent | undefined>(undefined)
   const syncingBoundsRef = useRef(false)
   const sourceRef = useRef(new VectorSource())
+  const lineSourceRef = useRef(new VectorSource())
   const querySourceRef = useRef(new VectorSource())
   const hoverSourceRef = useRef(new VectorSource())
   const renderJobRef = useRef(0)
@@ -323,6 +344,10 @@ export function MapView({
     const pointLayer = new VectorLayer({
       source: sourceRef.current,
       style: (feature) => mapPointStyle(feature, bubbleScaleRef.current),
+    })
+    const lineLayer = new VectorLayer({
+      source: lineSourceRef.current,
+      style: polylineStyle,
     })
     const queryLayer = new VectorLayer({
       source: querySourceRef.current,
@@ -347,6 +372,7 @@ export function MapView({
         new TileLayer({
           source: new OSM(),
         }),
+        lineLayer,
         pointLayer,
         queryLayer,
         hoverLayer,
@@ -475,6 +501,7 @@ export function MapView({
     let timer: number | undefined
 
     source.clear(true)
+    if (mapMode !== 'bubbles') return
 
     function addNextBatch() {
       if (jobId !== renderJobRef.current) return
@@ -506,7 +533,23 @@ export function MapView({
       if (renderJobRef.current === jobId) renderJobRef.current += 1
       if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [geoItems, renderBatchSize])
+  }, [geoItems, mapMode, renderBatchSize])
+
+  useEffect(() => {
+    const lineSource = lineSourceRef.current
+    lineSource.clear(true)
+
+    if (mapMode !== 'polyline' || !polyline || polyline.points.length < 2) {
+      return
+    }
+
+    const feature = new Feature({
+      geometry: new LineString(
+        polyline.points.map((point) => fromLonLat([point.lon, point.lat])),
+      ),
+    })
+    lineSource.addFeature(feature)
+  }, [mapMode, polyline])
 
   useEffect(() => {
     const querySource = querySourceRef.current

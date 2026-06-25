@@ -25,6 +25,7 @@ import type {
   GeoSearchResult,
   MapPoint,
   MapPointPage,
+  MapPolyline,
   MediaItem,
   MediaLocation,
   MediaSource,
@@ -1086,6 +1087,14 @@ type PackedMapPointScanPage = MapPointPage & {
   aggregationCellSizePx: number
 }
 
+type PackedMapPolylineScanPage = MapPointPage & {
+  metrics: PackedIndexMetrics
+  matchedRecords: number
+  sourceLinePoints: number
+  renderedLinePoints: number
+  simplificationTolerancePx: number
+}
+
 type PackedMapPointBucket = {
   cellId: string
   count: number
@@ -1154,6 +1163,259 @@ function lonLatToWorldPixel(
     y:
       (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) *
       worldSize,
+  }
+}
+
+type PolylineAccumulator = {
+  lat: Float64Array
+  lon: Float64Array
+  x: Float64Array
+  y: Float64Array
+  count: number
+  minLat: number
+  maxLat: number
+  minLon: number
+  maxLon: number
+}
+
+function createPolylineAccumulator(capacity = 1024): PolylineAccumulator {
+  return {
+    lat: new Float64Array(capacity),
+    lon: new Float64Array(capacity),
+    x: new Float64Array(capacity),
+    y: new Float64Array(capacity),
+    count: 0,
+    minLat: Number.POSITIVE_INFINITY,
+    maxLat: Number.NEGATIVE_INFINITY,
+    minLon: Number.POSITIVE_INFINITY,
+    maxLon: Number.NEGATIVE_INFINITY,
+  }
+}
+
+function ensurePolylineCapacity(
+  accumulator: PolylineAccumulator,
+  nextCount: number,
+): void {
+  if (nextCount <= accumulator.lat.length) return
+
+  let nextCapacity = accumulator.lat.length
+  while (nextCapacity < nextCount) nextCapacity *= 2
+  const grow = (current: Float64Array) => {
+    const next = new Float64Array(nextCapacity)
+    next.set(current)
+    return next
+  }
+  accumulator.lat = grow(accumulator.lat)
+  accumulator.lon = grow(accumulator.lon)
+  accumulator.x = grow(accumulator.x)
+  accumulator.y = grow(accumulator.y)
+}
+
+function addPolylinePoint(
+  accumulator: PolylineAccumulator,
+  lat: number,
+  lon: number,
+  worldSize: number,
+): void {
+  ensurePolylineCapacity(accumulator, accumulator.count + 1)
+  const pixel = lonLatToWorldPixel(lon, lat, worldSize)
+  const index = accumulator.count
+  accumulator.lat[index] = lat
+  accumulator.lon[index] = lon
+  accumulator.x[index] = pixel.x
+  accumulator.y[index] = pixel.y
+  accumulator.count += 1
+  accumulator.minLat = Math.min(accumulator.minLat, lat)
+  accumulator.maxLat = Math.max(accumulator.maxLat, lat)
+  accumulator.minLon = Math.min(accumulator.minLon, lon)
+  accumulator.maxLon = Math.max(accumulator.maxLon, lon)
+}
+
+function radialDistanceSimplify(
+  accumulator: PolylineAccumulator,
+  tolerancePx: number,
+): number[] {
+  const count = accumulator.count
+  if (count <= 2 || tolerancePx <= 0) {
+    return Array.from({ length: count }, (_, index) => index)
+  }
+
+  const toleranceSq = tolerancePx * tolerancePx
+  const kept = [0]
+  let previous = 0
+  for (let index = 1; index < count - 1; index += 1) {
+    const dx = accumulator.x[index] - accumulator.x[previous]
+    const dy = accumulator.y[index] - accumulator.y[previous]
+    if (dx * dx + dy * dy >= toleranceSq) {
+      kept.push(index)
+      previous = index
+    }
+  }
+  kept.push(count - 1)
+  return kept
+}
+
+function perpendicularDistanceSq(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
+  const dx = bx - ax
+  const dy = by - ay
+  if (dx === 0 && dy === 0) {
+    const pointDx = px - ax
+    const pointDy = py - ay
+    return pointDx * pointDx + pointDy * pointDy
+  }
+
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+  const closestX = ax + t * dx
+  const closestY = ay + t * dy
+  const pointDx = px - closestX
+  const pointDy = py - closestY
+  return pointDx * pointDx + pointDy * pointDy
+}
+
+function douglasPeuckerSimplify(
+  accumulator: PolylineAccumulator,
+  candidateIndices: number[],
+  tolerancePx: number,
+  isCancelled: CancellationSignal,
+): number[] {
+  if (candidateIndices.length <= 2 || tolerancePx <= 0) {
+    return candidateIndices
+  }
+
+  const toleranceSq = tolerancePx * tolerancePx
+  const keep = new Uint8Array(candidateIndices.length)
+  keep[0] = 1
+  keep[candidateIndices.length - 1] = 1
+  const stack: Array<[number, number]> = [[0, candidateIndices.length - 1]]
+  let iterations = 0
+
+  while (stack.length > 0) {
+    if (iterations % 4096 === 0) throwIfCancelled(isCancelled)
+    iterations += 1
+
+    const [start, end] = stack.pop()!
+    if (end <= start + 1) continue
+
+    const startIndex = candidateIndices[start]
+    const endIndex = candidateIndices[end]
+    const ax = accumulator.x[startIndex]
+    const ay = accumulator.y[startIndex]
+    const bx = accumulator.x[endIndex]
+    const by = accumulator.y[endIndex]
+    let maxDistanceSq = -1
+    let maxIndex = -1
+
+    for (let index = start + 1; index < end; index += 1) {
+      const pointIndex = candidateIndices[index]
+      const distanceSq = perpendicularDistanceSq(
+        accumulator.x[pointIndex],
+        accumulator.y[pointIndex],
+        ax,
+        ay,
+        bx,
+        by,
+      )
+      if (distanceSq > maxDistanceSq) {
+        maxDistanceSq = distanceSq
+        maxIndex = index
+      }
+    }
+
+    if (maxDistanceSq > toleranceSq && maxIndex !== -1) {
+      keep[maxIndex] = 1
+      stack.push([start, maxIndex], [maxIndex, end])
+    }
+  }
+
+  return candidateIndices.filter((_, index) => keep[index] === 1)
+}
+
+function simplifyPolyline(
+  accumulator: PolylineAccumulator,
+  requestedTolerancePx: number,
+  maxPoints: number,
+  isCancelled: CancellationSignal,
+): { indices: number[]; tolerancePx: number } {
+  const count = accumulator.count
+  if (count <= 2) {
+    return {
+      indices: Array.from({ length: count }, (_, index) => index),
+      tolerancePx: Math.max(0, requestedTolerancePx),
+    }
+  }
+
+  const safeMaxPoints = Math.max(2, Math.trunc(maxPoints))
+  let tolerancePx = Math.max(0, requestedTolerancePx)
+  let indices: number[] = []
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    throwIfCancelled(isCancelled)
+    const radial = radialDistanceSimplify(accumulator, tolerancePx)
+    indices = douglasPeuckerSimplify(
+      accumulator,
+      radial,
+      tolerancePx,
+      isCancelled,
+    )
+    if (indices.length <= safeMaxPoints) {
+      return { indices, tolerancePx }
+    }
+    tolerancePx = Math.max(
+      tolerancePx + 0.5,
+      tolerancePx * Math.sqrt(indices.length / safeMaxPoints) * 1.25,
+    )
+  }
+
+  if (indices.length <= safeMaxPoints) return { indices, tolerancePx }
+
+  const sampled = [0]
+  const last = accumulator.count - 1
+  for (let index = 1; index < safeMaxPoints - 1; index += 1) {
+    sampled.push(Math.round((index / (safeMaxPoints - 1)) * last))
+  }
+  sampled.push(last)
+  return {
+    indices: Array.from(new Set(sampled)).sort((left, right) => left - right),
+    tolerancePx,
+  }
+}
+
+function polylineFromAccumulator(
+  accumulator: PolylineAccumulator,
+  requestedTolerancePx: number,
+  maxPoints: number,
+  isCancelled: CancellationSignal,
+): MapPolyline {
+  const { indices, tolerancePx } = simplifyPolyline(
+    accumulator,
+    requestedTolerancePx,
+    maxPoints,
+    isCancelled,
+  )
+
+  return {
+    points: indices.map((index) => ({
+      lat: accumulator.lat[index],
+      lon: accumulator.lon[index],
+    })),
+    bounds:
+      accumulator.count > 0
+        ? {
+            minLat: accumulator.minLat,
+            maxLat: accumulator.maxLat,
+            minLon: accumulator.minLon,
+            maxLon: accumulator.maxLon,
+          }
+        : undefined,
+    sourcePointCount: accumulator.count,
+    simplifiedPointCount: indices.length,
+    tolerancePx,
   }
 }
 
@@ -1961,6 +2223,126 @@ export class ResidentPackedGeoIndex {
     return page()
   }
 
+  async scanMapPolyline(
+    minTimestampSec: number,
+    maxTimestampSec: number,
+    direction: 'asc' | 'desc',
+    query: CatalogQuery,
+    mapAggregation: SearchSpec['mapAggregation'] | undefined,
+    mapPolyline: SearchSpec['mapPolyline'] | undefined,
+    isCancelled: CancellationSignal,
+  ): Promise<PackedMapPolylineScanPage> {
+    const start = this.lowerBound((record) => record.timestampSec < minTimestampSec)
+    const end = this.lowerBound((record) => record.timestampSec <= maxTimestampSec)
+    const metrics = { pagesRead: 0, diskReadBytes: 0, candidatesInspected: 0 }
+    const zoom = Math.max(0, Math.min(24, Math.floor(mapAggregation?.zoom ?? 0)))
+    const worldSize = WEB_MERCATOR_TILE_SIZE * 2 ** zoom
+    const accumulator = createPolylineAccumulator()
+    const requestedTolerancePx = Math.max(0, mapPolyline?.tolerancePx ?? 2)
+    const maxPoints = Math.max(2, Math.min(100_000, mapPolyline?.maxPoints ?? 10_000))
+
+    const page = (): PackedMapPolylineScanPage => {
+      const polyline = polylineFromAccumulator(
+        accumulator,
+        requestedTolerancePx,
+        maxPoints,
+        isCancelled,
+      )
+      return {
+        points: [],
+        polyline,
+        limitReached: polyline.simplifiedPointCount > maxPoints,
+        metrics,
+        matchedRecords: accumulator.count,
+        sourceLinePoints: polyline.sourcePointCount,
+        renderedLinePoints: polyline.simplifiedPointCount,
+        simplificationTolerancePx: polyline.tolerancePx,
+      }
+    }
+
+    if (end <= start) return page()
+
+    const acceptedKindMask =
+      !query.kind || query.kind === 'all'
+        ? 0b1111
+        : query.kind === 'media'
+          ? (1 << KIND_FLAG_IMAGE) | (1 << KIND_FLAG_VIDEO)
+          : query.kind === 'image'
+            ? 1 << KIND_FLAG_IMAGE
+            : query.kind === 'video'
+              ? 1 << KIND_FLAG_VIDEO
+              : 1 << KIND_FLAG_GEO_POINT
+    const bounds = query.geoBounds
+    const minLatE7 = bounds ? minLatBoundE7(bounds.minLat) : 0
+    const maxLatE7 = bounds ? maxLatBoundE7(bounds.maxLat) : 0
+    const minLonE7 = bounds ? minLonBoundE7(bounds.minLon) : 0
+    const maxLonE7 = bounds ? maxLonBoundE7(bounds.maxLon) : 0
+    const requiresGeo = query.hasGeo === true || bounds !== undefined
+    const rejectsGeo = query.hasGeo === false
+    const view = this.view
+    const recordSize = this.recordSize
+
+    const addMatchedPoint = (latE7: number, lonE7: number) => {
+      addPolylinePoint(
+        accumulator,
+        coordinateFromE7(latE7),
+        coordinateFromE7(lonE7),
+        worldSize,
+      )
+    }
+
+    if (direction === 'desc') {
+      for (let chunkEnd = end; chunkEnd > start;) {
+        throwIfCancelled(isCancelled)
+        const count = Math.min(PACKED_MAP_SCAN_RECORDS, chunkEnd - start)
+        const chunkStart = chunkEnd - count
+        metrics.pagesRead += 1
+        for (let recordIndex = chunkEnd - 1; recordIndex >= chunkStart; recordIndex -= 1) {
+          metrics.candidatesInspected += 1
+          const recordOffset = PACKED_INDEX_HEADER_SIZE + recordIndex * recordSize
+          const kindFlags = view.getUint8(recordOffset + 16)
+          if ((acceptedKindMask & (1 << (kindFlags & 0b11))) === 0) continue
+          const hasGeo = (kindFlags & KIND_FLAG_HAS_GEO) !== 0
+          if (requiresGeo && !hasGeo) continue
+          if (rejectsGeo && hasGeo) continue
+
+          const latE7 = view.getInt32(recordOffset + 4, true)
+          if (bounds && (latE7 < minLatE7 || latE7 > maxLatE7)) continue
+          const lonE7 = view.getInt32(recordOffset + 8, true)
+          if (bounds && (lonE7 < minLonE7 || lonE7 > maxLonE7)) continue
+          addMatchedPoint(latE7, lonE7)
+        }
+        chunkEnd = chunkStart
+        if (chunkEnd > start) await yieldToEventLoop()
+      }
+      return page()
+    }
+
+    for (let chunkStart = start; chunkStart < end;) {
+      throwIfCancelled(isCancelled)
+      const chunkEnd = Math.min(chunkStart + PACKED_MAP_SCAN_RECORDS, end)
+      metrics.pagesRead += 1
+      for (let recordIndex = chunkStart; recordIndex < chunkEnd; recordIndex += 1) {
+        metrics.candidatesInspected += 1
+        const recordOffset = PACKED_INDEX_HEADER_SIZE + recordIndex * recordSize
+        const kindFlags = view.getUint8(recordOffset + 16)
+        if ((acceptedKindMask & (1 << (kindFlags & 0b11))) === 0) continue
+        const hasGeo = (kindFlags & KIND_FLAG_HAS_GEO) !== 0
+        if (requiresGeo && !hasGeo) continue
+        if (rejectsGeo && hasGeo) continue
+
+        const latE7 = view.getInt32(recordOffset + 4, true)
+        if (bounds && (latE7 < minLatE7 || latE7 > maxLatE7)) continue
+        const lonE7 = view.getInt32(recordOffset + 8, true)
+        if (bounds && (lonE7 < minLonE7 || lonE7 > maxLonE7)) continue
+        addMatchedPoint(latE7, lonE7)
+      }
+      chunkStart = chunkEnd
+      if (chunkStart < end) await yieldToEventLoop()
+    }
+    return page()
+  }
+
   async scanAssetIds(
     minTimestampSec: number,
     maxTimestampSec: number,
@@ -2276,6 +2658,50 @@ class FileCatalogStore implements CatalogStore {
     const maxTime = query.endTime === undefined ? 0xffffffff : timestampSeconds(query.endTime)
 
     const scanStartedAt = performance.now()
+    if (spec.mapMode === 'polyline') {
+      const page = await index.scanMapPolyline(
+        minTime,
+        maxTime,
+        query.sort === 'timestamp_asc' ? 'asc' : 'desc',
+        query,
+        spec.mapAggregation,
+        spec.mapPolyline,
+        isCancelled,
+      )
+      const queryIndexScanMs = performance.now() - scanStartedAt
+      throwIfCancelled(isCancelled)
+      return {
+        points: [],
+        polyline: page.polyline,
+        limitReached: page.limitReached,
+        resultMetrics: withQueryMetrics(
+          {
+            ...defaultSearchStats('file-time-geo', fileCatalogIndexSpec().label),
+            pagesRead: page.metrics.pagesRead,
+            candidatesInspected: page.metrics.candidatesInspected,
+            diskReadBytes: page.metrics.diskReadBytes,
+            indexStorage: 'memory',
+            residentBytes: index.indexSizeBytes,
+            pointCount: index.assetCount,
+          },
+          spec,
+          performance.now() - startedAt,
+          page.renderedLinePoints,
+          spec.mapPolyline?.maxPoints ?? limit,
+          offset,
+          Boolean(page.limitReached),
+          {
+            queryIndexReadyMs,
+            queryIndexScanMs,
+            matchedRecords: page.matchedRecords,
+            sourceLinePoints: page.sourceLinePoints,
+            renderedLinePoints: page.renderedLinePoints,
+            simplificationTolerancePx: page.simplificationTolerancePx,
+          },
+        ),
+      }
+    }
+
     const page = await index.scanMapPoints(
       minTime,
       maxTime,

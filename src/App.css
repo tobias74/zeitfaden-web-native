@@ -317,6 +317,8 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .map-area-tools button {
@@ -325,6 +327,32 @@
   border-color: rgba(116, 132, 124, 0.76);
   background: rgba(255, 255, 255, 0.94);
   box-shadow: 0 1px 4px rgba(22, 32, 24, 0.12);
+}
+
+.map-mode-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid rgba(116, 132, 124, 0.76);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 1px 4px rgba(22, 32, 24, 0.12);
+}
+
+.map-area-tools .map-mode-control button {
+  min-height: 28px;
+  padding: 0 7px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  font-size: 12px;
+}
+
+.map-area-tools .map-mode-control button.active {
+  border-color: #0f7668;
+  background: #0f7668;
+  color: #ffffff;
 }
 
 .map-area-tools button.active {

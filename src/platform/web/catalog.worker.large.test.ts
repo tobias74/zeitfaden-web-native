@@ -151,6 +151,20 @@ function bruteForceAssetIds(
   return filtered.map((record) => record.assetId)
 }
 
+function bruteForcePolylinePoints(
+  records: PackedIndexRecord[],
+  query: CatalogQuery,
+  direction: 'asc' | 'desc',
+): Array<{ lat: number; lon: number }> {
+  return bruteForceAssetIds(records, query, direction).map((assetId) => {
+    const record = records[assetId]
+    return {
+      lat: record.latE7 / 10_000_000,
+      lon: record.lonE7 / 10_000_000,
+    }
+  })
+}
+
 function encodeAssetTableFiles(items: MediaItem[]): MemoryDirectoryHandle {
   const directory = new MemoryDirectoryHandle()
   const recordIndexBytes = new Uint8Array(
@@ -539,6 +553,138 @@ describe('catalog worker packed query hot paths', () => {
     expect(mapPage.points[0].assetId).toBe(0)
     expect(mapPage.points[0].bounds).toEqual(query.geoBounds)
     expect(assetPage.assetIds).toEqual([0])
+  })
+
+  it('scans map polylines in chronological timestamp order', async () => {
+    const records = makePackedRecords(2_000, () => 'geo_point')
+    const index = makePackedIndex(records)
+    const query: CatalogQuery = {
+      sort: 'timestamp_asc',
+      kind: 'geo_point',
+      hasGeo: true,
+      limit: 10_000,
+      offset: 0,
+    }
+    const expected = bruteForcePolylinePoints(records, query, 'asc')
+    const page = await index.scanMapPolyline(
+      0,
+      0xffffffff,
+      'asc',
+      query,
+      { zoom: 12, viewportWidthPx: 1024, viewportHeightPx: 768, bubbleCellSizePx: 64 },
+      { tolerancePx: 0, maxPoints: 10_000 },
+      () => false,
+    )
+
+    expect(page.points).toEqual([])
+    expect(page.polyline?.points).toEqual(expected)
+    expect(page.sourceLinePoints).toBe(expected.length)
+    expect(page.renderedLinePoints).toBe(expected.length)
+    expect(page.polyline?.bounds).toBeTruthy()
+  })
+
+  it('applies time, visible bounds, and geo point filtering to map polylines', async () => {
+    const records = makePackedRecords(5_000, (index) =>
+      index % 3 === 0 ? 'image' : 'geo_point',
+    )
+    const index = makePackedIndex(records)
+    const query: CatalogQuery = {
+      sort: 'timestamp_asc',
+      kind: 'geo_point',
+      hasGeo: true,
+      geoBounds: { minLat: -20, maxLat: 20, minLon: -80, maxLon: 80 },
+      startTime: FIXTURE_START_TIME + 1_000 * 500,
+      endTime: FIXTURE_START_TIME + 1_000 * 3_500,
+      limit: 10_000,
+      offset: 0,
+    }
+    const expected = bruteForcePolylinePoints(records, query, 'asc')
+    const page = await index.scanMapPolyline(
+      timestampSeconds(query.startTime!),
+      timestampSeconds(query.endTime!),
+      'asc',
+      query,
+      { zoom: 10, viewportWidthPx: 900, viewportHeightPx: 430, bubbleCellSizePx: 64 },
+      { tolerancePx: 0, maxPoints: 10_000 },
+      () => false,
+    )
+
+    expect(page.polyline?.points).toEqual(expected)
+    expect(page.matchedRecords).toBe(expected.length)
+    expect(
+      page.polyline?.points.every(
+        (point) =>
+          point.lat >= query.geoBounds!.minLat &&
+          point.lat <= query.geoBounds!.maxLat &&
+          point.lon >= query.geoBounds!.minLon &&
+          point.lon <= query.geoBounds!.maxLon,
+      ),
+    ).toBe(true)
+  })
+
+  it('simplifies map polylines while keeping endpoints and the requested cap', async () => {
+    const records = Array.from({ length: 2_000 }, (_, index): PackedIndexRecord => ({
+      timestampSec: 1_700_000_000 + index,
+      latE7: coordinateE7(46 + index / 20_000 + Math.sin(index / 8) / 1_000),
+      lonE7: coordinateE7(7 + index / 18_000),
+      assetId: index,
+      kindFlags: kindFlags('geo_point'),
+    }))
+    const index = makePackedIndex(records)
+    const query: CatalogQuery = {
+      sort: 'timestamp_asc',
+      kind: 'geo_point',
+      hasGeo: true,
+      limit: 10,
+      offset: 0,
+    }
+    const page = await index.scanMapPolyline(
+      0,
+      0xffffffff,
+      'asc',
+      query,
+      { zoom: 14, viewportWidthPx: 1200, viewportHeightPx: 700, bubbleCellSizePx: 64 },
+      { tolerancePx: 0.25, maxPoints: 10 },
+      () => false,
+    )
+    const points = page.polyline?.points ?? []
+
+    expect(points.length).toBeGreaterThanOrEqual(2)
+    expect(points.length).toBeLessThanOrEqual(10)
+    expect(points[0]).toEqual({
+      lat: records[0].latE7 / 10_000_000,
+      lon: records[0].lonE7 / 10_000_000,
+    })
+    expect(points[points.length - 1]).toEqual({
+      lat: records[records.length - 1].latE7 / 10_000_000,
+      lon: records[records.length - 1].lonE7 / 10_000_000,
+    })
+    expect(page.sourceLinePoints).toBe(records.length)
+    expect(page.renderedLinePoints).toBe(points.length)
+  })
+
+  it('aborts packed map polyline scans', async () => {
+    const records = makePackedRecords(20_000, () => 'geo_point')
+    const index = makePackedIndex(records)
+    const query: CatalogQuery = {
+      sort: 'timestamp_asc',
+      kind: 'geo_point',
+      hasGeo: true,
+      limit: 10_000,
+      offset: 0,
+    }
+
+    await expect(
+      index.scanMapPolyline(
+        0,
+        0xffffffff,
+        'asc',
+        query,
+        { zoom: 10, viewportWidthPx: 1024, viewportHeightPx: 768, bubbleCellSizePx: 64 },
+        { tolerancePx: 2, maxPoints: 10_000 },
+        () => true,
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError' })
   })
 
   it('reads selected asset records by chunk while preserving requested order', async () => {

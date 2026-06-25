@@ -85,6 +85,12 @@ async function openSettings(page: Page): Promise<void> {
   if (!open) await menu.locator('summary').click()
 }
 
+async function closeSettings(page: Page): Promise<void> {
+  const menu = settingsMenu(page)
+  const open = await menu.evaluate((element) => element.open)
+  if (open) await menu.locator('summary').click()
+}
+
 function metricsPanel(page: Page) {
   return page.locator('section.metrics-panel')
 }
@@ -129,6 +135,34 @@ async function readMapMetricNumber(page: Page, label: string): Promise<number> {
     }
     return parsed
   }, label)
+}
+
+async function waitForMapMetricAtLeast(
+  page: Page,
+  label: string,
+  minimum: number,
+): Promise<void> {
+  await page.waitForFunction(
+    ({ metricLabel, minimumValue }) => {
+      const mapSection = Array.from(document.querySelectorAll('.metrics-section'))
+        .find((section) =>
+          section.querySelector('.metrics-section-title')?.textContent?.trim() ===
+            'Map query',
+        )
+      if (!mapSection) return false
+
+      const metric = Array.from(mapSection.querySelectorAll('dl.metrics-grid > div'))
+        .find((row) => row.querySelector('dt')?.textContent?.trim() === metricLabel)
+      const value = metric?.querySelector('dd')?.textContent?.trim()
+      if (!value) return false
+
+      const normalized = value.replace(/[^\d.,-]/g, '').replace(/,/g, '')
+      const parsed = Number(normalized)
+      return Number.isFinite(parsed) && parsed >= minimumValue
+    },
+    { metricLabel: label, minimumValue: minimum },
+    { timeout: STEP_TIMEOUT_MS },
+  )
 }
 
 async function appDiagnostic(page: Page): Promise<string> {
@@ -296,6 +330,30 @@ describeE2E('geo import and query UI e2e', () => {
       expect(spaciousBubbles).toBeGreaterThan(0)
       expect(compactBubbles).toBeGreaterThan(0)
       await expectNoUiError(page)
+    })
+
+    await runStep(page, 'Switch map mode to line and back to bubbles', async () => {
+      await closeSettings(page)
+
+      await page.getByRole('button', { name: 'Line' }).click()
+      await waitForMapMetricAtLeast(page, 'Source line points', 1)
+      await waitForMapIdle(page)
+      await expectNoUiError(page)
+      const renderedLinePoints = await readMapMetricNumber(
+        page,
+        'Rendered line points',
+      )
+      const sourceLinePoints = await readMapMetricNumber(page, 'Source line points')
+
+      expect(sourceLinePoints).toBeGreaterThan(0)
+      expect(renderedLinePoints).toBeGreaterThan(0)
+      expect(renderedLinePoints).toBeLessThanOrEqual(10_000)
+
+      await page.getByRole('button', { name: 'Bubbles' }).click()
+      await waitForMapIdle(page)
+      await expectNoUiError(page)
+      const renderedBubbles = await readMapMetricNumber(page, 'Rendered bubbles')
+      expect(renderedBubbles).toBeGreaterThan(0)
     })
 
     await runStep(page, 'Run bounded timeframe query', async () => {
