@@ -93,6 +93,7 @@ const MAP_HEIGHT_KEY = 'geo-media-index-lab:map-height'
 const RESULT_DISPLAY_MODE_KEY = 'geo-media-index-lab:result-display-mode'
 const RESULT_THUMBNAIL_SIZE_KEY = 'geo-media-index-lab:result-thumbnail-size'
 const RESULT_METADATA_KEY = 'geo-media-index-lab:result-metadata'
+const DEBUG_DATA_KEY = 'geo-media-index-lab:debug-data'
 const RESULT_PAGE_SIZE_KEY = 'geo-media-index-lab:result-page-size'
 const MAP_BUBBLE_CELL_SIZE_KEY = 'geo-media-index-lab:map-bubble-cell-size'
 const MAP_RENDER_BATCH_SIZE_KEY = 'geo-media-index-lab:map-render-batch-size'
@@ -722,6 +723,9 @@ function App() {
   const [showResultMetadata, setShowResultMetadata] = useState(() =>
     storedBoolean(RESULT_METADATA_KEY, true),
   )
+  const [showDebugData, setShowDebugData] = useState(() =>
+    storedBoolean(DEBUG_DATA_KEY, false),
+  )
   const [leftWidth, setLeftWidth] = useState(() =>
     clamp(storedNumber(LEFT_WIDTH_KEY, DEFAULT_LEFT_WIDTH), MIN_LEFT_WIDTH, MAX_LEFT_WIDTH),
   )
@@ -1168,6 +1172,11 @@ function App() {
     window.localStorage.setItem(RESULT_METADATA_KEY, String(enabled))
   }, [])
 
+  const toggleDebugData = useCallback((enabled: boolean) => {
+    setShowDebugData(enabled)
+    window.localStorage.setItem(DEBUG_DATA_KEY, String(enabled))
+  }, [])
+
   const resizeStyle = {
     '--left-width': `${leftWidth}px`,
     '--map-height': `${mapHeight}px`,
@@ -1533,6 +1542,18 @@ function App() {
                   <p className="settings-hint">
                     {t('mapRenderBatchSizeHint')}
                   </p>
+                </div>
+                <div className="display-section">
+                  <label className="toggle-row">
+                    <input
+                      type="checkbox"
+                      checked={showDebugData}
+                      onChange={(event) =>
+                        toggleDebugData(event.target.checked)
+                      }
+                    />
+                    {t('showDebugData')}
+                  </label>
                 </div>
                 <div className="display-section">
                   <span>{t('activityLog')}</span>
@@ -1961,6 +1982,7 @@ function App() {
               </dl>
             </section>
 
+            {showDebugData && (
             <section className="panel metrics-panel">
               <div className="panel-title">
                 <Activity size={17} />
@@ -2273,6 +2295,7 @@ function App() {
                 </p>
               )}
             </section>
+            )}
           </aside>
         </section>
 

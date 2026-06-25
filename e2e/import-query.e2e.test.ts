@@ -75,6 +75,26 @@ async function waitForMapIdle(page: Page): Promise<void> {
   )
 }
 
+function settingsMenu(page: Page) {
+  return page.locator('details.settings-menu')
+}
+
+async function openSettings(page: Page): Promise<void> {
+  const menu = settingsMenu(page)
+  const open = await menu.evaluate((element) => element.open)
+  if (!open) await menu.locator('summary').click()
+}
+
+function metricsPanel(page: Page) {
+  return page.locator('section.metrics-panel')
+}
+
+async function enableDebugData(page: Page): Promise<void> {
+  await openSettings(page)
+  await page.getByLabel('Show debug data').check()
+  await metricsPanel(page).waitFor({ timeout: STEP_TIMEOUT_MS })
+}
+
 function indexesPanel(page: Page) {
   return page.locator('section.panel').filter({ hasText: 'Indexes' })
 }
@@ -248,14 +268,20 @@ describeE2E('geo import and query UI e2e', () => {
       await waitForResultCards(page)
       await waitForMapIdle(page)
       await expectNoUiError(page)
+      expect(await metricsPanel(page).count()).toBe(0)
       await expect(
         page.locator('.media-card').filter({ hasText: 'zeitfaden-e2e' }).first()
           .innerText(),
       ).resolves.toContain('#1')
     })
 
+    await runStep(page, 'Enable debug data metrics', async () => {
+      await enableDebugData(page)
+      await expectNoUiError(page)
+    })
+
     await runStep(page, 'Change map bubble density without warnings or stalls', async () => {
-      await page.locator('details.settings-menu summary').click()
+      await openSettings(page)
 
       await page.getByLabel('Map bubble density').selectOption('80')
       await waitForMapIdle(page)
