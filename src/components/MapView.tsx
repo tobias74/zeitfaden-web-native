@@ -40,14 +40,6 @@ type MapViewProps = {
   onVisibleViewportChange: (viewport: VisibleMapViewport) => void
 }
 
-const baseStyle = new Style({
-  image: new CircleStyle({
-    radius: 4,
-    fill: new Fill({ color: '#6f7887' }),
-    stroke: new Stroke({ color: '#ffffff', width: 1.5 }),
-  }),
-})
-
 const queryStyle = new Style({
   image: new CircleStyle({
     radius: 8,
@@ -80,12 +72,17 @@ function featureBubbleCount(feature: FeatureLike): number {
 
 function mapPointStyle(feature: FeatureLike, scale: number): Style {
   const count = featureBubbleCount(feature)
-  if (count <= 1) {
-    return baseStyle
-  }
 
   const sizeBucket =
-    count >= 1_000 ? 'huge' : count >= 100 ? 'large' : count >= 10 ? 'medium' : 'small'
+    count <= 1
+      ? 'single'
+      : count >= 1_000
+        ? 'huge'
+        : count >= 100
+          ? 'large'
+          : count >= 10
+            ? 'medium'
+            : 'small'
   const label = formatBubbleCount(count)
   const key = `${scale}:${sizeBucket}:${label}`
   const cachedStyle = mapPointStyleCache.get(key)
@@ -94,7 +91,9 @@ function mapPointStyle(feature: FeatureLike, scale: number): Style {
   // Radii must stay in sync with bubbleRadiusForCount() in
   // platform/web/catalog.worker.ts, which uses them to merge overlapping bubbles.
   const baseRadius =
-    sizeBucket === 'huge'
+    sizeBucket === 'single'
+      ? 8
+      : sizeBucket === 'huge'
       ? 18
       : sizeBucket === 'large'
         ? 15
@@ -168,6 +167,23 @@ function mapExtentFromBounds(bounds: GeoBounds): Extent {
     Math.max(minX, maxX),
     Math.max(minY, maxY),
   ]
+}
+
+function displayExtentFromBounds(bounds: GeoBounds, map: Map | null): Extent {
+  const extent = mapExtentFromBounds(bounds)
+  if (extent[0] !== extent[2] && extent[1] !== extent[3]) return extent
+
+  const resolution = map?.getView().getResolution() ?? 1
+  const padding = Math.max(1, resolution * 8)
+  if (extent[0] === extent[2]) {
+    extent[0] -= padding
+    extent[2] += padding
+  }
+  if (extent[1] === extent[3]) {
+    extent[1] -= padding
+    extent[3] += padding
+  }
+  return extent
 }
 
 function visibleViewportFromMap(map: Map): VisibleMapViewport | undefined {
@@ -351,34 +367,43 @@ export function MapView({
     map.on('moveend', reportVisibleBounds)
 
     map.on('singleclick', (event) => {
-      if (boundsDrawingRef.current) return
-
       const clickedPoint = map.forEachFeatureAtPixel(
         event.pixel,
         (feature, layer) => (layer === pointLayer ? feature : undefined),
       )
-      const clickedCount = clickedPoint ? featureBubbleCount(clickedPoint) : 1
       const clickedBounds = clickedPoint
         ? pointBoundsFromFeature(clickedPoint)
         : undefined
-      if (clickedCount > 1 && clickedBounds) {
+      if (clickedPoint && clickedBounds) {
         onGeoBoundsChange(clickedBounds)
         return
       }
+
+      if (boundsDrawingRef.current) return
 
       const [lon, lat] = toLonLat(event.coordinate)
       onQueryPointChange({ lat, lon })
     })
 
     map.on('pointermove', (event) => {
+      const hoveredPoint = map.forEachFeatureAtPixel(
+        event.pixel,
+        (feature, layer) => (layer === pointLayer ? feature : undefined),
+      )
+      const hoveredBounds = hoveredPoint
+        ? pointBoundsFromFeature(hoveredPoint)
+        : undefined
+
       if (boundsDrawingRef.current) {
         const extent = currentExtent(extentInteraction)
         setMapCursor(
           target,
           map,
-          hasGeoBoundsRef.current && extent
-            ? areaCursorForPixel(map, extent, event.pixel)
-            : 'crosshair',
+          hoveredPoint && hoveredBounds
+            ? 'pointer'
+            : hasGeoBoundsRef.current && extent
+              ? areaCursorForPixel(map, extent, event.pixel)
+              : 'crosshair',
         )
         return
       }
@@ -388,18 +413,10 @@ export function MapView({
         return
       }
 
-      const hoveredPoint = map.forEachFeatureAtPixel(
-        event.pixel,
-        (feature, layer) => (layer === pointLayer ? feature : undefined),
-      )
-      const hoveredCount = hoveredPoint ? featureBubbleCount(hoveredPoint) : 1
-      const hoveredBounds = hoveredPoint
-        ? pointBoundsFromFeature(hoveredPoint)
-        : undefined
       setMapCursor(
         target,
         map,
-        hoveredCount > 1 && hoveredBounds ? 'pointer' : '',
+        hoveredPoint && hoveredBounds ? 'pointer' : '',
       )
     })
 
@@ -492,7 +509,9 @@ export function MapView({
 
     syncingBoundsRef.current = true
     if (geoBounds) {
-      extentInteraction.setExtent(mapExtentFromBounds(geoBounds))
+      extentInteraction.setExtent(
+        displayExtentFromBounds(geoBounds, mapRef.current),
+      )
       setExtentDragEnabled(extentInteraction, true)
     } else {
       setExtentDragEnabled(extentInteraction, false)

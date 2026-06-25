@@ -4441,6 +4441,13 @@ fn aggregated_map_points(aggregation: NativeMapPointAggregation) -> Vec<MapPoint
                 if let Some(point) = bucket.first_point {
                     return MapPoint {
                         cell_id: Some(bucket.cell_id),
+                        count: Some(1),
+                        bounds: Some(GeoBounds {
+                            min_lat: bucket.min_lat,
+                            max_lat: bucket.max_lat,
+                            min_lon: bucket.min_lon,
+                            max_lon: bucket.max_lon,
+                        }),
                         ..point
                     };
                 }

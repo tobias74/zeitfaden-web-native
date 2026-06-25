@@ -420,6 +420,22 @@ function lonE7(value: number): number {
   return Math.round(Math.max(-180, Math.min(180, value)) * 10_000_000)
 }
 
+function minLatBoundE7(value: number): number {
+  return Math.ceil(Math.max(-90, Math.min(90, value)) * 10_000_000 - 0.5)
+}
+
+function maxLatBoundE7(value: number): number {
+  return Math.floor(Math.max(-90, Math.min(90, value)) * 10_000_000 + 0.5)
+}
+
+function minLonBoundE7(value: number): number {
+  return Math.ceil(Math.max(-180, Math.min(180, value)) * 10_000_000 - 0.5)
+}
+
+function maxLonBoundE7(value: number): number {
+  return Math.floor(Math.max(-180, Math.min(180, value)) * 10_000_000 + 0.5)
+}
+
 function coordinateFromE7(value: number): number {
   return value / 10_000_000
 }
@@ -1142,14 +1158,14 @@ function lonLatToWorldPixel(
   }
 }
 
-// Cluster bubble radii in CSS pixels, mirroring mapPointStyle()/baseStyle in
+// Cluster bubble radii in CSS pixels, mirroring mapPointStyle() in
 // components/MapView.tsx (circle radius + stroke). Used to detect when two
 // rendered bubbles overlap so they can be merged.
 const BUBBLE_STROKE_PX = 2
-const SINGLE_POINT_RADIUS_PX = 4 + 1.5
+const SINGLE_POINT_RADIUS_PX = 8
 
 function bubbleRadiusForCount(count: number, scale: number): number {
-  if (count <= 1) return SINGLE_POINT_RADIUS_PX
+  if (count <= 1) return SINGLE_POINT_RADIUS_PX * scale + BUBBLE_STROKE_PX
   const radius = count >= 1_000 ? 18 : count >= 100 ? 15 : count >= 10 ? 12 : 10
   return radius * scale + BUBBLE_STROKE_PX
 }
@@ -1321,6 +1337,13 @@ function aggregatedMapPoints(aggregation: PackedMapPointAggregation): MapPoint[]
       return {
         ...cluster.firstPoint,
         cellId: cluster.cellId,
+        count: 1,
+        bounds: {
+          minLat: cluster.minLat,
+          maxLat: cluster.maxLat,
+          minLon: cluster.minLon,
+          maxLon: cluster.maxLon,
+        },
       }
     }
 
@@ -1835,16 +1858,16 @@ export class ResidentPackedGeoIndex {
               : 1 << KIND_FLAG_GEO_POINT
     const bounds = query.geoBounds
     const minLatE7 = bounds
-      ? Math.ceil(Math.max(-90, Math.min(90, bounds.minLat)) * 10_000_000)
+      ? minLatBoundE7(bounds.minLat)
       : 0
     const maxLatE7 = bounds
-      ? Math.floor(Math.max(-90, Math.min(90, bounds.maxLat)) * 10_000_000)
+      ? maxLatBoundE7(bounds.maxLat)
       : 0
     const minLonE7 = bounds
-      ? Math.ceil(Math.max(-180, Math.min(180, bounds.minLon)) * 10_000_000)
+      ? minLonBoundE7(bounds.minLon)
       : 0
     const maxLonE7 = bounds
-      ? Math.floor(Math.max(-180, Math.min(180, bounds.maxLon)) * 10_000_000)
+      ? maxLonBoundE7(bounds.maxLon)
       : 0
     const requiresGeo = query.hasGeo === true || bounds !== undefined
     const rejectsGeo = query.hasGeo === false
@@ -1967,16 +1990,16 @@ export class ResidentPackedGeoIndex {
               : 1 << KIND_FLAG_GEO_POINT
     const bounds = query.geoBounds
     const minLatE7 = bounds
-      ? Math.ceil(Math.max(-90, Math.min(90, bounds.minLat)) * 10_000_000)
+      ? minLatBoundE7(bounds.minLat)
       : 0
     const maxLatE7 = bounds
-      ? Math.floor(Math.max(-90, Math.min(90, bounds.maxLat)) * 10_000_000)
+      ? maxLatBoundE7(bounds.maxLat)
       : 0
     const minLonE7 = bounds
-      ? Math.ceil(Math.max(-180, Math.min(180, bounds.minLon)) * 10_000_000)
+      ? minLonBoundE7(bounds.minLon)
       : 0
     const maxLonE7 = bounds
-      ? Math.floor(Math.max(-180, Math.min(180, bounds.maxLon)) * 10_000_000)
+      ? maxLonBoundE7(bounds.maxLon)
       : 0
     const requiresGeo = query.hasGeo === true || bounds !== undefined
     const rejectsGeo = query.hasGeo === false

@@ -41,7 +41,7 @@ function lonLatToScreenPixel(
 }
 
 function bubbleRadiusPx(count: number): number {
-  if (count <= 1) return 4 + 1.5
+  if (count <= 1) return 8 + 2
   const radius = count >= 1_000 ? 18 : count >= 100 ? 15 : count >= 10 ? 12 : 10
   return radius + 2
 }
@@ -270,6 +270,8 @@ describe('catalog worker packed query hot paths', () => {
     expect(page.points.map((point) => point.assetId)).toEqual(expected)
     expect(page.points.every((point) => point.kind === 'geo_point')).toBe(true)
     expect(page.points.every((point) => point.cellId)).toBe(true)
+    expect(page.points.every((point) => point.count === 1)).toBe(true)
+    expect(page.points.every((point) => point.bounds)).toBe(true)
     expect(page.limitReached).toBe(false)
     expect(page.matchedRecords).toBe(expected.length)
     expect(page.renderedBubbles).toBe(expected.length)
@@ -479,6 +481,64 @@ describe('catalog worker packed query hot paths', () => {
     expect(idsAtSeven).not.toEqual(idsAtSixA)
     expect(zoomSixA.points.reduce((total, point) => total + (point.count ?? 1), 0))
       .toBe(zoomSixA.matchedRecords)
+  })
+
+  it('keeps singleton bubble bounds exact so nearby points are not selected', async () => {
+    const records: PackedIndexRecord[] = [
+      {
+        timestampSec: 1_700_000_000,
+        latE7: coordinateE7(47),
+        lonE7: coordinateE7(8),
+        assetId: 0,
+        kindFlags: kindFlags('geo_point'),
+      },
+      {
+        timestampSec: 1_700_000_001,
+        latE7: coordinateE7(47.00004),
+        lonE7: coordinateE7(8),
+        assetId: 1,
+        kindFlags: kindFlags('geo_point'),
+      },
+    ]
+    const index = makePackedIndex(records)
+    const query: CatalogQuery = {
+      sort: 'timestamp_asc',
+      kind: 'geo_point',
+      hasGeo: true,
+      geoBounds: { minLat: 47, maxLat: 47, minLon: 8, maxLon: 8 },
+      limit: 5_000,
+      offset: 0,
+    }
+
+    const mapPage = await index.scanMapPoints(
+      0,
+      0xffffffff,
+      'asc',
+      query,
+      {
+        zoom: 24,
+        viewportWidthPx: 1024,
+        viewportHeightPx: 768,
+        bubbleCellSizePx: 48,
+      },
+      5_000,
+      0,
+      () => false,
+    )
+    const assetPage = await index.scanAssetIds(
+      0,
+      0xffffffff,
+      'asc',
+      query,
+      5_000,
+      () => false,
+    )
+
+    expect(mapPage.matchedRecords).toBe(1)
+    expect(mapPage.points).toHaveLength(1)
+    expect(mapPage.points[0].assetId).toBe(0)
+    expect(mapPage.points[0].bounds).toEqual(query.geoBounds)
+    expect(assetPage.assetIds).toEqual([0])
   })
 
   it('reads selected asset records by chunk while preserving requested order', async () => {
