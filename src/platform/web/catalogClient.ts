@@ -4,6 +4,9 @@ import type {
   GeoIndexStats,
   GeoSearchQuery,
   GeoSearchResult,
+  LineTileRequest,
+  LineTileResult,
+  LineTileSourceSummary,
   MapPointPage,
   MediaItem,
   MediaSource,
@@ -117,6 +120,24 @@ export class CatalogClient {
     options: CatalogSearchOptions = {},
   ): Promise<MapPointPage> {
     return this.request('searchMapPoints', spec, undefined, options.signal)
+  }
+
+  prepareLineTileSource(
+    spec: SearchSpec,
+    options: CatalogSearchOptions = {},
+  ): Promise<LineTileSourceSummary> {
+    return this.request('prepareLineTileSource', spec, undefined, options.signal)
+  }
+
+  getLineTile(
+    request: LineTileRequest,
+    options: CatalogSearchOptions = {},
+  ): Promise<LineTileResult> {
+    return this.request('getLineTile', request, undefined, options.signal)
+  }
+
+  clearLineTileCache(scope?: { sourceKey?: string }): Promise<void> {
+    return this.request('clearLineTileCache', scope)
   }
 
   buildSearchIndexes(

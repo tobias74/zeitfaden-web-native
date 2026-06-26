@@ -2,7 +2,15 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { dateInputEndToMillis, dateInputToMillis } from './lib/time'
 import type { CatalogBackend, CatalogInfo, PlatformBackend } from './platform/types'
-import type { MapDisplayMode, MapPolyline, MediaItem, SearchPage, SearchSpec } from './types'
+import type {
+  LineTileRequest,
+  LineTileSourceSummary,
+  MapDisplayMode,
+  MapPolyline,
+  MediaItem,
+  SearchPage,
+  SearchSpec,
+} from './types'
 
 vi.mock('./components/MapView', async () => {
   const React = await import('react')
@@ -14,6 +22,8 @@ vi.mock('./components/MapView', async () => {
       hoverPoint,
       mapMode,
       polyline,
+      lineTileSource,
+      onLineTileRequest,
     }: {
       onQueryPointChange?: (point: { lat: number; lon: number }) => void
       onVisibleViewportChange?: (viewport: {
@@ -30,6 +40,17 @@ vi.mock('./components/MapView', async () => {
       hoverPoint?: { lat: number; lon: number }
       mapMode?: MapDisplayMode
       polyline?: MapPolyline
+      lineTileSource?: LineTileSourceSummary
+      onLineTileRequest?: (request: Omit<
+        LineTileRequest,
+        | 'sourceKey'
+        | 'catalogRevision'
+        | 'startTime'
+        | 'endTime'
+        | 'breakSpeedKmh'
+        | 'maxSegmentDistanceKm'
+        | 'styleVersion'
+      >) => Promise<unknown>
     }) => {
       React.useEffect(() => {
         onVisibleViewportChange?.({
@@ -44,6 +65,16 @@ vi.mock('./components/MapView', async () => {
           heightPx: 430,
         })
       }, [onVisibleViewportChange])
+      React.useEffect(() => {
+        if (!lineTileSource || !onLineTileRequest) return
+        void onLineTileRequest({
+          z: 4,
+          x: 8,
+          y: 5,
+          devicePixelRatio: 1,
+          tileSize: 256,
+        })
+      }, [lineTileSource, onLineTileRequest])
 
       return (
         <>
@@ -99,11 +130,14 @@ vi.mock('./components/MediaViewer', () => ({
 
 let searchMediaCalls: SearchSpec[]
 let searchMapPointCalls: SearchSpec[]
+let lineTileSourceCalls: SearchSpec[]
+let lineTileRequests: LineTileRequest[]
 let resultSearchDelay: Promise<void> | undefined
 let resultSearchSignals: AbortSignal[]
 let resultSearchError: Error | undefined
 let mapSearchDelay: Promise<void> | undefined
 let mapSearchSignals: AbortSignal[]
+let lineTileSourceSignals: AbortSignal[]
 let resultItemsOverride: MediaItem[] | undefined
 
 function abortError(): Error {
@@ -178,6 +212,8 @@ function createMapPoints(offset: number, limit: number) {
 function createPlatform(): PlatformBackend {
   searchMediaCalls = []
   searchMapPointCalls = []
+  lineTileSourceCalls = []
+  lineTileRequests = []
   const catalog: CatalogBackend = {
     init: vi.fn(async (): Promise<CatalogInfo> => ({
       storageMode: 'file',
@@ -254,6 +290,53 @@ function createPlatform(): PlatformBackend {
         limitReached: false,
       }
     },
+    prepareLineTileSource: async (spec, options) => {
+      lineTileSourceCalls.push(spec)
+      if (options?.signal) {
+        lineTileSourceSignals.push(options.signal)
+        mapSearchSignals.push(options.signal)
+      }
+      if (mapSearchDelay) {
+        if (options?.signal?.aborted) throw abortError()
+        await new Promise<void>((resolve, reject) => {
+          const abort = () => {
+            reject(abortError())
+          }
+          options?.signal?.addEventListener('abort', abort, { once: true })
+          mapSearchDelay
+            ?.then(resolve, reject)
+            .finally(() => {
+              options?.signal?.removeEventListener('abort', abort)
+            })
+        })
+      }
+      return {
+        sourceKey: 'source:1:min:max',
+        catalogRevision: 1,
+        startTime: spec.startTime,
+        endTime: spec.endTime,
+        sourcePointCount: 25,
+        sourceGroupCount: 2,
+        sourceSegmentCount: 2,
+        sourceBuildMs: 4,
+        sourceCacheHit: false,
+      }
+    },
+    getLineTile: async (request) => {
+      lineTileRequests.push(request)
+      return {
+        sourceKey: request.sourceKey,
+        tileKey: `tile:${request.z}:${request.x}:${request.y}`,
+        mimeType: 'image/png',
+        blob: new Blob(['tile'], { type: 'image/png' }),
+        cacheHit: false,
+        tileRenderMs: 1,
+        tileCount: 1,
+        lineSegments: 1,
+        renderedLinePoints: 2,
+      }
+    },
+    clearLineTileCache: vi.fn(),
     buildSearchIndexes: vi.fn(async () => ({
       pointCount: 0,
       buildTimeMs: 0,
@@ -348,6 +431,7 @@ describe('App pagination', () => {
     resultItemsOverride = undefined
     mapSearchDelay = undefined
     mapSearchSignals = []
+    lineTileSourceSignals = []
   })
 
   afterEach(() => {
@@ -544,13 +628,15 @@ describe('App pagination', () => {
         window.localStorage.getItem('geo-media-index-lab:map-display-mode'),
       ).toBe('polyline')
       expect(screen.getByTestId('map-mode').textContent).toBe('polyline')
-      expect(screen.getByTestId('map-polyline-count').textContent).toBe('2')
+      expect(screen.getByTestId('map-polyline-count').textContent).toBe('0')
       expect(
-        searchMapPointCalls.some(
+        lineTileSourceCalls.some(
           (query) =>
             query.purpose === 'map' &&
             query.mapMode === 'polyline' &&
             query.kind === 'geo_point' &&
+            query.geoBounds === undefined &&
+            query.mapAggregation === undefined &&
             query.order.kind === 'timestamp' &&
             query.order.sort === 'timestamp_asc' &&
             query.limit === 10_000 &&
@@ -586,8 +672,8 @@ describe('App pagination', () => {
       target: { value: '3' },
     })
     expect(
-      searchMapPointCalls.some(
-        (query) => query.mapPolyline?.cleanup?.breakSpeedKmh === 130,
+      lineTileRequests.some(
+        (request) => request.breakSpeedKmh === 130,
       ),
     ).toBe(false)
     fireEvent.pointerUp(speedBreakSlider)
@@ -602,8 +688,8 @@ describe('App pagination', () => {
       target: { value: '4' },
     })
     expect(
-      searchMapPointCalls.some(
-        (query) => query.mapPolyline?.cleanup?.maxSegmentDistanceKm === 0.25,
+      lineTileRequests.some(
+        (request) => request.maxSegmentDistanceKm === 0.25,
       ),
     ).toBe(false)
     fireEvent.pointerUp(maxSegmentSlider)
@@ -613,23 +699,32 @@ describe('App pagination', () => {
 
     await waitFor(() => {
       expect(
-        searchMapPointCalls.some((query) => {
+        lineTileSourceCalls.some((query) => {
           const cleanup = query.mapPolyline?.cleanup
           return (
             query.purpose === 'map' &&
             query.mapMode === 'polyline' &&
             query.kind === 'geo_point' &&
+            query.geoBounds === undefined &&
+            query.mapAggregation === undefined &&
             query.mapPolyline?.tolerancePx === 0 &&
             cleanup?.enabled === true &&
             cleanup.groupLinesOnly === true &&
             cleanup.maxAccuracyMeters === undefined &&
-            cleanup.breakSpeedKmh === 130 &&
-            cleanup.maxSegmentDistanceKm === 0.25 &&
+            cleanup.breakSpeedKmh === undefined &&
+            cleanup.maxSegmentDistanceKm === undefined &&
             cleanup.removeIsolatedJumps === true &&
             cleanup.showDots === false &&
             cleanup.allowedSources.join(',') === 'GPS,WIFI,CELL,UNKNOWN'
           )
         }),
+      ).toBe(true)
+      expect(
+        lineTileRequests.some(
+          (request) =>
+            request.breakSpeedKmh === 130 &&
+            request.maxSegmentDistanceKm === 0.25,
+        ),
       ).toBe(true)
       expect(
         Array.from({ length: window.localStorage.length }, (_, index) =>
@@ -659,7 +754,7 @@ describe('App pagination', () => {
       expect(mapSearchSignals[0].aborted).toBe(true)
       expect(mapSearchSignals).toHaveLength(2)
       expect(
-        searchMapPointCalls.some(
+        lineTileSourceCalls.some(
           (query) => query.purpose === 'map' && query.mapMode === 'polyline',
         ),
       ).toBe(true)

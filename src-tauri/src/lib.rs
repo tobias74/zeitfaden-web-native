@@ -1,6 +1,6 @@
 use chrono::{DateTime, NaiveDateTime};
 use exif::{In, Reader as ExifReader, Tag, Value as ExifValue};
-use image::ImageFormat;
+use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
 use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader as XmlReader;
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -44,6 +44,10 @@ const PACKED_SCAN_RECORDS: usize = 8192;
 const MAX_RENDERED_MAP_BUBBLES: i64 = 5_000;
 const WEB_MERCATOR_MAX_LAT: f64 = 85.051_128_779_806_6;
 const WEB_MERCATOR_TILE_SIZE: f64 = 256.0;
+const LINE_TILE_SIZE: u32 = 256;
+const LINE_TILE_GUTTER_PX: f64 = 12.0;
+const LINE_TILE_STYLE_VERSION: &str = "line-raster-v1";
+const LINE_TILE_CACHE_DIR: &str = "line-tiles";
 const INDEX_KIND_TIME_GEO: u32 = 1;
 const KIND_CODE_IMAGE: u8 = 0;
 const KIND_CODE_VIDEO: u8 = 1;
@@ -230,6 +234,59 @@ struct MapPointPage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct LineTileSourceSummary {
+    source_key: String,
+    catalog_revision: i64,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    source_point_count: usize,
+    source_group_count: usize,
+    source_segment_count: usize,
+    source_build_ms: f64,
+    source_cache_hit: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_metrics: Option<SearchIndexStats>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LineTileRequest {
+    source_key: String,
+    catalog_revision: i64,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    break_speed_kmh: Option<f64>,
+    max_segment_distance_km: Option<f64>,
+    z: u8,
+    x: u32,
+    y: u32,
+    device_pixel_ratio: f64,
+    tile_size: Option<u32>,
+    style_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeLineTileResult {
+    source_key: String,
+    tile_key: String,
+    mime_type: String,
+    bytes: Vec<u8>,
+    cache_hit: bool,
+    tile_render_ms: f64,
+    tile_count: usize,
+    line_segments: usize,
+    rendered_line_points: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LineTileCacheScope {
+    source_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GeoSearchQuery {
     lat: f64,
     lon: f64,
@@ -401,6 +458,11 @@ struct SearchIndexStats {
     rendered_line_points: Option<usize>,
     rendered_line_dots: Option<usize>,
     simplification_tolerance_px: Option<f64>,
+    line_tile_source_build_ms: Option<f64>,
+    line_tile_source_cache_hit: Option<bool>,
+    line_tile_cache_hit: Option<bool>,
+    line_tile_render_ms: Option<f64>,
+    line_tile_count: Option<usize>,
     aggregation_zoom: Option<usize>,
     aggregation_cell_size_px: Option<f64>,
     limit: Option<i64>,
@@ -793,6 +855,11 @@ fn empty_search_index_stats(engine_id: &str, engine_label: &str) -> SearchIndexS
         rendered_line_points: None,
         rendered_line_dots: None,
         simplification_tolerance_px: None,
+        line_tile_source_build_ms: None,
+        line_tile_source_cache_hit: None,
+        line_tile_cache_hit: None,
+        line_tile_render_ms: None,
+        line_tile_count: None,
         aggregation_zoom: None,
         aggregation_cell_size_px: None,
         limit: None,
@@ -859,6 +926,11 @@ fn search_stats_from_geo(
         rendered_line_points: None,
         rendered_line_dots: None,
         simplification_tolerance_px: None,
+        line_tile_source_build_ms: None,
+        line_tile_source_cache_hit: None,
+        line_tile_cache_hit: None,
+        line_tile_render_ms: None,
+        line_tile_count: None,
         aggregation_zoom: None,
         aggregation_cell_size_px: None,
         limit: None,
@@ -5561,9 +5633,62 @@ struct NativePolylineCleanup {
     show_dots: bool,
 }
 
+#[derive(Clone)]
 struct NativeCandidateSegment {
     group_key: Option<String>,
     candidates: Vec<NativePolylineCandidate>,
+}
+
+#[derive(Clone)]
+struct NativeLineTileSourceSegment {
+    candidates: Vec<NativePolylineCandidate>,
+    min_lat: f64,
+    max_lat: f64,
+    min_lon: f64,
+    max_lon: f64,
+}
+
+#[derive(Clone)]
+struct NativeLineTileSource {
+    source_key: String,
+    catalog_revision: i64,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    segments: Vec<NativeLineTileSourceSegment>,
+    source_point_count: usize,
+    source_group_count: usize,
+    source_segment_count: usize,
+    source_build_ms: f64,
+}
+
+#[derive(Clone)]
+struct NormalizedLineTileRequest {
+    source_key: String,
+    catalog_revision: i64,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    break_speed_kmh: Option<f64>,
+    max_segment_distance_km: Option<f64>,
+    z: u8,
+    x: u32,
+    y: u32,
+    device_pixel_ratio: f64,
+    tile_size: u32,
+    style_version: String,
+}
+
+#[derive(Clone, Copy)]
+struct TileRenderStats {
+    line_segments: usize,
+    rendered_line_points: usize,
+}
+
+static NATIVE_LINE_TILE_SOURCES: OnceLock<
+    Mutex<HashMap<String, NativeLineTileSource>>,
+> = OnceLock::new();
+
+fn native_line_tile_sources() -> &'static Mutex<HashMap<String, NativeLineTileSource>> {
+    NATIVE_LINE_TILE_SOURCES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn normalize_polyline_cleanup(map_polyline: Option<&MapPolylineSpec>) -> NativePolylineCleanup {
@@ -5807,6 +5932,280 @@ fn split_group_by_consecutive_sequence(
 
     flush_sequence_run(group_key, current_run, &mut line_segments, &mut dot_points);
     (line_segments, dot_points)
+}
+
+fn candidate_geo_bounds(candidates: &[NativePolylineCandidate]) -> Option<GeoBounds> {
+    candidates.first()?;
+    Some(candidates.iter().fold(
+        GeoBounds {
+            min_lat: f64::INFINITY,
+            max_lat: f64::NEG_INFINITY,
+            min_lon: f64::INFINITY,
+            max_lon: f64::NEG_INFINITY,
+        },
+        |bounds, candidate| GeoBounds {
+            min_lat: bounds.min_lat.min(candidate.lat),
+            max_lat: bounds.max_lat.max(candidate.lat),
+            min_lon: bounds.min_lon.min(candidate.lon),
+            max_lon: bounds.max_lon.max(candidate.lon),
+        },
+    ))
+}
+
+fn line_tile_source_segment_from_candidates(
+    candidates: Vec<NativePolylineCandidate>,
+) -> Option<NativeLineTileSourceSegment> {
+    let bounds = candidate_geo_bounds(&candidates)?;
+    Some(NativeLineTileSourceSegment {
+        candidates,
+        min_lat: bounds.min_lat,
+        max_lat: bounds.max_lat,
+        min_lon: bounds.min_lon,
+        max_lon: bounds.max_lon,
+    })
+}
+
+fn line_tile_time_key(value: Option<i64>, fallback: &str) -> String {
+    value.map(|value| value.to_string())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn line_tile_source_key(
+    catalog_revision: i64,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> String {
+    [
+        "source".to_string(),
+        catalog_revision.to_string(),
+        line_tile_time_key(start_time, "min"),
+        line_tile_time_key(end_time, "max"),
+    ]
+    .join(":")
+}
+
+fn normalize_line_tile_request(request: LineTileRequest) -> NormalizedLineTileRequest {
+    let z = request.z.min(24);
+    let max_coord = (1_u32 << z).saturating_sub(1);
+    NormalizedLineTileRequest {
+        source_key: request.source_key,
+        catalog_revision: request.catalog_revision,
+        start_time: request.start_time,
+        end_time: request.end_time,
+        break_speed_kmh: request.break_speed_kmh.filter(|value| *value > 0.0),
+        max_segment_distance_km: request
+            .max_segment_distance_km
+            .filter(|value| *value > 0.0),
+        z,
+        x: request.x.min(max_coord),
+        y: request.y.min(max_coord),
+        device_pixel_ratio: request.device_pixel_ratio.clamp(1.0, 4.0),
+        tile_size: request.tile_size.unwrap_or(LINE_TILE_SIZE).max(1),
+        style_version: if request.style_version.trim().is_empty() {
+            LINE_TILE_STYLE_VERSION.to_string()
+        } else {
+            request.style_version
+        },
+    }
+}
+
+fn line_tile_cache_key(request: &NormalizedLineTileRequest) -> String {
+    [
+        "tile".to_string(),
+        request.catalog_revision.to_string(),
+        line_tile_time_key(request.start_time, "min"),
+        line_tile_time_key(request.end_time, "max"),
+        request
+            .break_speed_kmh
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "off".to_string()),
+        request
+            .max_segment_distance_km
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "off".to_string()),
+        request.z.to_string(),
+        request.x.to_string(),
+        request.y.to_string(),
+        request.device_pixel_ratio.to_string(),
+        request.style_version.clone(),
+    ]
+    .join(":")
+}
+
+fn line_tile_bounds(request: &NormalizedLineTileRequest, gutter_px: f64) -> GeoBounds {
+    let world_size = WEB_MERCATOR_TILE_SIZE * 2_f64.powi(request.z as i32);
+    let min_x = request.x as f64 * request.tile_size as f64 - gutter_px;
+    let max_x = (request.x as f64 + 1.0) * request.tile_size as f64 + gutter_px;
+    let min_y = request.y as f64 * request.tile_size as f64 - gutter_px;
+    let max_y = (request.y as f64 + 1.0) * request.tile_size as f64 + gutter_px;
+    let (top_lat, left_lon) = world_pixel_to_lon_lat(min_x, min_y, world_size);
+    let (bottom_lat, right_lon) = world_pixel_to_lon_lat(max_x, max_y, world_size);
+    GeoBounds {
+        min_lat: top_lat.min(bottom_lat),
+        max_lat: top_lat.max(bottom_lat),
+        min_lon: left_lon.min(right_lon),
+        max_lon: left_lon.max(right_lon),
+    }
+}
+
+fn geo_bounds_intersect(left: &GeoBounds, right: &GeoBounds) -> bool {
+    !(left.max_lat < right.min_lat
+        || left.min_lat > right.max_lat
+        || left.max_lon < right.min_lon
+        || left.min_lon > right.max_lon)
+}
+
+fn line_tile_cache_path(app: &AppHandle, tile_key: &str) -> AppResult<PathBuf> {
+    let dir = app_cache_dir(app)?.join(LINE_TILE_CACHE_DIR);
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    Ok(dir.join(format!("{}.png", sha256_string(tile_key))))
+}
+
+fn split_candidates_for_line_tile(
+    candidates: &[NativePolylineCandidate],
+    request: &NormalizedLineTileRequest,
+) -> Vec<Vec<NativePolylineCandidate>> {
+    let (jump_filtered, _) = remove_isolated_jump_candidates(candidates, request.break_speed_kmh);
+    let (distance_segments, _) =
+        split_candidates_by_max_segment_distance(&jump_filtered, request.max_segment_distance_km);
+    let mut segments = Vec::<Vec<NativePolylineCandidate>>::new();
+    for distance_segment in distance_segments {
+        let (speed_segments, _) =
+            split_candidates_by_speed(&distance_segment, request.break_speed_kmh);
+        for segment in speed_segments {
+            if segment.len() >= 2 {
+                segments.push(segment);
+            }
+        }
+    }
+    segments
+}
+
+fn draw_circle(
+    image: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    center_x: f64,
+    center_y: f64,
+    radius: f64,
+    color: Rgba<u8>,
+) {
+    let min_x = (center_x - radius).floor().max(0.0) as i32;
+    let max_x = (center_x + radius)
+        .ceil()
+        .min(image.width().saturating_sub(1) as f64) as i32;
+    let min_y = (center_y - radius).floor().max(0.0) as i32;
+    let max_y = (center_y + radius)
+        .ceil()
+        .min(image.height().saturating_sub(1) as f64) as i32;
+    let radius_sq = radius * radius;
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let dx = x as f64 - center_x;
+            let dy = y as f64 - center_y;
+            if dx * dx + dy * dy <= radius_sq {
+                image.put_pixel(x as u32, y as u32, color);
+            }
+        }
+    }
+}
+
+fn draw_thick_line(
+    image: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    from: (f64, f64),
+    to: (f64, f64),
+    width: f64,
+    color: Rgba<u8>,
+) {
+    let dx = to.0 - from.0;
+    let dy = to.1 - from.1;
+    let steps = dx.abs().max(dy.abs()).ceil().max(1.0) as usize;
+    let radius = (width / 2.0).max(1.0);
+    for step in 0..=steps {
+        let t = step as f64 / steps as f64;
+        draw_circle(image, from.0 + dx * t, from.1 + dy * t, radius, color);
+    }
+}
+
+fn render_line_tile_png(
+    source: &NativeLineTileSource,
+    request: &NormalizedLineTileRequest,
+) -> AppResult<(Vec<u8>, TileRenderStats)> {
+    let tile_size = request.tile_size;
+    let dpr = request.device_pixel_ratio;
+    let pixel_size = (tile_size as f64 * dpr).round().max(1.0) as u32;
+    let mut image = ImageBuffer::from_pixel(pixel_size, pixel_size, Rgba([0, 0, 0, 0]));
+    let tile_bounds = line_tile_bounds(request, LINE_TILE_GUTTER_PX);
+    let world_size = WEB_MERCATOR_TILE_SIZE * 2_f64.powi(request.z as i32);
+    let tile_min_x = request.x as f64 * tile_size as f64;
+    let tile_min_y = request.y as f64 * tile_size as f64;
+    let mut paths = Vec::<Vec<(f64, f64)>>::new();
+    let mut rendered_line_points = 0_usize;
+
+    for source_segment in &source.segments {
+        let source_bounds = GeoBounds {
+            min_lat: source_segment.min_lat,
+            max_lat: source_segment.max_lat,
+            min_lon: source_segment.min_lon,
+            max_lon: source_segment.max_lon,
+        };
+        if !geo_bounds_intersect(&source_bounds, &tile_bounds) {
+            continue;
+        }
+        for segment in split_candidates_for_line_tile(&source_segment.candidates, request) {
+            let Some(segment_bounds) = candidate_geo_bounds(&segment) else {
+                continue;
+            };
+            if !geo_bounds_intersect(&segment_bounds, &tile_bounds) {
+                continue;
+            }
+            let path = segment
+                .iter()
+                .map(|candidate| {
+                    let (world_x, world_y) =
+                        lon_lat_to_world_pixel(candidate.lon, candidate.lat, world_size);
+                    ((world_x - tile_min_x) * dpr, (world_y - tile_min_y) * dpr)
+                })
+                .collect::<Vec<_>>();
+            if path.len() >= 2 {
+                rendered_line_points += path.len();
+                paths.push(path);
+            }
+        }
+    }
+
+    for path in &paths {
+        for pair in path.windows(2) {
+            draw_thick_line(
+                &mut image,
+                pair[0],
+                pair[1],
+                6.0 * dpr,
+                Rgba([255, 255, 255, 235]),
+            );
+        }
+    }
+    for path in &paths {
+        for pair in path.windows(2) {
+            draw_thick_line(
+                &mut image,
+                pair[0],
+                pair[1],
+                3.0 * dpr,
+                Rgba([27, 101, 113, 255]),
+            );
+        }
+    }
+
+    let mut output = Cursor::new(Vec::<u8>::new());
+    DynamicImage::ImageRgba8(image)
+        .write_to(&mut output, ImageFormat::Png)
+        .map_err(|error| error.to_string())?;
+    Ok((
+        output.into_inner(),
+        TileRenderStats {
+            line_segments: paths.len(),
+            rendered_line_points,
+        },
+    ))
 }
 
 fn polyline_from_candidate_segments(
@@ -6308,6 +6707,76 @@ fn scan_packed_map_polyline(
     ))
 }
 
+fn scan_packed_line_tile_source(
+    app: &AppHandle,
+    query: &CatalogQuery,
+) -> AppResult<(Vec<NativeLineTileSourceSegment>, usize, usize, usize, usize)> {
+    let indexes_dir = catalog_indexes_dir(app)?;
+    let (header, bytes) = read_packed_index_bytes(
+        &indexes_dir.join(FILE_CATALOG_TIME_GEO_INDEX),
+        INDEX_KIND_TIME_GEO,
+    )?;
+    let min_time = scan_min_timestamp_sec(query);
+    let max_time = query.end_time.map(timestamp_seconds).unwrap_or(u32::MAX);
+    let start = packed_lower_bound(&bytes, header.entry_count, |timestamp| timestamp < min_time);
+    let end = packed_lower_bound(&bytes, header.entry_count, |timestamp| {
+        timestamp <= max_time
+    });
+    let mut grouped_line_candidates = HashMap::<String, Vec<NativePolylineCandidate>>::new();
+    let mut source_point_count = 0_usize;
+    let mut pages_read = 0_usize;
+    let mut candidates_inspected = 0_usize;
+
+    let mut chunk_start = start;
+    while chunk_start < end {
+        let chunk_end = (chunk_start + PACKED_SCAN_RECORDS).min(end);
+        pages_read += 1;
+        for index in chunk_start..chunk_end {
+            candidates_inspected += 1;
+            let Some(record) = packed_record_at(&bytes, index) else {
+                continue;
+            };
+            if !packed_record_matches_query(record, query) {
+                continue;
+            }
+            let candidate = polyline_candidate_from_record(record);
+            let Some(group_key) = candidate.group_key.clone() else {
+                continue;
+            };
+            if candidate.sequence.is_none() {
+                continue;
+            }
+            source_point_count += 1;
+            grouped_line_candidates
+                .entry(group_key)
+                .or_default()
+                .push(candidate);
+        }
+        chunk_start = chunk_end;
+    }
+
+    let mut source_segments = Vec::<NativeLineTileSourceSegment>::new();
+    let source_group_count = grouped_line_candidates.len();
+    for (group_key, candidates) in grouped_line_candidates {
+        let (line_segments, _) = split_group_by_consecutive_sequence(&group_key, candidates);
+        for segment in line_segments {
+            if let Some(source_segment) =
+                line_tile_source_segment_from_candidates(segment.candidates)
+            {
+                source_segments.push(source_segment);
+            }
+        }
+    }
+
+    Ok((
+        source_segments,
+        source_point_count,
+        source_group_count,
+        pages_read,
+        candidates_inspected,
+    ))
+}
+
 fn search_file_catalog_index(
     app: &AppHandle,
     query: &CatalogQuery,
@@ -6593,6 +7062,183 @@ fn search_map_points(app: AppHandle, spec: SearchSpec) -> AppResult<MapPointPage
     result_metrics.aggregation_cell_size_px = Some(aggregation_cell_size_px);
     page.result_metrics = Some(result_metrics);
     Ok(page)
+}
+
+#[tauri::command]
+fn prepare_line_tile_source(app: AppHandle, spec: SearchSpec) -> AppResult<LineTileSourceSummary> {
+    let started_at = Instant::now();
+    let mut index_stats =
+        require_search_index_current(&app, "file-time-geo", "Time-first packed index")?;
+    let catalog_revision = index_stats.catalog_version.unwrap_or(0);
+    let source_key = line_tile_source_key(catalog_revision, spec.start_time, spec.end_time);
+
+    if let Some(cached_source) = native_line_tile_sources()
+        .lock()
+        .map_err(|error| error.to_string())?
+        .get(&source_key)
+        .cloned()
+    {
+        let mut result_metrics = with_query_metrics(
+            index_stats,
+            &spec,
+            "native",
+            started_at.elapsed().as_secs_f64() * 1000.0,
+            cached_source.source_segment_count,
+            spec.limit.unwrap_or(0),
+            spec.offset.unwrap_or(0).max(0),
+            false,
+        );
+        result_metrics.matched_records = Some(cached_source.source_point_count);
+        result_metrics.source_line_points = Some(cached_source.source_point_count);
+        result_metrics.line_segments = Some(cached_source.source_segment_count);
+        result_metrics.line_tile_source_build_ms = Some(cached_source.source_build_ms);
+        result_metrics.line_tile_source_cache_hit = Some(true);
+        return Ok(LineTileSourceSummary {
+            source_key: cached_source.source_key,
+            catalog_revision: cached_source.catalog_revision,
+            start_time: cached_source.start_time,
+            end_time: cached_source.end_time,
+            source_point_count: cached_source.source_point_count,
+            source_group_count: cached_source.source_group_count,
+            source_segment_count: cached_source.source_segment_count,
+            source_build_ms: cached_source.source_build_ms,
+            source_cache_hit: true,
+            result_metrics: Some(result_metrics),
+        });
+    }
+
+    let mut source_spec = spec.clone();
+    source_spec.kind = Some("geo_point".to_string());
+    source_spec.has_geo = Some(true);
+    source_spec.geo_bounds = None;
+    source_spec.map_aggregation = None;
+    source_spec.map_mode = Some("polyline".to_string());
+    source_spec.order = SearchOrder {
+        kind: "timestamp".to_string(),
+        sort: Some("timestamp_asc".to_string()),
+        point: None,
+        engine_id: Some("file-time-geo".to_string()),
+    };
+    let query = search_spec_to_catalog_query(&source_spec, i64::MAX);
+    let source_started_at = Instant::now();
+    let (segments, source_point_count, source_group_count, pages_read, candidates_inspected) =
+        scan_packed_line_tile_source(&app, &query)?;
+    let source_build_ms = source_started_at.elapsed().as_secs_f64() * 1000.0;
+    let source_segment_count = segments.len();
+    let source = NativeLineTileSource {
+        source_key: source_key.clone(),
+        catalog_revision,
+        start_time: spec.start_time,
+        end_time: spec.end_time,
+        segments,
+        source_point_count,
+        source_group_count,
+        source_segment_count,
+        source_build_ms,
+    };
+    native_line_tile_sources()
+        .lock()
+        .map_err(|error| error.to_string())?
+        .insert(source_key.clone(), source);
+
+    index_stats.pages_read = pages_read as i64;
+    index_stats.candidates_inspected = candidates_inspected as i64;
+    let mut result_metrics = with_query_metrics(
+        index_stats,
+        &spec,
+        "native",
+        started_at.elapsed().as_secs_f64() * 1000.0,
+        source_segment_count,
+        spec.limit.unwrap_or(0),
+        spec.offset.unwrap_or(0).max(0),
+        false,
+    );
+    result_metrics.matched_records = Some(source_point_count);
+    result_metrics.source_line_points = Some(source_point_count);
+    result_metrics.line_segments = Some(source_segment_count);
+    result_metrics.line_tile_source_build_ms = Some(source_build_ms);
+    result_metrics.line_tile_source_cache_hit = Some(false);
+
+    Ok(LineTileSourceSummary {
+        source_key,
+        catalog_revision,
+        start_time: spec.start_time,
+        end_time: spec.end_time,
+        source_point_count,
+        source_group_count,
+        source_segment_count,
+        source_build_ms,
+        source_cache_hit: false,
+        result_metrics: Some(result_metrics),
+    })
+}
+
+#[tauri::command]
+fn get_line_tile(app: AppHandle, request: LineTileRequest) -> AppResult<NativeLineTileResult> {
+    let normalized = normalize_line_tile_request(request);
+    let tile_key = line_tile_cache_key(&normalized);
+    let path = line_tile_cache_path(&app, &tile_key)?;
+    if path.exists() {
+        let bytes = fs::read(path).map_err(|error| error.to_string())?;
+        return Ok(NativeLineTileResult {
+            source_key: normalized.source_key,
+            tile_key,
+            mime_type: "image/png".to_string(),
+            bytes,
+            cache_hit: true,
+            tile_render_ms: 0.0,
+            tile_count: 1,
+            line_segments: 0,
+            rendered_line_points: 0,
+        });
+    }
+
+    let source = native_line_tile_sources()
+        .lock()
+        .map_err(|error| error.to_string())?
+        .get(&normalized.source_key)
+        .cloned()
+        .ok_or_else(|| "Line tile source is not prepared.".to_string())?;
+    if source.catalog_revision != normalized.catalog_revision {
+        return Err("Line tile source is stale.".to_string());
+    }
+
+    let started_at = Instant::now();
+    let (bytes, stats) = render_line_tile_png(&source, &normalized)?;
+    let render_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+    Ok(NativeLineTileResult {
+        source_key: normalized.source_key,
+        tile_key,
+        mime_type: "image/png".to_string(),
+        bytes,
+        cache_hit: false,
+        tile_render_ms: render_ms,
+        tile_count: 1,
+        line_segments: stats.line_segments,
+        rendered_line_points: stats.rendered_line_points,
+    })
+}
+
+#[tauri::command]
+fn clear_line_tile_cache(app: AppHandle, scope: Option<LineTileCacheScope>) -> AppResult<()> {
+    if let Some(source_key) = scope.as_ref().and_then(|scope| scope.source_key.as_ref()) {
+        native_line_tile_sources()
+            .lock()
+            .map_err(|error| error.to_string())?
+            .remove(source_key);
+        return Ok(());
+    }
+
+    native_line_tile_sources()
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clear();
+    let dir = app_cache_dir(&app)?.join(LINE_TILE_CACHE_DIR);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -7315,6 +7961,14 @@ fn clear_catalog(app: AppHandle) -> AppResult<()> {
     let dir = catalog_dir(&app)?;
     if dir.exists() {
         fs::remove_dir_all(&dir).map_err(|error| error.to_string())?;
+    }
+    native_line_tile_sources()
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clear();
+    let tile_cache_dir = app_cache_dir(&app)?.join(LINE_TILE_CACHE_DIR);
+    if tile_cache_dir.exists() {
+        fs::remove_dir_all(&tile_cache_dir).map_err(|error| error.to_string())?;
     }
     ensure_file_catalog_dirs(&app)?;
     save_file_catalog_manifest(&app, &empty_file_catalog_manifest())?;
@@ -8121,6 +8775,9 @@ pub fn run() {
             list_media,
             search_media,
             search_map_points,
+            prepare_line_tile_source,
+            get_line_tile,
+            clear_line_tile_cache,
             get_media_by_ids,
             get_geo_points,
             build_geo_indexes,

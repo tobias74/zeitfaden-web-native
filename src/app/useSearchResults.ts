@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CatalogBackend } from '../platform/types'
 import type {
   EnrichedSearchResult,
+  LineTileResult,
+  LineTileSourceSummary,
   MapPoint,
   MapPolyline,
   SearchIndexStats,
@@ -112,12 +114,14 @@ export function useSearchResults({
   pageLimitReached: boolean
   mapItems: MapPoint[]
   mapPolyline: MapPolyline | undefined
+  lineTileSource: LineTileSourceSummary | undefined
   mapLoading: boolean
   resultMetrics: SearchIndexStats
   mapMetrics: SearchIndexStats
   validation: ValidationReport | undefined
   setValidation(validation: ValidationReport | undefined): void
   loadWindow(offset: number, signal?: AbortSignal): Promise<SearchWindow>
+  recordLineTileResult(result: LineTileResult): void
   clearMap(): void
 } {
   const [results, setResultsState] = useState<EnrichedSearchResult[]>([])
@@ -125,6 +129,7 @@ export function useSearchResults({
   const [pageLimitReached, setPageLimitReached] = useState(false)
   const [mapItems, setMapItems] = useState<MapPoint[]>([])
   const [mapPolyline, setMapPolyline] = useState<MapPolyline>()
+  const [lineTileSource, setLineTileSource] = useState<LineTileSourceSummary>()
   const [mapLoading, setMapLoading] = useState(false)
   const [resultMetrics, setResultMetrics] =
     useState<SearchIndexStats>(defaultResultMetrics)
@@ -142,6 +147,7 @@ export function useSearchResults({
     mapAbortControllerRef.current = undefined
     setMapItems([])
     setMapPolyline(undefined)
+    setLineTileSource(undefined)
     setMapLoading(false)
     setMapMetrics(defaultMapMetrics)
   }, [])
@@ -171,6 +177,18 @@ export function useSearchResults({
     },
     [catalog, pageSpec],
   )
+
+  const recordLineTileResult = useCallback((result: LineTileResult) => {
+    setMapMetrics((currentMetrics) => ({
+      ...currentMetrics,
+      lineTileCacheHit: result.cacheHit,
+      lineTileRenderMs: result.tileRenderMs,
+      lineTileCount: (currentMetrics.lineTileCount ?? 0) + result.tileCount,
+      lineSegments: result.lineSegments || currentMetrics.lineSegments,
+      renderedLinePoints:
+        result.renderedLinePoints || currentMetrics.renderedLinePoints,
+    }))
+  }, [])
 
   useEffect(() => {
     if (!ready) {
@@ -276,6 +294,50 @@ export function useSearchResults({
       try {
         setMapLoading(true)
         const requestedAt = performance.now()
+        if (activeMapSpec.mapMode === 'polyline') {
+          const summary = await catalog.prepareLineTileSource(activeMapSpec, {
+            signal: abortController.signal,
+          })
+          const responseAt = performance.now()
+          if (requestId !== mapRequestIdRef.current) return
+
+          const baseMetrics = summary.resultMetrics ?? {
+            ...defaultMapMetrics,
+            engineId: activeMapSpec.order.engineId ?? 'file-time-geo',
+            engineLabel: 'Time-first packed index',
+            queryPurpose: 'map',
+            rowsReturned: summary.sourceSegmentCount,
+            matchedRecords: summary.sourcePointCount,
+            sourceLinePoints: summary.sourcePointCount,
+            lineSegments: summary.sourceSegmentCount,
+            lineTileSourceBuildMs: summary.sourceBuildMs,
+            lineTileSourceCacheHit: summary.sourceCacheHit,
+          }
+          const responseMetrics = clientTimedMetrics(
+            baseMetrics,
+            requestedAt,
+            responseAt,
+          )
+          setMapItems([])
+          setMapPolyline(undefined)
+          setLineTileSource(summary)
+          setMapMetrics(responseMetrics)
+          onError('')
+          setMapLoading(false)
+          window.requestAnimationFrame(() => {
+            if (requestId !== mapRequestIdRef.current) return
+            setMapMetrics(
+              clientTimedMetrics(
+                baseMetrics,
+                requestedAt,
+                responseAt,
+                performance.now(),
+              ),
+            )
+          })
+          return
+        }
+
         const page = await catalog.searchMapPoints(activeMapSpec, {
           signal: abortController.signal,
         })
@@ -297,6 +359,7 @@ export function useSearchResults({
         )
         setMapItems(page.points)
         setMapPolyline(page.polyline)
+        setLineTileSource(undefined)
         setMapMetrics(responseMetrics)
         onError('')
         setMapLoading(false)
@@ -315,6 +378,7 @@ export function useSearchResults({
         if (isAbortError(caught)) return
         if (requestId === mapRequestIdRef.current) {
           setMapLoading(false)
+          setLineTileSource(undefined)
           onError(caught instanceof Error ? caught.message : String(caught))
         }
       }
@@ -340,12 +404,14 @@ export function useSearchResults({
     pageLimitReached,
     mapItems,
     mapPolyline,
+    lineTileSource,
     mapLoading,
     resultMetrics,
     mapMetrics,
     validation,
     setValidation,
     loadWindow,
+    recordLineTileResult,
     clearMap,
   }
 }

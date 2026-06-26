@@ -4,6 +4,9 @@ import type {
   GeoIndexStats,
   GeoSearchQuery,
   GeoSearchResult,
+  LineTileRequest,
+  LineTileResult,
+  LineTileSourceSummary,
   MapPointPage,
   MediaItem,
   MediaLocation,
@@ -89,6 +92,15 @@ export interface CatalogBackend {
     spec: SearchSpec,
     options?: CatalogSearchOptions,
   ): Promise<MapPointPage>
+  prepareLineTileSource(
+    spec: SearchSpec,
+    options?: CatalogSearchOptions,
+  ): Promise<LineTileSourceSummary>
+  getLineTile(
+    request: LineTileRequest,
+    options?: CatalogSearchOptions,
+  ): Promise<LineTileResult>
+  clearLineTileCache?(scope?: { sourceKey?: string }): Promise<void>
   buildSearchIndexes(
     indexId: string,
     onProgress?: (progress: GeoIndexBuildProgress) => void,

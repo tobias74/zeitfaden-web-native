@@ -842,6 +842,70 @@ describe('catalog worker packed query hot paths', () => {
     expect(page.points).toHaveLength(0)
   })
 
+  it('prepares full-range line tile sources from grouped sequence runs only', async () => {
+    const baseTime = 1_700_060_000
+    const records: PackedIndexRecord[] = [
+      withGroupSequence({
+        timestampSec: baseTime,
+        latE7: coordinateE7(47),
+        lonE7: coordinateE7(8),
+        assetId: 0,
+        kindFlags: kindFlags('geo_point'),
+      }, 0),
+      withGroupSequence({
+        timestampSec: baseTime + 1,
+        latE7: coordinateE7(47.1),
+        lonE7: coordinateE7(8.1),
+        assetId: 1,
+        kindFlags: kindFlags('geo_point'),
+      }, 1),
+      withGroupSequence({
+        timestampSec: baseTime + 2,
+        latE7: coordinateE7(48),
+        lonE7: coordinateE7(9),
+        assetId: 2,
+        kindFlags: kindFlags('geo_point'),
+      }, 3),
+      withGroupSequence({
+        timestampSec: baseTime + 3,
+        latE7: coordinateE7(48.1),
+        lonE7: coordinateE7(9.1),
+        assetId: 3,
+        kindFlags: kindFlags('geo_point'),
+      }, 4),
+      {
+        timestampSec: baseTime + 4,
+        latE7: coordinateE7(49),
+        lonE7: coordinateE7(10),
+        assetId: 4,
+        kindFlags: kindFlags('geo_point'),
+      },
+      withGroupSequence({
+        timestampSec: baseTime + 5,
+        latE7: coordinateE7(50),
+        lonE7: coordinateE7(11),
+        assetId: 5,
+        kindFlags: kindFlags('image'),
+      }, 0),
+    ]
+
+    const source = await makePackedIndex(records).scanLineTileSource(
+      0,
+      0xffffffff,
+      () => false,
+    )
+
+    expect(source.sourcePointCount).toBe(4)
+    expect(source.sourceGroupCount).toBe(1)
+    expect(source.segments).toHaveLength(2)
+    expect(source.segments.map((segment) => segment.candidates.map((point) => point.sequence))).toEqual([
+      [0, 1],
+      [3, 4],
+    ])
+    expect(source.segments.every((segment) => segment.groupKey === '0:1'))
+      .toBe(true)
+  })
+
   it('does not filter map polylines by source or accuracy payload fields', async () => {
     const baseTime = 1_700_100_000
     const records: PackedIndexRecord[] = [

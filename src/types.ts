@@ -141,6 +141,46 @@ export type MapPointPage = {
   resultMetrics?: SearchResultMetrics
 }
 
+export type LineTileSourceSummary = {
+  sourceKey: string
+  catalogRevision: number
+  startTime?: number
+  endTime?: number
+  sourcePointCount: number
+  sourceGroupCount: number
+  sourceSegmentCount: number
+  sourceBuildMs: number
+  sourceCacheHit: boolean
+  resultMetrics?: SearchResultMetrics
+}
+
+export type LineTileRequest = {
+  sourceKey: string
+  catalogRevision: number
+  startTime?: number
+  endTime?: number
+  breakSpeedKmh?: number
+  maxSegmentDistanceKm?: number
+  z: number
+  x: number
+  y: number
+  devicePixelRatio: number
+  tileSize?: number
+  styleVersion: string
+}
+
+export type LineTileResult = {
+  sourceKey: string
+  tileKey: string
+  mimeType: string
+  blob: Blob
+  cacheHit: boolean
+  tileRenderMs: number
+  tileCount: number
+  lineSegments: number
+  renderedLinePoints: number
+}
+
 export type GeoSearchQuery = TimeRange & {
   lat: number
   lon: number
@@ -281,6 +321,11 @@ export type SearchIndexStats = GeoIndexStats & {
   renderedLinePoints?: number
   renderedLineDots?: number
   simplificationTolerancePx?: number
+  lineTileSourceBuildMs?: number
+  lineTileSourceCacheHit?: boolean
+  lineTileCacheHit?: boolean
+  lineTileRenderMs?: number
+  lineTileCount?: number
   aggregationZoom?: number
   aggregationCellSizePx?: number
   rowsReturned?: number

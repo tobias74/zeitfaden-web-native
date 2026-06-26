@@ -1,4 +1,5 @@
 import * as exifr from 'exifr'
+import { openDB } from 'idb'
 import {
   ResidentPackedDistanceIndex,
   type ResidentDistanceBuildPoint,
@@ -27,6 +28,9 @@ import type {
   GeoIndexPoint,
   GeoSearchQuery,
   GeoSearchResult,
+  LineTileRequest,
+  LineTileResult,
+  LineTileSourceSummary,
   MapPoint,
   MapPointPage,
   MapPolyline,
@@ -166,6 +170,15 @@ type CatalogStore = {
     spec: SearchSpec,
     isCancelled?: CancellationSignal,
   ): Promise<MapPointPage>
+  prepareLineTileSource(
+    spec: SearchSpec,
+    isCancelled?: CancellationSignal,
+  ): Promise<LineTileSourceSummary>
+  getLineTile(
+    request: LineTileRequest,
+    isCancelled?: CancellationSignal,
+  ): Promise<LineTileResult>
+  clearLineTileCache(scope?: { sourceKey?: string }): Promise<void>
   getMediaByIds(ids: string[]): Promise<MediaItem[]>
   getMediaByAssetIds(assetIds: number[]): Promise<AssetMediaResult[]>
   getGeoPoints(range: TimeRange): Promise<GeoIndexPoint[]>
@@ -218,6 +231,12 @@ const TIME_GEO_RECORD_SIZE = 44
 const PACKED_SCAN_RECORDS = 8192
 const PACKED_MAP_SCAN_RECORDS = 131_072
 const MAX_RENDERED_MAP_BUBBLES = 5_000
+const LINE_TILE_DB_NAME = 'geo-media-index-lab-line-tiles'
+const LINE_TILE_DB_VERSION = 1
+const LINE_TILE_STORE = 'tiles'
+const LINE_TILE_SIZE = 256
+const LINE_TILE_GUTTER_PX = 12
+const LINE_TILE_STYLE_VERSION = 'line-raster-v1'
 const INDEX_KIND_TIME_GEO = 1
 const KIND_CODE_IMAGE = 0
 const KIND_CODE_VIDEO = 1
@@ -1341,6 +1360,39 @@ type PolylineCleanup = {
   showDots: boolean
 }
 
+type LineTileSourceSegment = {
+  groupKey: string
+  candidates: PolylineCandidate[]
+  minLat: number
+  maxLat: number
+  minLon: number
+  maxLon: number
+}
+
+type PreparedLineTileSource = {
+  key: string
+  catalogRevision: number
+  startTime?: number
+  endTime?: number
+  segments: LineTileSourceSegment[]
+  sourcePointCount: number
+  sourceGroupCount: number
+  sourceSegmentCount: number
+  sourceBuildMs: number
+  metrics: PackedIndexMetrics
+}
+
+type LineTileRecord = {
+  key: string
+  blob: Blob
+  createdAt: number
+}
+
+type LineTileRenderStats = {
+  lineSegments: number
+  renderedLinePoints: number
+}
+
 type PackedMapPointBucket = {
   cellId: string
   count: number
@@ -1410,6 +1462,178 @@ function lonLatToWorldPixel(
       (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) *
       worldSize,
   }
+}
+
+function worldPixelToLonLat(
+  x: number,
+  y: number,
+  worldSize: number,
+): { lat: number; lon: number } {
+  const lon = (x / worldSize) * 360 - 180
+  const n = Math.PI - (2 * Math.PI * y) / worldSize
+  const lat = (Math.atan(Math.sinh(n)) * 180) / Math.PI
+  return {
+    lat: Math.max(-90, Math.min(90, lat)),
+    lon: Math.max(-180, Math.min(180, lon)),
+  }
+}
+
+const lineTileSources = new Map<string, PreparedLineTileSource>()
+
+function lineTileTimeKey(value: number | undefined, fallback: string): string {
+  return value === undefined ? fallback : String(value)
+}
+
+function lineTileSourceKey(
+  catalogRevision: number,
+  startTime: number | undefined,
+  endTime: number | undefined,
+): string {
+  return [
+    'source',
+    catalogRevision,
+    lineTileTimeKey(startTime, 'min'),
+    lineTileTimeKey(endTime, 'max'),
+  ].join(':')
+}
+
+function normalizedPositiveInteger(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) && value !== undefined && value > 0
+    ? Math.trunc(value)
+    : fallback
+}
+
+function normalizedTileRequest(request: LineTileRequest): LineTileRequest {
+  const z = Math.max(0, Math.min(24, Math.trunc(request.z)))
+  const maxCoord = 2 ** z - 1
+  return {
+    ...request,
+    z,
+    x: Math.max(0, Math.min(maxCoord, Math.trunc(request.x))),
+    y: Math.max(0, Math.min(maxCoord, Math.trunc(request.y))),
+    devicePixelRatio: Math.max(
+      1,
+      Math.min(4, Number.isFinite(request.devicePixelRatio) ? request.devicePixelRatio : 1),
+    ),
+    tileSize: normalizedPositiveInteger(request.tileSize, LINE_TILE_SIZE),
+    styleVersion: request.styleVersion || LINE_TILE_STYLE_VERSION,
+  }
+}
+
+function lineTileCacheKey(request: LineTileRequest): string {
+  const normalized = normalizedTileRequest(request)
+  return [
+    'tile',
+    normalized.catalogRevision,
+    lineTileTimeKey(normalized.startTime, 'min'),
+    lineTileTimeKey(normalized.endTime, 'max'),
+    normalized.breakSpeedKmh ?? 'off',
+    normalized.maxSegmentDistanceKm ?? 'off',
+    normalized.z,
+    normalized.x,
+    normalized.y,
+    normalized.devicePixelRatio,
+    normalized.styleVersion,
+  ].join(':')
+}
+
+function lineTileBounds(
+  request: LineTileRequest,
+  gutterPx = LINE_TILE_GUTTER_PX,
+): GeoBounds {
+  const normalized = normalizedTileRequest(request)
+  const tileSize = normalized.tileSize ?? LINE_TILE_SIZE
+  const worldSize = WEB_MERCATOR_TILE_SIZE * 2 ** normalized.z
+  const minX = normalized.x * tileSize - gutterPx
+  const maxX = (normalized.x + 1) * tileSize + gutterPx
+  const minY = normalized.y * tileSize - gutterPx
+  const maxY = (normalized.y + 1) * tileSize + gutterPx
+  const topLeft = worldPixelToLonLat(minX, minY, worldSize)
+  const bottomRight = worldPixelToLonLat(maxX, maxY, worldSize)
+  return {
+    minLat: Math.min(topLeft.lat, bottomRight.lat),
+    maxLat: Math.max(topLeft.lat, bottomRight.lat),
+    minLon: Math.min(topLeft.lon, bottomRight.lon),
+    maxLon: Math.max(topLeft.lon, bottomRight.lon),
+  }
+}
+
+function boundsIntersect(left: GeoBounds, right: GeoBounds): boolean {
+  return !(
+    left.maxLat < right.minLat ||
+    left.minLat > right.maxLat ||
+    left.maxLon < right.minLon ||
+    left.minLon > right.maxLon
+  )
+}
+
+function candidateBounds(candidates: PolylineCandidate[]): GeoBounds {
+  return candidates.reduce(
+    (bounds, candidate) => ({
+      minLat: Math.min(bounds.minLat, candidate.lat),
+      maxLat: Math.max(bounds.maxLat, candidate.lat),
+      minLon: Math.min(bounds.minLon, candidate.lon),
+      maxLon: Math.max(bounds.maxLon, candidate.lon),
+    }),
+    {
+      minLat: Number.POSITIVE_INFINITY,
+      maxLat: Number.NEGATIVE_INFINITY,
+      minLon: Number.POSITIVE_INFINITY,
+      maxLon: Number.NEGATIVE_INFINITY,
+    },
+  )
+}
+
+function lineTileDb() {
+  return openDB(LINE_TILE_DB_NAME, LINE_TILE_DB_VERSION, {
+    upgrade(database) {
+      if (!database.objectStoreNames.contains(LINE_TILE_STORE)) {
+        database.createObjectStore(LINE_TILE_STORE, { keyPath: 'key' })
+      }
+    },
+  })
+}
+
+async function readCachedLineTile(tileKey: string): Promise<Blob | undefined> {
+  const database = await lineTileDb()
+  const record = await database.get(LINE_TILE_STORE, tileKey) as
+    | LineTileRecord
+    | undefined
+  return record?.blob
+}
+
+async function writeCachedLineTile(tileKey: string, blob: Blob): Promise<void> {
+  const database = await lineTileDb()
+  await database.put(LINE_TILE_STORE, {
+    key: tileKey,
+    blob,
+    createdAt: Date.now(),
+  } satisfies LineTileRecord)
+}
+
+async function clearCachedLineTiles(scope?: { sourceKey?: string }): Promise<void> {
+  const database = await lineTileDb()
+  if (!scope?.sourceKey) {
+    await database.clear(LINE_TILE_STORE)
+    return
+  }
+  const keys = await database.getAllKeys(LINE_TILE_STORE)
+  await Promise.all(
+    keys
+      .filter((key) => String(key).includes(scope.sourceKey!))
+      .map((key) => database.delete(LINE_TILE_STORE, key)),
+  )
+}
+
+function transparentPngBlob(): Blob {
+  const base64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+P+/HgAFeAJc2gySHwAAAABJRU5ErkJggg=='
+  const binary = globalThis.atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  return new Blob([bytes], { type: 'image/png' })
 }
 
 type PolylineAccumulator = {
@@ -1509,6 +1733,29 @@ function normalizePolylineCleanup(
       Number.isFinite(cleanup.maxSegmentDistanceKm) &&
       cleanup.maxSegmentDistanceKm > 0
         ? cleanup.maxSegmentDistanceKm
+        : undefined,
+    removeIsolatedJumps: true,
+    showDots: false,
+  }
+}
+
+function cleanupFromLineTileRequest(request: LineTileRequest): PolylineCleanup {
+  return {
+    enabled: true,
+    groupLinesOnly: true,
+    allowedSources: new Set(['GPS', 'WIFI', 'CELL', 'UNKNOWN']),
+    maxAccuracyMeters: undefined,
+    breakSpeedKmh:
+      typeof request.breakSpeedKmh === 'number' &&
+      Number.isFinite(request.breakSpeedKmh) &&
+      request.breakSpeedKmh > 0
+        ? request.breakSpeedKmh
+        : undefined,
+    maxSegmentDistanceKm:
+      typeof request.maxSegmentDistanceKm === 'number' &&
+      Number.isFinite(request.maxSegmentDistanceKm) &&
+      request.maxSegmentDistanceKm > 0
+        ? request.maxSegmentDistanceKm
         : undefined,
     removeIsolatedJumps: true,
     showDots: false,
@@ -1722,6 +1969,148 @@ function splitGroupByConsecutiveSequence(
 
   flushSequenceRun(groupKey, currentRun, lineSegments, dotPoints)
   return { lineSegments, dotPoints }
+}
+
+function lineTileSourceSegmentFromCandidates(
+  groupKey: string,
+  candidates: PolylineCandidate[],
+): LineTileSourceSegment | undefined {
+  if (candidates.length < 2) return undefined
+  const bounds = candidateBounds(candidates)
+  return {
+    groupKey,
+    candidates,
+    minLat: bounds.minLat,
+    maxLat: bounds.maxLat,
+    minLon: bounds.minLon,
+    maxLon: bounds.maxLon,
+  }
+}
+
+function splitCandidatesForTile(
+  candidates: PolylineCandidate[],
+  cleanup: PolylineCleanup,
+): {
+  segments: PolylineCandidate[][]
+  speedBreaks: number
+  distanceBreaks: number
+  filteredJumpPoints: number
+} {
+  const jumpFiltered = cleanup.removeIsolatedJumps
+    ? removeIsolatedJumps(candidates, cleanup.breakSpeedKmh)
+    : { candidates, removed: 0 }
+  const distanceSplit = splitByMaxSegmentDistance(
+    jumpFiltered.candidates,
+    cleanup.maxSegmentDistanceKm,
+  )
+  let speedBreaks = 0
+  const segments: PolylineCandidate[][] = []
+  for (const distanceSegment of distanceSplit.segments) {
+    const speedSplit = splitBySpeed(distanceSegment, cleanup.breakSpeedKmh)
+    speedBreaks += speedSplit.breaks
+    segments.push(
+      ...speedSplit.segments.filter((segment) => segment.length >= 2),
+    )
+  }
+  return {
+    segments,
+    speedBreaks,
+    distanceBreaks: distanceSplit.breaks,
+    filteredJumpPoints: jumpFiltered.removed,
+  }
+}
+
+async function renderLineTilePng(
+  source: PreparedLineTileSource,
+  request: LineTileRequest,
+  cleanup: PolylineCleanup,
+): Promise<{ blob: Blob; stats: LineTileRenderStats }> {
+  const normalized = normalizedTileRequest(request)
+  const tileSize = normalized.tileSize ?? LINE_TILE_SIZE
+  const dpr = normalized.devicePixelRatio
+  const canvasCtor = globalThis.OffscreenCanvas
+  if (!canvasCtor) {
+    return {
+      blob: transparentPngBlob(),
+      stats: { lineSegments: 0, renderedLinePoints: 0 },
+    }
+  }
+  const canvas = new canvasCtor(tileSize * dpr, tileSize * dpr)
+  const context = canvas.getContext('2d')
+  if (!context) {
+    return {
+      blob: transparentPngBlob(),
+      stats: { lineSegments: 0, renderedLinePoints: 0 },
+    }
+  }
+
+  context.scale(dpr, dpr)
+  context.clearRect(0, 0, tileSize, tileSize)
+  context.lineJoin = 'round'
+  context.lineCap = 'round'
+
+  const tileBounds = lineTileBounds(normalized)
+  const worldSize = WEB_MERCATOR_TILE_SIZE * 2 ** normalized.z
+  const tileMinX = normalized.x * tileSize
+  const tileMinY = normalized.y * tileSize
+  const paths: Array<Array<{ x: number; y: number }>> = []
+  let renderedLinePoints = 0
+
+  for (const sourceSegment of source.segments) {
+    if (
+      !boundsIntersect(
+        {
+          minLat: sourceSegment.minLat,
+          maxLat: sourceSegment.maxLat,
+          minLon: sourceSegment.minLon,
+          maxLon: sourceSegment.maxLon,
+        },
+        tileBounds,
+      )
+    ) {
+      continue
+    }
+    const split = splitCandidatesForTile(sourceSegment.candidates, cleanup)
+    for (const segment of split.segments) {
+      const segmentBounds = candidateBounds(segment)
+      if (!boundsIntersect(segmentBounds, tileBounds)) continue
+      const path = segment.map((candidate) => {
+        const pixel = lonLatToWorldPixel(candidate.lon, candidate.lat, worldSize)
+        return {
+          x: pixel.x - tileMinX,
+          y: pixel.y - tileMinY,
+        }
+      })
+      if (path.length >= 2) {
+        paths.push(path)
+        renderedLinePoints += path.length
+      }
+    }
+  }
+
+  const strokePaths = (strokeStyle: string, lineWidth: number) => {
+    context.strokeStyle = strokeStyle
+    context.lineWidth = lineWidth
+    for (const path of paths) {
+      context.beginPath()
+      context.moveTo(path[0].x, path[0].y)
+      for (let index = 1; index < path.length; index += 1) {
+        context.lineTo(path[index].x, path[index].y)
+      }
+      context.stroke()
+    }
+  }
+
+  strokePaths('rgba(255, 255, 255, 0.92)', 6)
+  strokePaths('#1b6571', 3)
+
+  return {
+    blob: await canvas.convertToBlob({ type: 'image/png' }),
+    stats: {
+      lineSegments: paths.length,
+      renderedLinePoints,
+    },
+  }
 }
 
 function accumulatorFromCandidates(
@@ -2632,6 +3021,68 @@ export class ResidentPackedGeoIndex {
     return page()
   }
 
+  async scanLineTileSource(
+    minTimestampSec: number,
+    maxTimestampSec: number,
+    isCancelled: CancellationSignal,
+  ): Promise<{
+    segments: LineTileSourceSegment[]
+    sourcePointCount: number
+    sourceGroupCount: number
+    metrics: PackedIndexMetrics
+  }> {
+    const start = this.lowerBound((record) => record.timestampSec < minTimestampSec)
+    const end = this.lowerBound((record) => record.timestampSec <= maxTimestampSec)
+    const metrics = { pagesRead: 0, diskReadBytes: this.indexSizeBytes, candidatesInspected: 0 }
+    const groupedLineCandidates = new Map<string, PolylineCandidate[]>()
+    let sourcePointCount = 0
+    const recordSize = this.recordSize
+
+    for (let chunkStart = start; chunkStart < end;) {
+      throwIfCancelled(isCancelled)
+      const chunkEnd = Math.min(chunkStart + PACKED_MAP_SCAN_RECORDS, end)
+      metrics.pagesRead += 1
+      for (let recordIndex = chunkStart; recordIndex < chunkEnd; recordIndex += 1) {
+        metrics.candidatesInspected += 1
+        const record = this.readRecord(
+          PACKED_INDEX_HEADER_SIZE + recordIndex * recordSize,
+        )
+        const kindCode = record.kindFlags & KIND_CODE_MASK
+        if (kindCode !== KIND_CODE_GEO_POINT) continue
+        if ((record.kindFlags & KIND_FLAG_HAS_GEO) === 0) continue
+        if ((record.qualityFlags ?? 0) & LINE_QUALITY_HAS_GROUP) {
+          const candidate = lineCandidateFromRecord(record)
+          if (!candidate.groupKey || candidate.sequence === undefined) continue
+          sourcePointCount += 1
+          const group = groupedLineCandidates.get(candidate.groupKey) ?? []
+          group.push(candidate)
+          groupedLineCandidates.set(candidate.groupKey, group)
+        }
+      }
+      chunkStart = chunkEnd
+      if (chunkStart < end) await yieldToEventLoop()
+    }
+
+    const segments: LineTileSourceSegment[] = []
+    for (const [groupKey, candidates] of groupedLineCandidates) {
+      const groupedSegments = splitGroupByConsecutiveSequence(groupKey, candidates)
+      for (const segment of groupedSegments.lineSegments) {
+        const sourceSegment = lineTileSourceSegmentFromCandidates(
+          segment.groupKey,
+          segment.candidates,
+        )
+        if (sourceSegment) segments.push(sourceSegment)
+      }
+    }
+
+    return {
+      segments,
+      sourcePointCount,
+      sourceGroupCount: groupedLineCandidates.size,
+      metrics,
+    }
+  }
+
   async scanMapPolyline(
     minTimestampSec: number,
     maxTimestampSec: number,
@@ -3213,6 +3664,189 @@ class FileCatalogStore implements CatalogStore {
     }
   }
 
+  async prepareLineTileSource(
+    spec: SearchSpec,
+    isCancelled: CancellationSignal = neverCancelled,
+  ): Promise<LineTileSourceSummary> {
+    throwIfCancelled(isCancelled)
+    const requestedAt = performance.now()
+    const readyStartedAt = performance.now()
+    const index = await this.residentPackedIndex('file-time-geo')
+    const queryIndexReadyMs = performance.now() - readyStartedAt
+    throwIfCancelled(isCancelled)
+
+    const sourceKey = lineTileSourceKey(
+      index.catalogVersion,
+      spec.startTime,
+      spec.endTime,
+    )
+    const cachedSource = lineTileSources.get(sourceKey)
+    if (cachedSource) {
+      const queryTimeMs = performance.now() - requestedAt
+      return {
+        sourceKey,
+        catalogRevision: cachedSource.catalogRevision,
+        startTime: cachedSource.startTime,
+        endTime: cachedSource.endTime,
+        sourcePointCount: cachedSource.sourcePointCount,
+        sourceGroupCount: cachedSource.sourceGroupCount,
+        sourceSegmentCount: cachedSource.sourceSegmentCount,
+        sourceBuildMs: cachedSource.sourceBuildMs,
+        sourceCacheHit: true,
+        resultMetrics: withQueryMetrics(
+          {
+            ...defaultSearchStats('file-time-geo', fileCatalogIndexSpec().label),
+            pagesRead: cachedSource.metrics.pagesRead,
+            candidatesInspected: cachedSource.metrics.candidatesInspected,
+            diskReadBytes: cachedSource.metrics.diskReadBytes,
+            indexStorage: 'memory',
+            residentBytes: index.indexSizeBytes,
+            pointCount: index.assetCount,
+          },
+          spec,
+          queryTimeMs,
+          cachedSource.sourceSegmentCount,
+          cachedSource.sourcePointCount,
+          0,
+          false,
+          {
+            queryIndexReadyMs,
+            queryIndexScanMs: 0,
+            matchedRecords: cachedSource.sourcePointCount,
+            sourceLinePoints: cachedSource.sourcePointCount,
+            lineSegments: cachedSource.sourceSegmentCount,
+            renderedLinePoints: 0,
+            renderedLineDots: 0,
+            lineTileSourceBuildMs: cachedSource.sourceBuildMs,
+            lineTileSourceCacheHit: true,
+          },
+        ),
+      }
+    }
+
+    const scanStartedAt = performance.now()
+    const page = await index.scanLineTileSource(
+      spec.startTime === undefined ? 0 : timestampSeconds(spec.startTime),
+      spec.endTime === undefined ? 0xffffffff : timestampSeconds(spec.endTime),
+      isCancelled,
+    )
+    const sourceBuildMs = performance.now() - scanStartedAt
+    throwIfCancelled(isCancelled)
+    const source: PreparedLineTileSource = {
+      key: sourceKey,
+      catalogRevision: index.catalogVersion,
+      startTime: spec.startTime,
+      endTime: spec.endTime,
+      segments: page.segments,
+      sourcePointCount: page.sourcePointCount,
+      sourceGroupCount: page.sourceGroupCount,
+      sourceSegmentCount: page.segments.length,
+      sourceBuildMs,
+      metrics: page.metrics,
+    }
+    lineTileSources.set(sourceKey, source)
+
+    return {
+      sourceKey,
+      catalogRevision: source.catalogRevision,
+      startTime: source.startTime,
+      endTime: source.endTime,
+      sourcePointCount: source.sourcePointCount,
+      sourceGroupCount: source.sourceGroupCount,
+      sourceSegmentCount: source.sourceSegmentCount,
+      sourceBuildMs,
+      sourceCacheHit: false,
+      resultMetrics: withQueryMetrics(
+        {
+          ...defaultSearchStats('file-time-geo', fileCatalogIndexSpec().label),
+          pagesRead: page.metrics.pagesRead,
+          candidatesInspected: page.metrics.candidatesInspected,
+          diskReadBytes: page.metrics.diskReadBytes,
+          indexStorage: 'memory',
+          residentBytes: index.indexSizeBytes,
+          pointCount: index.assetCount,
+        },
+        spec,
+        performance.now() - requestedAt,
+        source.sourceSegmentCount,
+        source.sourcePointCount,
+        0,
+        false,
+        {
+          queryIndexReadyMs,
+          queryIndexScanMs: sourceBuildMs,
+          matchedRecords: source.sourcePointCount,
+          sourceLinePoints: source.sourcePointCount,
+          lineSegments: source.sourceSegmentCount,
+          renderedLinePoints: 0,
+          renderedLineDots: 0,
+          lineTileSourceBuildMs: sourceBuildMs,
+          lineTileSourceCacheHit: false,
+        },
+      ),
+    }
+  }
+
+  async getLineTile(
+    request: LineTileRequest,
+    isCancelled: CancellationSignal = neverCancelled,
+  ): Promise<LineTileResult> {
+    throwIfCancelled(isCancelled)
+    const normalized = normalizedTileRequest(request)
+    const source = lineTileSources.get(normalized.sourceKey)
+    if (!source) {
+      throw new Error('Line tile source is not prepared.')
+    }
+    if (source.catalogRevision !== normalized.catalogRevision) {
+      throw new Error('Line tile source is stale.')
+    }
+    const tileKey = lineTileCacheKey(normalized)
+    const cached = await readCachedLineTile(tileKey)
+    if (cached) {
+      return {
+        sourceKey: normalized.sourceKey,
+        tileKey,
+        mimeType: 'image/png',
+        blob: cached,
+        cacheHit: true,
+        tileRenderMs: 0,
+        tileCount: 1,
+        lineSegments: 0,
+        renderedLinePoints: 0,
+      }
+    }
+
+    throwIfCancelled(isCancelled)
+    const startedAt = performance.now()
+    const rendered = await renderLineTilePng(
+      source,
+      normalized,
+      cleanupFromLineTileRequest(normalized),
+    )
+    throwIfCancelled(isCancelled)
+    await writeCachedLineTile(tileKey, rendered.blob)
+    return {
+      sourceKey: normalized.sourceKey,
+      tileKey,
+      mimeType: 'image/png',
+      blob: rendered.blob,
+      cacheHit: false,
+      tileRenderMs: performance.now() - startedAt,
+      tileCount: 1,
+      lineSegments: rendered.stats.lineSegments,
+      renderedLinePoints: rendered.stats.renderedLinePoints,
+    }
+  }
+
+  async clearLineTileCache(scope?: { sourceKey?: string }): Promise<void> {
+    if (scope?.sourceKey) {
+      lineTileSources.delete(scope.sourceKey)
+    } else {
+      lineTileSources.clear()
+    }
+    await clearCachedLineTiles(scope)
+  }
+
   async getMediaByIds(ids: string[]): Promise<MediaItem[]> {
     if (ids.length === 0) return []
     const assetTable = await this.openAssetTable()
@@ -3420,6 +4054,7 @@ class FileCatalogStore implements CatalogStore {
     this.residentPackedIndexes.clear()
     this.residentPackedIndexLoadPromise = undefined
     this.residentPackedIndexLoadError = undefined
+    lineTileSources.clear()
   }
 
   private async readPackedIndexHeader(): Promise<PackedIndexHeader | undefined> {
@@ -5350,6 +5985,20 @@ async function handleRequest(
       return store.searchMapPoints(
         request.payload as SearchSpec,
         () => cancelledRequests.has(request.id),
+      )
+    case 'prepareLineTileSource':
+      return store.prepareLineTileSource(
+        request.payload as SearchSpec,
+        () => cancelledRequests.has(request.id),
+      )
+    case 'getLineTile':
+      return store.getLineTile(
+        request.payload as LineTileRequest,
+        () => cancelledRequests.has(request.id),
+      )
+    case 'clearLineTileCache':
+      return store.clearLineTileCache(
+        request.payload as { sourceKey?: string } | undefined,
       )
     case 'getMediaByIds':
       return store.getMediaByIds(request.payload as string[])

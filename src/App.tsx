@@ -75,6 +75,7 @@ import type {
   EnrichedSearchResult,
   GeoBounds,
   KindFilter,
+  LineTileRequest,
   MapDisplayMode,
   MapPolylineCleanupSource,
   MediaItem,
@@ -324,6 +325,14 @@ function filterValueToKind(value: string): KindFilter {
 
 function statsNumber(value: number | undefined, locale: string): string {
   return typeof value === 'number' ? value.toLocaleString(locale) : '0'
+}
+
+function statsBoolean(
+  value: boolean | undefined,
+  t: (key: TranslationKey, values?: TranslationValues) => string,
+): string {
+  if (value === undefined) return '0'
+  return value ? t('yes') : t('no')
 }
 
 function errorToMessage(error: unknown): string {
@@ -1020,25 +1029,15 @@ function App() {
       timeRange,
     ],
   )
+  const visibleBubbleMapViewport =
+    mapDisplayMode === 'bubbles' ? visibleMapViewport : undefined
   const mapSearchSpec = useMemo<SearchSpec | undefined>(
     () => {
-      if (!visibleMapViewport) return undefined
-
-      const mapAggregation = {
-        zoom: visibleMapViewport.zoom,
-        viewportWidthPx: visibleMapViewport.widthPx,
-        viewportHeightPx: visibleMapViewport.heightPx,
-        bubbleCellSizePx: mapBubbleCellSize,
-        bubbleScale: mapBubbleScale,
-      }
-
       if (mapDisplayMode === 'polyline') {
         return {
           ...timeRange,
           kind: 'geo_point',
           hasGeo: true,
-          geoBounds: visibleMapViewport.bounds,
-          mapAggregation,
           mapMode: 'polyline',
           mapPolyline: {
             tolerancePx: 0,
@@ -1047,8 +1046,6 @@ function App() {
               enabled: true,
               groupLinesOnly: true,
               allowedSources: MAP_POLYLINE_ALLOWED_SOURCES,
-              breakSpeedKmh: lineBreaks.breakSpeedKmh,
-              maxSegmentDistanceKm: lineBreaks.maxSegmentDistanceKm,
               removeIsolatedJumps: true,
               showDots: false,
             },
@@ -1064,11 +1061,21 @@ function App() {
         }
       }
 
+      if (!visibleBubbleMapViewport) return undefined
+
+      const mapAggregation = {
+        zoom: visibleBubbleMapViewport.zoom,
+        viewportWidthPx: visibleBubbleMapViewport.widthPx,
+        viewportHeightPx: visibleBubbleMapViewport.heightPx,
+        bubbleCellSizePx: mapBubbleCellSize,
+        bubbleScale: mapBubbleScale,
+      }
+
       return {
         ...timeRange,
         kind: kindFilter,
         hasGeo: true,
-        geoBounds: visibleMapViewport.bounds,
+        geoBounds: visibleBubbleMapViewport.bounds,
         mapAggregation,
         mapMode: 'bubbles',
         order: {
@@ -1084,13 +1091,12 @@ function App() {
     [
       catalogSort,
       kindFilter,
-      lineBreaks,
       mapBubbleCellSize,
       mapBubbleScale,
       mapDisplayMode,
       mapMaxBubbles,
       timeRange,
-      visibleMapViewport,
+      visibleBubbleMapViewport,
     ],
   )
   const {
@@ -1100,12 +1106,14 @@ function App() {
     pageLimitReached,
     mapItems,
     mapPolyline,
+    lineTileSource,
     mapLoading,
     resultMetrics,
     mapMetrics,
     validation,
     setValidation: setSearchValidation,
     loadWindow,
+    recordLineTileResult,
     clearMap,
   } = useSearchResults({
     catalog,
@@ -1117,6 +1125,36 @@ function App() {
     onError: reportError,
     onStats: setIndexStatsOverride,
   })
+  const requestLineTile = useCallback(
+    (request: Omit<
+      LineTileRequest,
+      | 'sourceKey'
+      | 'catalogRevision'
+      | 'startTime'
+      | 'endTime'
+      | 'breakSpeedKmh'
+      | 'maxSegmentDistanceKm'
+      | 'styleVersion'
+    >) => {
+      if (!lineTileSource) {
+        return Promise.reject(new Error('Line tile source is not ready.'))
+      }
+      return catalog.getLineTile({
+        ...request,
+        sourceKey: lineTileSource.sourceKey,
+        catalogRevision: lineTileSource.catalogRevision,
+        startTime: lineTileSource.startTime,
+        endTime: lineTileSource.endTime,
+        breakSpeedKmh: lineBreaks.breakSpeedKmh,
+        maxSegmentDistanceKm: lineBreaks.maxSegmentDistanceKm,
+        styleVersion: 'line-raster-v1',
+      }).then((result) => {
+        recordLineTileResult(result)
+        return result
+      })
+    },
+    [catalog, lineBreaks, lineTileSource, recordLineTileResult],
+  )
   const effectiveIndexStats =
     indexStatsOverride ?? resultMetrics ?? indexStats
   const hoveredResultPoint = useMemo<QueryPoint | undefined>(() => {
@@ -2115,6 +2153,8 @@ function App() {
               geoItems={mapItems}
               mapMode={mapDisplayMode}
               polyline={mapPolyline}
+              lineTileSource={lineTileSource}
+              onLineTileRequest={requestLineTile}
               renderBatchSize={mapRenderBatchSize}
               bubbleScale={mapBubbleScale}
               geoBounds={geoBounds}
@@ -2590,6 +2630,30 @@ function App() {
                   <div>
                     <dt>{t('renderedLinePoints')}</dt>
                     <dd>{statsNumber(mapMetrics.renderedLinePoints, locale)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('lineTileSourceBuild')}</dt>
+                    <dd>
+                      {formatMilliseconds(mapMetrics.lineTileSourceBuildMs)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{t('lineTileSourceCache')}</dt>
+                    <dd>
+                      {statsBoolean(mapMetrics.lineTileSourceCacheHit, t)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{t('lineTileRender')}</dt>
+                    <dd>{formatMilliseconds(mapMetrics.lineTileRenderMs)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('lineTileCache')}</dt>
+                    <dd>{statsBoolean(mapMetrics.lineTileCacheHit, t)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('lineTileCount')}</dt>
+                    <dd>{statsNumber(mapMetrics.lineTileCount, locale)}</dd>
                   </div>
                   <div>
                     <dt>{t('renderedLineDots')}</dt>

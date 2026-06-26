@@ -6,6 +6,9 @@ import type {
   GeoIndexStats,
   GeoSearchQuery,
   GeoSearchResult,
+  LineTileRequest,
+  LineTileResult,
+  LineTileSourceSummary,
   MapPointPage,
   MediaItem,
   MediaLocation,
@@ -58,6 +61,10 @@ function invokeWithAbort<T>(
   })
 }
 
+type NativeLineTileResult = Omit<LineTileResult, 'blob'> & {
+  bytes: number[] | Uint8Array
+}
+
 class TauriCatalogBackend implements CatalogBackend {
   init(): Promise<CatalogInfo> {
     return invoke('init_catalog')
@@ -87,6 +94,34 @@ class TauriCatalogBackend implements CatalogBackend {
     options: CatalogSearchOptions = {},
   ): Promise<MapPointPage> {
     return invokeWithAbort('search_map_points', { spec }, options.signal)
+  }
+
+  prepareLineTileSource(
+    spec: SearchSpec,
+    options: CatalogSearchOptions = {},
+  ): Promise<LineTileSourceSummary> {
+    return invokeWithAbort('prepare_line_tile_source', { spec }, options.signal)
+  }
+
+  async getLineTile(
+    request: LineTileRequest,
+    options: CatalogSearchOptions = {},
+  ): Promise<LineTileResult> {
+    const result = await invokeWithAbort<NativeLineTileResult>(
+      'get_line_tile',
+      { request },
+      options.signal,
+    )
+    return {
+      ...result,
+      blob: new Blob([new Uint8Array(result.bytes)], {
+        type: result.mimeType,
+      }),
+    }
+  }
+
+  clearLineTileCache(scope?: { sourceKey?: string }): Promise<void> {
+    return invoke('clear_line_tile_cache', { scope })
   }
 
   getMediaByIds(ids: string[]): Promise<MediaItem[]> {

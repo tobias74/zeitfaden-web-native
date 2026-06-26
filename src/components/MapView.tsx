@@ -1,17 +1,25 @@
 import Feature from 'ol/Feature'
 import Map from 'ol/Map'
 import View from 'ol/View'
-import LineString from 'ol/geom/LineString'
 import Point from 'ol/geom/Point'
 import ExtentInteraction from 'ol/interaction/Extent'
 import TileLayer from 'ol/layer/Tile'
 import VectorLayer from 'ol/layer/Vector'
 import { fromLonLat, toLonLat } from 'ol/proj'
+import ImageTileSource from 'ol/source/ImageTile'
 import OSM from 'ol/source/OSM'
 import VectorSource from 'ol/source/Vector'
 import { Circle as CircleStyle, Fill, Stroke, Style, Text } from 'ol/style'
 import { useEffect, useRef } from 'react'
-import type { GeoBounds, MapDisplayMode, MapPoint, MapPolyline } from '../types'
+import type {
+  GeoBounds,
+  LineTileRequest,
+  LineTileResult,
+  LineTileSourceSummary,
+  MapDisplayMode,
+  MapPoint,
+  MapPolyline,
+} from '../types'
 import type { FeatureLike } from 'ol/Feature'
 import type { Extent } from 'ol/extent'
 import type { Pixel } from 'ol/pixel'
@@ -28,12 +36,25 @@ type VisibleMapViewport = {
   heightPx: number
 }
 
+type LineTileRequestBase = Omit<
+  LineTileRequest,
+  | 'sourceKey'
+  | 'catalogRevision'
+  | 'startTime'
+  | 'endTime'
+  | 'breakSpeedKmh'
+  | 'maxSegmentDistanceKm'
+  | 'styleVersion'
+>
+
 type MapViewProps = {
   queryPoint?: QueryPoint
   hoverPoint?: QueryPoint
   geoItems: MapPoint[]
   mapMode: MapDisplayMode
   polyline?: MapPolyline
+  lineTileSource?: LineTileSourceSummary
+  onLineTileRequest?: (request: LineTileRequestBase) => Promise<LineTileResult>
   renderBatchSize: number
   bubbleScale: number
   geoBounds?: GeoBounds
@@ -67,21 +88,6 @@ const boundsStyle = new Style({
 
 const hiddenBoundsHandleStyle = new Style({})
 
-const polylineStyle = [
-  new Style({
-    stroke: new Stroke({
-      color: 'rgba(255, 255, 255, 0.92)',
-      width: 6,
-    }),
-  }),
-  new Style({
-    stroke: new Stroke({
-      color: '#1b6571',
-      width: 3,
-    }),
-  }),
-]
-
 const lineDotStyle = new Style({
   image: new CircleStyle({
     radius: 4,
@@ -92,6 +98,10 @@ const lineDotStyle = new Style({
 
 const mapPointStyleCache = new globalThis.Map<string, Style>()
 const AREA_CURSOR_TOLERANCE_PX = 10
+const LINE_TILE_SIZE = 256
+
+const EMPTY_TILE_DATA_URL =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mNk+M8AAwUBAUl6P8kAAAAASUVORK5CYII='
 
 function formatBubbleCount(count: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`
@@ -315,12 +325,40 @@ function pointFeature(lon: number, lat: number): Feature {
   })
 }
 
+async function imageFromBlob(blob: Blob): Promise<HTMLImageElement> {
+  const image = new Image()
+  image.decoding = 'async'
+  const url = URL.createObjectURL(blob)
+  try {
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve()
+      image.onerror = () => reject(new Error('Line tile image failed to load.'))
+      image.src = url
+    })
+    return image
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
+async function emptyTileImage(): Promise<HTMLImageElement> {
+  const image = new Image()
+  image.decoding = 'async'
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve()
+    image.onerror = () => reject(new Error('Empty line tile failed to load.'))
+    image.src = EMPTY_TILE_DATA_URL
+  })
+  return image
+}
+
 export function MapView({
   queryPoint,
   hoverPoint,
   geoItems,
   mapMode,
-  polyline,
+  lineTileSource,
+  onLineTileRequest,
   renderBatchSize,
   bubbleScale,
   geoBounds,
@@ -342,7 +380,7 @@ export function MapView({
   const pendingBoundsExtentRef = useRef<Extent | undefined>(undefined)
   const syncingBoundsRef = useRef(false)
   const sourceRef = useRef(new VectorSource())
-  const lineSourceRef = useRef(new VectorSource())
+  const lineTileLayerRef = useRef<TileLayer<ImageTileSource> | null>(null)
   const querySourceRef = useRef(new VectorSource())
   const hoverSourceRef = useRef(new VectorSource())
   const renderJobRef = useRef(0)
@@ -355,9 +393,10 @@ export function MapView({
       source: sourceRef.current,
       style: (feature) => mapPointStyle(feature, bubbleScaleRef.current),
     })
-    const lineLayer = new VectorLayer({
-      source: lineSourceRef.current,
-      style: polylineStyle,
+    const lineTileLayer = new TileLayer<ImageTileSource>({
+      source: undefined,
+      opacity: 1,
+      visible: false,
     })
     const queryLayer = new VectorLayer({
       source: querySourceRef.current,
@@ -382,7 +421,7 @@ export function MapView({
         new TileLayer({
           source: new OSM(),
         }),
-        lineLayer,
+        lineTileLayer,
         pointLayer,
         queryLayer,
         hoverLayer,
@@ -474,6 +513,7 @@ export function MapView({
     })
 
     mapRef.current = map
+    lineTileLayerRef.current = lineTileLayer
     extentInteractionRef.current = extentInteraction
     const resizeObserver = new ResizeObserver(() => {
       map.updateSize()
@@ -491,9 +531,55 @@ export function MapView({
       map.removeInteraction(extentInteraction)
       map.setTarget(undefined)
       mapRef.current = null
+      lineTileLayerRef.current = null
       extentInteractionRef.current = null
     }
   }, [onGeoBoundsChange, onQueryPointChange, onVisibleViewportChange])
+
+  useEffect(() => {
+    const lineTileLayer = lineTileLayerRef.current
+    if (!lineTileLayer) return
+
+    if (
+      mapMode !== 'polyline' ||
+      !lineTileSource ||
+      !onLineTileRequest
+    ) {
+      lineTileLayer.setVisible(false)
+      lineTileLayer.setSource(null)
+      return
+    }
+
+    const source = new ImageTileSource({
+      tileSize: LINE_TILE_SIZE,
+      wrapX: false,
+      transition: 0,
+      interpolate: true,
+      loader: async (z, x, y) => {
+        try {
+          const result = await onLineTileRequest({
+            z,
+            x,
+            y,
+            tileSize: LINE_TILE_SIZE,
+            devicePixelRatio: window.devicePixelRatio || 1,
+          })
+          return imageFromBlob(result.blob)
+        } catch {
+          return emptyTileImage()
+        }
+      },
+    })
+
+    lineTileLayer.setSource(source)
+    lineTileLayer.setVisible(true)
+
+    return () => {
+      if (lineTileLayer.getSource() === source) {
+        lineTileLayer.setSource(null)
+      }
+    }
+  }, [lineTileSource, mapMode, onLineTileRequest])
 
   useEffect(() => {
     boundsDrawingRef.current = boundsDrawing
@@ -549,30 +635,6 @@ export function MapView({
       if (timer !== undefined) window.clearTimeout(timer)
     }
   }, [geoItems, mapMode, renderBatchSize])
-
-  useEffect(() => {
-    const lineSource = lineSourceRef.current
-    lineSource.clear(true)
-
-    if (mapMode !== 'polyline' || !polyline) {
-      return
-    }
-
-    const segments = polyline.segments?.length
-      ? polyline.segments
-      : [{ points: polyline.points }]
-    const features = segments.flatMap((segment) => {
-      if (segment.points.length < 2) return []
-      return [
-        new Feature({
-          geometry: new LineString(
-            segment.points.map((point) => fromLonLat([point.lon, point.lat])),
-          ),
-        }),
-      ]
-    })
-    if (features.length > 0) lineSource.addFeatures(features)
-  }, [mapMode, polyline])
 
   useEffect(() => {
     const querySource = querySourceRef.current
