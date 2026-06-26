@@ -137,15 +137,9 @@ const en = {
   mapRenderBatchSizeHint:
     'Lower values keep the app more responsive while map bubbles are drawn.',
   mapQuery: 'Map query',
-  lineCleanup: 'Line cleanup',
-  lineAllowedSources: 'Allowed sources',
-  lineMaxAccuracy: 'Max accuracy',
+  linePathBreaks: 'Line breaks',
   lineBreakSpeed: 'Speed break',
   lineMaxSegmentDistance: 'Max segment length',
-  lineRemoveIsolatedJumps: 'Remove isolated jumps',
-  lineResetFilters: 'Reset line filters',
-  lineCleanupHint:
-    'Runtime-only filters for Line mode. Raw catalog data is not changed.',
   off: 'Off',
   acceptedLinePoints: 'Accepted line points',
   filteredLinePoints: 'Filtered line points',
@@ -362,15 +356,9 @@ const de: Record<TranslationKey, string> = {
   mapRenderBatchSizeHint:
     'Niedrigere Werte halten die App beim Zeichnen der Kartenpunkte reaktionsfähiger.',
   mapQuery: 'Kartenabfrage',
-  lineCleanup: 'Linien-Bereinigung',
-  lineAllowedSources: 'Erlaubte Quellen',
-  lineMaxAccuracy: 'Max. Genauigkeit',
+  linePathBreaks: 'Linienbrüche',
   lineBreakSpeed: 'Geschwindigkeitsbruch',
   lineMaxSegmentDistance: 'Max. Segmentlänge',
-  lineRemoveIsolatedJumps: 'Isolierte Sprünge entfernen',
-  lineResetFilters: 'Linienfilter zurücksetzen',
-  lineCleanupHint:
-    'Nur Laufzeitfilter für den Linienmodus. Rohdaten im Katalog bleiben unverändert.',
   off: 'Aus',
   acceptedLinePoints: 'Akzeptierte Linienpunkte',
   filteredLinePoints: 'Gefilterte Linienpunkte',

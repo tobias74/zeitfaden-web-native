@@ -556,14 +556,16 @@ describe('App pagination', () => {
             query.limit === 10_000 &&
             query.mapPolyline?.tolerancePx === 0 &&
             query.mapPolyline?.maxPoints === 10_000 &&
-            query.mapPolyline.cleanup?.enabled === false &&
-            query.mapPolyline.cleanup.groupLinesOnly === true,
+            query.mapPolyline.cleanup?.enabled === true &&
+            query.mapPolyline.cleanup.groupLinesOnly === true &&
+            query.mapPolyline.cleanup.allowedSources.join(',') ===
+              'GPS,WIFI,CELL,UNKNOWN',
         ),
       ).toBe(true)
     })
   })
 
-  it('sends runtime-only line cleanup filters for polyline map queries', async () => {
+  it('keeps source and accuracy filters hidden while sending line break settings', async () => {
     const { default: App } = await import('./App')
 
     render(<App />)
@@ -571,24 +573,41 @@ describe('App pagination', () => {
     expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
     fireEvent.click(screen.getByRole('button', { name: 'Line' }))
 
-    fireEvent.click(screen.getByLabelText('GPS'))
-    fireEvent.change(screen.getByLabelText('Max accuracy'), {
-      target: { value: '100' },
-    })
+    expect(screen.queryByText('Line cleanup')).toBeNull()
+    expect(screen.queryByLabelText('Allowed sources')).toBeNull()
+    expect(screen.queryByLabelText('Max accuracy')).toBeNull()
     expect(screen.queryByLabelText('Simplification tolerance')).toBeNull()
     const speedBreakSlider = screen.getByRole('slider', { name: 'Speed break' })
     expect((speedBreakSlider as HTMLInputElement).type).toBe('range')
+    expect((speedBreakSlider as HTMLInputElement).value).toBe(
+      (speedBreakSlider as HTMLInputElement).max,
+    )
     fireEvent.change(speedBreakSlider, {
-      target: { value: '130' },
+      target: { value: '3' },
     })
+    expect(
+      searchMapPointCalls.some(
+        (query) => query.mapPolyline?.cleanup?.breakSpeedKmh === 130,
+      ),
+    ).toBe(false)
+    fireEvent.pointerUp(speedBreakSlider)
     const maxSegmentSlider = screen.getByRole('slider', {
       name: 'Max segment length',
     })
     expect((maxSegmentSlider as HTMLInputElement).type).toBe('range')
+    expect((maxSegmentSlider as HTMLInputElement).value).toBe(
+      (maxSegmentSlider as HTMLInputElement).max,
+    )
     fireEvent.change(maxSegmentSlider, {
-      target: { value: '5' },
+      target: { value: '4' },
     })
-    fireEvent.click(screen.getByLabelText('Remove isolated jumps'))
+    expect(
+      searchMapPointCalls.some(
+        (query) => query.mapPolyline?.cleanup?.maxSegmentDistanceKm === 0.25,
+      ),
+    ).toBe(false)
+    fireEvent.pointerUp(maxSegmentSlider)
+    expect(screen.queryByLabelText('Remove isolated jumps')).toBeNull()
     expect(screen.queryByLabelText('Grouped lines only')).toBeNull()
     expect(screen.queryByLabelText('Show standalone dots')).toBeNull()
 
@@ -603,12 +622,12 @@ describe('App pagination', () => {
             query.mapPolyline?.tolerancePx === 0 &&
             cleanup?.enabled === true &&
             cleanup.groupLinesOnly === true &&
-            cleanup.maxAccuracyMeters === 100 &&
+            cleanup.maxAccuracyMeters === undefined &&
             cleanup.breakSpeedKmh === 130 &&
             cleanup.maxSegmentDistanceKm === 0.25 &&
             cleanup.removeIsolatedJumps === true &&
             cleanup.showDots === false &&
-            cleanup.allowedSources.join(',') === 'WIFI,CELL,UNKNOWN'
+            cleanup.allowedSources.join(',') === 'GPS,WIFI,CELL,UNKNOWN'
           )
         }),
       ).toBe(true)

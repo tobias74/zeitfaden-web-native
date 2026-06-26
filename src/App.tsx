@@ -105,14 +105,14 @@ type TimelineGroupSummary = {
   endTime?: number
   sourceTypes: string[]
 }
-type LineCleanupState = {
-  allowedSources: MapPolylineCleanupSource[]
-  maxAccuracyMeters?: number
+type LineBreakState = {
   breakSpeedKmh?: number
   maxSegmentDistanceKm?: number
-  removeIsolatedJumps: boolean
 }
-
+type LineBreakSliderState = {
+  breakSpeedIndex: number
+  maxSegmentDistanceIndex: number
+}
 const LEFT_WIDTH_KEY = 'geo-media-index-lab:left-width'
 const MAP_HEIGHT_KEY = 'geo-media-index-lab:map-height'
 const RESULT_DISPLAY_MODE_KEY = 'geo-media-index-lab:result-display-mode'
@@ -130,18 +130,24 @@ const MAP_BUBBLE_CELL_SIZE_OPTIONS = [48, 64, 80] as const
 const MAP_RENDER_BATCH_SIZE_OPTIONS = [100, 250, 500, 1_000, 2_500] as const
 const MAP_BUBBLE_SCALE_OPTIONS = [0.75, 1, 1.35] as const
 const MAP_MAX_BUBBLES_OPTIONS = [2_000, 5_000, 10_000] as const
-const LINE_CLEANUP_SOURCE_OPTIONS: MapPolylineCleanupSource[] = [
+const MAP_POLYLINE_ALLOWED_SOURCES: MapPolylineCleanupSource[] = [
   'GPS',
   'WIFI',
   'CELL',
   'UNKNOWN',
 ]
-const LINE_MAX_ACCURACY_OPTIONS = [0, 25, 50, 100, 250, 500, 1_000] as const
-const LINE_BREAK_SPEED_MIN = 0
-const LINE_BREAK_SPEED_MAX = 1_000
-const LINE_BREAK_SPEED_STEP = 10
-const LINE_MAX_SEGMENT_DISTANCE_OPTIONS = [
+const LINE_BREAK_SPEED_OPTIONS = [
+  50,
+  80,
+  100,
+  130,
+  200,
+  300,
+  500,
+  1_000,
   0,
+] as const
+const LINE_MAX_SEGMENT_DISTANCE_OPTIONS = [
   0.05,
   0.1,
   0.15,
@@ -173,6 +179,7 @@ const LINE_MAX_SEGMENT_DISTANCE_OPTIONS = [
   500,
   750,
   1_000,
+  0,
 ] as const
 const DEFAULT_RESULT_PAGE_SIZE = 100
 const DEFAULT_MAP_BUBBLE_CELL_SIZE = 64
@@ -180,9 +187,10 @@ const DEFAULT_MAP_RENDER_BATCH_SIZE = 500
 const DEFAULT_MAP_BUBBLE_SCALE = 1
 const DEFAULT_MAP_MAX_BUBBLES = 5_000
 const MAP_POLYLINE_MAX_POINTS = 10_000
-const DEFAULT_LINE_CLEANUP: LineCleanupState = {
-  allowedSources: LINE_CLEANUP_SOURCE_OPTIONS,
-  removeIsolatedJumps: false,
+const DEFAULT_LINE_BREAKS: LineBreakState = {}
+const DEFAULT_LINE_BREAK_SLIDERS: LineBreakSliderState = {
+  breakSpeedIndex: LINE_BREAK_SPEED_OPTIONS.length - 1,
+  maxSegmentDistanceIndex: LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1,
 }
 const DEFAULT_DISTANCE_ENGINE_ID = 'segmented-ball-tree'
 const CATALOG_QUERY_INDEX_ID = 'file-time-geo'
@@ -234,16 +242,6 @@ function mapViewportEqual(
   )
 }
 
-function lineCleanupEnabled(cleanup: LineCleanupState): boolean {
-  return (
-    cleanup.removeIsolatedJumps ||
-    cleanup.maxAccuracyMeters !== undefined ||
-    cleanup.breakSpeedKmh !== undefined ||
-    cleanup.maxSegmentDistanceKm !== undefined ||
-    cleanup.allowedSources.length !== LINE_CLEANUP_SOURCE_OPTIONS.length
-  )
-}
-
 function formatDistanceThresholdKm(value: number, locale: string): string {
   if (value < 1) {
     return `${Math.round(value * 1000).toLocaleString(locale)} m`
@@ -253,25 +251,24 @@ function formatDistanceThresholdKm(value: number, locale: string): string {
   })} km`
 }
 
-function lineMaxSegmentDistanceOptionIndex(value: number | undefined): number {
-  const normalizedValue = value ?? 0
-  const exactIndex = LINE_MAX_SEGMENT_DISTANCE_OPTIONS.indexOf(
-    normalizedValue as (typeof LINE_MAX_SEGMENT_DISTANCE_OPTIONS)[number],
-  )
-  if (exactIndex >= 0) return exactIndex
+function lineBreakSpeedFromOptionIndex(optionIndex: number): number | undefined {
+  const nextOptionIndex = Number.isFinite(optionIndex)
+    ? Math.trunc(clamp(optionIndex, 0, LINE_BREAK_SPEED_OPTIONS.length - 1))
+    : LINE_BREAK_SPEED_OPTIONS.length - 1
+  const nextValue = LINE_BREAK_SPEED_OPTIONS[nextOptionIndex]
+  return nextValue > 0 ? nextValue : undefined
+}
 
-  let nearestIndex = 0
-  let nearestDistance = Math.abs(
-    LINE_MAX_SEGMENT_DISTANCE_OPTIONS[0] - normalizedValue,
-  )
-  LINE_MAX_SEGMENT_DISTANCE_OPTIONS.forEach((option, index) => {
-    const distance = Math.abs(option - normalizedValue)
-    if (distance < nearestDistance) {
-      nearestIndex = index
-      nearestDistance = distance
-    }
-  })
-  return nearestIndex
+function lineMaxSegmentDistanceFromOptionIndex(
+  optionIndex: number,
+): number | undefined {
+  const nextOptionIndex = Number.isFinite(optionIndex)
+    ? Math.trunc(
+        clamp(optionIndex, 0, LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1),
+      )
+    : LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1
+  const nextValue = LINE_MAX_SEGMENT_DISTANCE_OPTIONS[nextOptionIndex]
+  return nextValue > 0 ? nextValue : undefined
 }
 
 function storedNumber(key: string, fallback: number): number {
@@ -921,8 +918,10 @@ function App() {
   const [mapDisplayMode, setMapDisplayModeState] = useState<MapDisplayMode>(() =>
     storedString(MAP_DISPLAY_MODE_KEY, 'bubbles', ['bubbles', 'polyline']),
   )
-  const [lineCleanup, setLineCleanup] =
-    useState<LineCleanupState>(DEFAULT_LINE_CLEANUP)
+  const [lineBreaks, setLineBreaks] =
+    useState<LineBreakState>(DEFAULT_LINE_BREAKS)
+  const [lineBreakSliderIndices, setLineBreakSliderIndices] =
+    useState<LineBreakSliderState>(DEFAULT_LINE_BREAK_SLIDERS)
   const [visibleMapViewport, setVisibleMapViewport] = useState<MapViewport>()
   const [hoveredResultId, setHoveredResultId] = useState<string>()
   const workspaceRef = useRef<HTMLElement | null>(null)
@@ -1045,13 +1044,12 @@ function App() {
             tolerancePx: 0,
             maxPoints: MAP_POLYLINE_MAX_POINTS,
             cleanup: {
-              enabled: lineCleanupEnabled(lineCleanup),
+              enabled: true,
               groupLinesOnly: true,
-              allowedSources: lineCleanup.allowedSources,
-              maxAccuracyMeters: lineCleanup.maxAccuracyMeters,
-              breakSpeedKmh: lineCleanup.breakSpeedKmh,
-              maxSegmentDistanceKm: lineCleanup.maxSegmentDistanceKm,
-              removeIsolatedJumps: lineCleanup.removeIsolatedJumps,
+              allowedSources: MAP_POLYLINE_ALLOWED_SOURCES,
+              breakSpeedKmh: lineBreaks.breakSpeedKmh,
+              maxSegmentDistanceKm: lineBreaks.maxSegmentDistanceKm,
+              removeIsolatedJumps: true,
               showDots: false,
             },
           },
@@ -1086,7 +1084,7 @@ function App() {
     [
       catalogSort,
       kindFilter,
-      lineCleanup,
+      lineBreaks,
       mapBubbleCellSize,
       mapBubbleScale,
       mapDisplayMode,
@@ -1422,50 +1420,33 @@ function App() {
     window.localStorage.setItem(MAP_MAX_BUBBLES_KEY, String(nextValue))
   }, [])
 
-  const toggleLineCleanupSource = useCallback((
-    source: MapPolylineCleanupSource,
-    enabled: boolean,
-  ) => {
-    setLineCleanup((current) => {
-      const sources = new Set(current.allowedSources)
-      if (enabled) sources.add(source)
-      else sources.delete(source)
-      return {
-        ...current,
-        allowedSources: LINE_CLEANUP_SOURCE_OPTIONS.filter((option) =>
-          sources.has(option),
-        ),
-      }
-    })
-  }, [])
-
-  const setLineMaxAccuracy = useCallback((value: number) => {
-    setLineCleanup((current) => ({
+  const setLineBreakSpeedDraft = useCallback((optionIndex: number) => {
+    const nextOptionIndex = Number.isFinite(optionIndex)
+      ? Math.trunc(clamp(optionIndex, 0, LINE_BREAK_SPEED_OPTIONS.length - 1))
+      : LINE_BREAK_SPEED_OPTIONS.length - 1
+    setLineBreakSliderIndices((current) => ({
       ...current,
-      maxAccuracyMeters:
-        value > 0 &&
-        LINE_MAX_ACCURACY_OPTIONS.includes(
-          value as (typeof LINE_MAX_ACCURACY_OPTIONS)[number],
-        )
-          ? value
-          : undefined,
+      breakSpeedIndex: nextOptionIndex,
     }))
   }, [])
 
-  const setLineBreakSpeed = useCallback((value: number) => {
-    const nextValue = Number.isFinite(value)
-      ? Math.round(
-          clamp(value, LINE_BREAK_SPEED_MIN, LINE_BREAK_SPEED_MAX) /
-            LINE_BREAK_SPEED_STEP,
-        ) * LINE_BREAK_SPEED_STEP
-      : LINE_BREAK_SPEED_MIN
-    setLineCleanup((current) => ({
+  const commitLineBreakSpeed = useCallback((optionIndex: number) => {
+    const nextOptionIndex = Number.isFinite(optionIndex)
+      ? Math.trunc(clamp(optionIndex, 0, LINE_BREAK_SPEED_OPTIONS.length - 1))
+      : LINE_BREAK_SPEED_OPTIONS.length - 1
+    setLineBreakSliderIndices((current) => ({
       ...current,
-      breakSpeedKmh: nextValue > 0 ? nextValue : undefined,
+      breakSpeedIndex: nextOptionIndex,
     }))
+    const nextValue = lineBreakSpeedFromOptionIndex(nextOptionIndex)
+    setLineBreaks((current) =>
+      current.breakSpeedKmh === nextValue
+        ? current
+        : { ...current, breakSpeedKmh: nextValue },
+    )
   }, [])
 
-  const setLineMaxSegmentDistance = useCallback((optionIndex: number) => {
+  const setLineMaxSegmentDistanceDraft = useCallback((optionIndex: number) => {
     const nextOptionIndex = Number.isFinite(optionIndex)
       ? Math.trunc(
           clamp(
@@ -1474,23 +1455,33 @@ function App() {
             LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1,
           ),
         )
-      : 0
-    const nextValue = LINE_MAX_SEGMENT_DISTANCE_OPTIONS[nextOptionIndex]
-    setLineCleanup((current) => ({
+      : LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1
+    setLineBreakSliderIndices((current) => ({
       ...current,
-      maxSegmentDistanceKm: nextValue > 0 ? nextValue : undefined,
+      maxSegmentDistanceIndex: nextOptionIndex,
     }))
   }, [])
 
-  const setLineCleanupFlag = useCallback((
-    key: 'removeIsolatedJumps',
-    enabled: boolean,
-  ) => {
-    setLineCleanup((current) => ({ ...current, [key]: enabled }))
-  }, [])
-
-  const resetLineCleanup = useCallback(() => {
-    setLineCleanup(DEFAULT_LINE_CLEANUP)
+  const commitLineMaxSegmentDistance = useCallback((optionIndex: number) => {
+    const nextOptionIndex = Number.isFinite(optionIndex)
+      ? Math.trunc(
+          clamp(
+            optionIndex,
+            0,
+            LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1,
+          ),
+        )
+      : LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1
+    setLineBreakSliderIndices((current) => ({
+      ...current,
+      maxSegmentDistanceIndex: nextOptionIndex,
+    }))
+    const nextValue = lineMaxSegmentDistanceFromOptionIndex(nextOptionIndex)
+    setLineBreaks((current) =>
+      current.maxSegmentDistanceKm === nextValue
+        ? current
+        : { ...current, maxSegmentDistanceKm: nextValue },
+    )
   }, [])
 
   const toggleMetadata = useCallback((enabled: boolean) => {
@@ -1502,6 +1493,14 @@ function App() {
     setShowDebugData(enabled)
     window.localStorage.setItem(DEBUG_DATA_KEY, String(enabled))
   }, [])
+
+  const draftLineBreakSpeed = lineBreakSpeedFromOptionIndex(
+    lineBreakSliderIndices.breakSpeedIndex,
+  )
+  const draftLineMaxSegmentDistance =
+    lineMaxSegmentDistanceFromOptionIndex(
+      lineBreakSliderIndices.maxSegmentDistanceIndex,
+    )
 
   const resizeStyle = {
     '--left-width': `${leftWidth}px`,
@@ -1878,54 +1877,39 @@ function App() {
                   </p>
                 </div>
                 <div className="display-section">
-                  <span>{t('lineCleanup')}</span>
-                  <div className="settings-checkbox-grid" aria-label={t('lineAllowedSources')}>
-                    {LINE_CLEANUP_SOURCE_OPTIONS.map((source) => (
-                      <label key={source} className="settings-checkbox-row">
-                        <input
-                          type="checkbox"
-                          checked={lineCleanup.allowedSources.includes(source)}
-                          onChange={(event) =>
-                            toggleLineCleanupSource(source, event.target.checked)
-                          }
-                        />
-                        {source}
-                      </label>
-                    ))}
-                  </div>
-                  <label className="settings-select-row">
-                    {t('lineMaxAccuracy')}
-                    <select
-                      value={lineCleanup.maxAccuracyMeters ?? 0}
-                      onChange={(event) =>
-                        setLineMaxAccuracy(Number(event.target.value))
-                      }
-                    >
-                      {LINE_MAX_ACCURACY_OPTIONS.map((value) => (
-                        <option key={value} value={value}>
-                          {value === 0 ? t('off') : `${value.toLocaleString(locale)} m`}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <span>{t('linePathBreaks')}</span>
                   <label className="settings-slider-row">
                     <span>
                       {t('lineBreakSpeed')}
                       <strong>
-                        {lineCleanup.breakSpeedKmh === undefined
+                        {draftLineBreakSpeed === undefined
                           ? t('off')
-                          : `${lineCleanup.breakSpeedKmh.toLocaleString(locale)} km/h`}
+                          : `${draftLineBreakSpeed.toLocaleString(locale)} km/h`}
                       </strong>
                     </span>
                     <input
                       aria-label={t('lineBreakSpeed')}
+                      aria-valuetext={
+                        draftLineBreakSpeed === undefined
+                          ? t('off')
+                          : `${draftLineBreakSpeed.toLocaleString(locale)} km/h`
+                      }
                       type="range"
-                      min={LINE_BREAK_SPEED_MIN}
-                      max={LINE_BREAK_SPEED_MAX}
-                      step={LINE_BREAK_SPEED_STEP}
-                      value={lineCleanup.breakSpeedKmh ?? 0}
+                      min={0}
+                      max={LINE_BREAK_SPEED_OPTIONS.length - 1}
+                      step={1}
+                      value={lineBreakSliderIndices.breakSpeedIndex}
                       onChange={(event) =>
-                        setLineBreakSpeed(Number(event.target.value))
+                        setLineBreakSpeedDraft(Number(event.target.value))
+                      }
+                      onPointerUp={(event) =>
+                        commitLineBreakSpeed(Number(event.currentTarget.value))
+                      }
+                      onKeyUp={(event) =>
+                        commitLineBreakSpeed(Number(event.currentTarget.value))
+                      }
+                      onBlur={(event) =>
+                        commitLineBreakSpeed(Number(event.currentTarget.value))
                       }
                     />
                   </label>
@@ -1933,10 +1917,10 @@ function App() {
                     <span>
                       {t('lineMaxSegmentDistance')}
                       <strong>
-                        {lineCleanup.maxSegmentDistanceKm === undefined
+                        {draftLineMaxSegmentDistance === undefined
                           ? t('off')
                           : formatDistanceThresholdKm(
-                              lineCleanup.maxSegmentDistanceKm,
+                              draftLineMaxSegmentDistance,
                               locale,
                             )}
                       </strong>
@@ -1944,10 +1928,10 @@ function App() {
                     <input
                       aria-label={t('lineMaxSegmentDistance')}
                       aria-valuetext={
-                        lineCleanup.maxSegmentDistanceKm === undefined
+                        draftLineMaxSegmentDistance === undefined
                           ? t('off')
                           : formatDistanceThresholdKm(
-                              lineCleanup.maxSegmentDistanceKm,
+                              draftLineMaxSegmentDistance,
                               locale,
                             )
                       }
@@ -1955,31 +1939,27 @@ function App() {
                       min={0}
                       max={LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1}
                       step={1}
-                      value={lineMaxSegmentDistanceOptionIndex(
-                        lineCleanup.maxSegmentDistanceKm,
-                      )}
+                      value={lineBreakSliderIndices.maxSegmentDistanceIndex}
                       onChange={(event) =>
-                        setLineMaxSegmentDistance(Number(event.target.value))
+                        setLineMaxSegmentDistanceDraft(Number(event.target.value))
                       }
-                    />
-                  </label>
-                  <label className="settings-checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={lineCleanup.removeIsolatedJumps}
-                      onChange={(event) =>
-                        setLineCleanupFlag(
-                          'removeIsolatedJumps',
-                          event.target.checked,
+                      onPointerUp={(event) =>
+                        commitLineMaxSegmentDistance(
+                          Number(event.currentTarget.value),
+                        )
+                      }
+                      onKeyUp={(event) =>
+                        commitLineMaxSegmentDistance(
+                          Number(event.currentTarget.value),
+                        )
+                      }
+                      onBlur={(event) =>
+                        commitLineMaxSegmentDistance(
+                          Number(event.currentTarget.value),
                         )
                       }
                     />
-                    {t('lineRemoveIsolatedJumps')}
                   </label>
-                  <button type="button" onClick={resetLineCleanup}>
-                    {t('lineResetFilters')}
-                  </button>
-                  <p className="settings-hint">{t('lineCleanupHint')}</p>
                 </div>
                 <div className="display-section">
                   <label className="toggle-row">

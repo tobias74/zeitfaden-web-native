@@ -1497,16 +1497,8 @@ function normalizePolylineCleanup(
   return {
     enabled: cleanup?.enabled === true,
     groupLinesOnly: true,
-    allowedSources: new Set(
-      cleanup?.allowedSources?.length
-        ? cleanup.allowedSources
-        : ['GPS', 'WIFI', 'CELL', 'UNKNOWN'],
-    ),
-    maxAccuracyMeters:
-      typeof cleanup?.maxAccuracyMeters === 'number' &&
-      Number.isFinite(cleanup.maxAccuracyMeters)
-        ? cleanup.maxAccuracyMeters
-        : undefined,
+    allowedSources: new Set(['GPS', 'WIFI', 'CELL', 'UNKNOWN']),
+    maxAccuracyMeters: undefined,
     breakSpeedKmh:
       typeof cleanup?.breakSpeedKmh === 'number' &&
       Number.isFinite(cleanup.breakSpeedKmh)
@@ -1518,7 +1510,7 @@ function normalizePolylineCleanup(
       cleanup.maxSegmentDistanceKm > 0
         ? cleanup.maxSegmentDistanceKm
         : undefined,
-    removeIsolatedJumps: cleanup?.removeIsolatedJumps === true,
+    removeIsolatedJumps: true,
     showDots: false,
   }
 }

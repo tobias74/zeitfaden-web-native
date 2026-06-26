@@ -5568,23 +5568,14 @@ struct NativeCandidateSegment {
 
 fn normalize_polyline_cleanup(map_polyline: Option<&MapPolylineSpec>) -> NativePolylineCleanup {
     let cleanup = map_polyline.and_then(|options| options.cleanup.as_ref());
-    let allowed_sources = cleanup
-        .filter(|options| !options.allowed_sources.is_empty())
-        .map(|options| options.allowed_sources.iter().cloned().collect())
-        .unwrap_or_else(|| {
-            ["GPS", "WIFI", "CELL", "UNKNOWN"]
-                .iter()
-                .map(|source| source.to_string())
-                .collect()
-        });
+    let allowed_sources = ["GPS", "WIFI", "CELL", "UNKNOWN"]
+        .iter()
+        .map(|source| source.to_string())
+        .collect();
     NativePolylineCleanup {
         enabled: cleanup.is_some_and(|options| options.enabled),
         allowed_sources,
-        max_accuracy_meters: cleanup.and_then(|options| {
-            options
-                .max_accuracy_meters
-                .filter(|value| value.is_finite())
-        }),
+        max_accuracy_meters: None,
         break_speed_kmh: cleanup
             .and_then(|options| options.break_speed_kmh.filter(|value| value.is_finite())),
         max_segment_distance_km: cleanup.and_then(|options| {
@@ -5592,7 +5583,7 @@ fn normalize_polyline_cleanup(map_polyline: Option<&MapPolylineSpec>) -> NativeP
                 .max_segment_distance_km
                 .filter(|value| value.is_finite() && *value > 0.0)
         }),
-        remove_isolated_jumps: cleanup.is_some_and(|options| options.remove_isolated_jumps),
+        remove_isolated_jumps: true,
         show_dots: false,
     }
 }

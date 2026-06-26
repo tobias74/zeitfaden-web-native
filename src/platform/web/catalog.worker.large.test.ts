@@ -761,7 +761,7 @@ describe('catalog worker packed query hot paths', () => {
           enabled: true,
           groupLinesOnly: true,
           allowedSources: ['GPS', 'WIFI', 'CELL', 'UNKNOWN'],
-          removeIsolatedJumps: false,
+          removeIsolatedJumps: true,
         },
       },
       () => false,
@@ -822,7 +822,7 @@ describe('catalog worker packed query hot paths', () => {
           enabled: true,
           groupLinesOnly: false,
           allowedSources: ['GPS', 'WIFI', 'CELL', 'UNKNOWN'],
-          removeIsolatedJumps: false,
+          removeIsolatedJumps: true,
         },
       },
       () => false,
@@ -842,7 +842,7 @@ describe('catalog worker packed query hot paths', () => {
     expect(page.points).toHaveLength(0)
   })
 
-  it('filters map polylines by source and accuracy payload fields', async () => {
+  it('does not filter map polylines by source or accuracy payload fields', async () => {
     const baseTime = 1_700_100_000
     const records: PackedIndexRecord[] = [
       withGroupSequence({
@@ -855,7 +855,7 @@ describe('catalog worker packed query hot paths', () => {
         qualityFlags: constants.LINE_QUALITY_HAS_ACCURACY,
         accuracyMeters: 10,
       }, 0),
-      {
+      withGroupSequence({
         timestampSec: baseTime + 1,
         latE7: coordinateE7(47.01),
         lonE7: coordinateE7(8.01),
@@ -864,8 +864,8 @@ describe('catalog worker packed query hot paths', () => {
         sourceCode: constants.LINE_SOURCE_CELL,
         qualityFlags: constants.LINE_QUALITY_HAS_ACCURACY,
         accuracyMeters: 10,
-      },
-      {
+      }, 1),
+      withGroupSequence({
         timestampSec: baseTime + 2,
         latE7: coordinateE7(47.02),
         lonE7: coordinateE7(8.02),
@@ -874,7 +874,7 @@ describe('catalog worker packed query hot paths', () => {
         sourceCode: constants.LINE_SOURCE_GPS,
         qualityFlags: constants.LINE_QUALITY_HAS_ACCURACY,
         accuracyMeters: 500,
-      },
+      }, 2),
       withGroupSequence({
         timestampSec: baseTime + 3,
         latE7: coordinateE7(47.03),
@@ -884,7 +884,7 @@ describe('catalog worker packed query hot paths', () => {
         sourceCode: constants.LINE_SOURCE_GPS,
         qualityFlags: constants.LINE_QUALITY_HAS_ACCURACY,
         accuracyMeters: 12,
-      }, 1),
+      }, 3),
     ]
     const page = await makePackedIndex(records).scanMapPolyline(
       0,
@@ -900,17 +900,19 @@ describe('catalog worker packed query hot paths', () => {
           groupLinesOnly: false,
           allowedSources: ['GPS'],
           maxAccuracyMeters: 100,
-          removeIsolatedJumps: false,
+          removeIsolatedJumps: true,
         },
       },
       () => false,
     )
 
     expect(page.matchedRecords).toBe(4)
-    expect(page.acceptedLinePoints).toBe(2)
-    expect(page.filteredQualityPoints).toBe(2)
+    expect(page.acceptedLinePoints).toBe(4)
+    expect(page.filteredQualityPoints).toBe(0)
     expect(page.polyline?.points).toEqual([
       { lat: 47, lon: 8 },
+      { lat: 47.01, lon: 8.01 },
+      { lat: 47.02, lon: 8.02 },
       { lat: 47.03, lon: 8.03 },
     ])
   })
@@ -1013,7 +1015,7 @@ describe('catalog worker packed query hot paths', () => {
           groupLinesOnly: false,
           allowedSources: ['GPS', 'WIFI', 'CELL', 'UNKNOWN'],
           maxSegmentDistanceKm: 25,
-          removeIsolatedJumps: false,
+          removeIsolatedJumps: true,
         },
       },
       () => false,
@@ -1071,7 +1073,7 @@ describe('catalog worker packed query hot paths', () => {
           groupLinesOnly: false,
           allowedSources: ['GPS', 'WIFI', 'CELL', 'UNKNOWN'],
           maxSegmentDistanceKm: 25,
-          removeIsolatedJumps: false,
+          removeIsolatedJumps: true,
           showDots: false,
         },
       },
