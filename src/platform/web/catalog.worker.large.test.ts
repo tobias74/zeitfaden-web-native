@@ -680,7 +680,7 @@ describe('catalog worker packed query hot paths', () => {
     ).toBe(true)
   })
 
-  it('renders grouped line segments and ungrouped dots in grouped-only mode', async () => {
+  it('renders grouped line segments without standalone dots in grouped-only mode', async () => {
     const baseTime = 1_700_000_000
     const records: PackedIndexRecord[] = [
       {
@@ -769,9 +769,8 @@ describe('catalog worker packed query hot paths', () => {
 
     expect(page.polyline?.segments).toHaveLength(2)
     expect(page.polyline?.segments?.map((segment) => segment.points.length)).toEqual([2, 2])
-    expect(page.points).toHaveLength(1)
-    expect(page.points[0].assetId).toBe(2)
-    expect(page.renderedLineDots).toBe(1)
+    expect(page.points).toHaveLength(0)
+    expect(page.renderedLineDots).toBe(0)
   })
 
   it('splits grouped map polylines when sequence values are not consecutive', async () => {
@@ -1026,9 +1025,8 @@ describe('catalog worker packed query hot paths', () => {
       { lat: 51.5, lon: 0 },
       { lat: 51.5005, lon: 0.0005 },
     ])
-    expect(page.points).toHaveLength(1)
-    expect(page.points[0].assetId).toBe(10)
-    expect(page.renderedLineDots).toBe(1)
+    expect(page.points).toHaveLength(0)
+    expect(page.renderedLineDots).toBe(0)
   })
 
   it('can suppress singleton map polyline dots after distance splitting', async () => {

@@ -143,7 +143,6 @@ const en = {
   lineBreakSpeed: 'Speed break',
   lineMaxSegmentDistance: 'Max segment length',
   lineRemoveIsolatedJumps: 'Remove isolated jumps',
-  lineShowDots: 'Show standalone dots',
   lineResetFilters: 'Reset line filters',
   lineCleanupHint:
     'Runtime-only filters for Line mode. Raw catalog data is not changed.',
@@ -369,7 +368,6 @@ const de: Record<TranslationKey, string> = {
   lineBreakSpeed: 'Geschwindigkeitsbruch',
   lineMaxSegmentDistance: 'Max. Segmentlänge',
   lineRemoveIsolatedJumps: 'Isolierte Sprünge entfernen',
-  lineShowDots: 'Einzelpunkte anzeigen',
   lineResetFilters: 'Linienfilter zurücksetzen',
   lineCleanupHint:
     'Nur Laufzeitfilter für den Linienmodus. Rohdaten im Katalog bleiben unverändert.',

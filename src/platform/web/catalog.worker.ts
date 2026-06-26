@@ -1519,7 +1519,7 @@ function normalizePolylineCleanup(
         ? cleanup.maxSegmentDistanceKm
         : undefined,
     removeIsolatedJumps: cleanup?.removeIsolatedJumps === true,
-    showDots: cleanup?.showDots !== false,
+    showDots: false,
   }
 }
 

@@ -111,7 +111,6 @@ type LineCleanupState = {
   breakSpeedKmh?: number
   maxSegmentDistanceKm?: number
   removeIsolatedJumps: boolean
-  showDots: boolean
 }
 
 const LEFT_WIDTH_KEY = 'geo-media-index-lab:left-width'
@@ -184,7 +183,6 @@ const MAP_POLYLINE_MAX_POINTS = 10_000
 const DEFAULT_LINE_CLEANUP: LineCleanupState = {
   allowedSources: LINE_CLEANUP_SOURCE_OPTIONS,
   removeIsolatedJumps: false,
-  showDots: true,
 }
 const DEFAULT_DISTANCE_ENGINE_ID = 'segmented-ball-tree'
 const CATALOG_QUERY_INDEX_ID = 'file-time-geo'
@@ -242,7 +240,6 @@ function lineCleanupEnabled(cleanup: LineCleanupState): boolean {
     cleanup.maxAccuracyMeters !== undefined ||
     cleanup.breakSpeedKmh !== undefined ||
     cleanup.maxSegmentDistanceKm !== undefined ||
-    !cleanup.showDots ||
     cleanup.allowedSources.length !== LINE_CLEANUP_SOURCE_OPTIONS.length
   )
 }
@@ -1055,7 +1052,7 @@ function App() {
               breakSpeedKmh: lineCleanup.breakSpeedKmh,
               maxSegmentDistanceKm: lineCleanup.maxSegmentDistanceKm,
               removeIsolatedJumps: lineCleanup.removeIsolatedJumps,
-              showDots: lineCleanup.showDots,
+              showDots: false,
             },
           },
           order: {
@@ -1486,9 +1483,7 @@ function App() {
   }, [])
 
   const setLineCleanupFlag = useCallback((
-    key:
-      | 'removeIsolatedJumps'
-      | 'showDots',
+    key: 'removeIsolatedJumps',
     enabled: boolean,
   ) => {
     setLineCleanup((current) => ({ ...current, [key]: enabled }))
@@ -1980,16 +1975,6 @@ function App() {
                       }
                     />
                     {t('lineRemoveIsolatedJumps')}
-                  </label>
-                  <label className="settings-checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={lineCleanup.showDots}
-                      onChange={(event) =>
-                        setLineCleanupFlag('showDots', event.target.checked)
-                      }
-                    />
-                    {t('lineShowDots')}
                   </label>
                   <button type="button" onClick={resetLineCleanup}>
                     {t('lineResetFilters')}

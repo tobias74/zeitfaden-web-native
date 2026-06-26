@@ -590,7 +590,7 @@ describe('App pagination', () => {
     })
     fireEvent.click(screen.getByLabelText('Remove isolated jumps'))
     expect(screen.queryByLabelText('Grouped lines only')).toBeNull()
-    fireEvent.click(screen.getByLabelText('Show standalone dots'))
+    expect(screen.queryByLabelText('Show standalone dots')).toBeNull()
 
     await waitFor(() => {
       expect(

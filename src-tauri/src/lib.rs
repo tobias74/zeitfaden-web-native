@@ -5593,7 +5593,7 @@ fn normalize_polyline_cleanup(map_polyline: Option<&MapPolylineSpec>) -> NativeP
                 .filter(|value| value.is_finite() && *value > 0.0)
         }),
         remove_isolated_jumps: cleanup.is_some_and(|options| options.remove_isolated_jumps),
-        show_dots: cleanup.and_then(|options| options.show_dots).unwrap_or(true),
+        show_dots: false,
     }
 }
 
