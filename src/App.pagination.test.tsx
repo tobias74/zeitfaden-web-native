@@ -554,7 +554,7 @@ describe('App pagination', () => {
             query.order.kind === 'timestamp' &&
             query.order.sort === 'timestamp_asc' &&
             query.limit === 10_000 &&
-            query.mapPolyline?.tolerancePx === 2 &&
+            query.mapPolyline?.tolerancePx === 0 &&
             query.mapPolyline?.maxPoints === 10_000 &&
             query.mapPolyline.cleanup?.enabled === false &&
             query.mapPolyline.cleanup.groupLinesOnly === true,
@@ -575,13 +575,7 @@ describe('App pagination', () => {
     fireEvent.change(screen.getByLabelText('Max accuracy'), {
       target: { value: '100' },
     })
-    const toleranceSlider = screen.getByRole('slider', {
-      name: 'Simplification tolerance',
-    })
-    expect((toleranceSlider as HTMLInputElement).type).toBe('range')
-    fireEvent.change(toleranceSlider, {
-      target: { value: '6' },
-    })
+    expect(screen.queryByLabelText('Simplification tolerance')).toBeNull()
     const speedBreakSlider = screen.getByRole('slider', { name: 'Speed break' })
     expect((speedBreakSlider as HTMLInputElement).type).toBe('range')
     fireEvent.change(speedBreakSlider, {
@@ -606,7 +600,7 @@ describe('App pagination', () => {
             query.purpose === 'map' &&
             query.mapMode === 'polyline' &&
             query.kind === 'geo_point' &&
-            query.mapPolyline?.tolerancePx === 6 &&
+            query.mapPolyline?.tolerancePx === 0 &&
             cleanup?.enabled === true &&
             cleanup.groupLinesOnly === true &&
             cleanup.maxAccuracyMeters === 100 &&

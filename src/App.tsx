@@ -175,15 +175,11 @@ const LINE_MAX_SEGMENT_DISTANCE_OPTIONS = [
   750,
   1_000,
 ] as const
-const LINE_SIMPLIFICATION_TOLERANCE_MIN = 0
-const LINE_SIMPLIFICATION_TOLERANCE_MAX = 20
-const LINE_SIMPLIFICATION_TOLERANCE_STEP = 0.5
 const DEFAULT_RESULT_PAGE_SIZE = 100
 const DEFAULT_MAP_BUBBLE_CELL_SIZE = 64
 const DEFAULT_MAP_RENDER_BATCH_SIZE = 500
 const DEFAULT_MAP_BUBBLE_SCALE = 1
 const DEFAULT_MAP_MAX_BUBBLES = 5_000
-const MAP_POLYLINE_TOLERANCE_PX = 2
 const MAP_POLYLINE_MAX_POINTS = 10_000
 const DEFAULT_LINE_CLEANUP: LineCleanupState = {
   allowedSources: LINE_CLEANUP_SOURCE_OPTIONS,
@@ -249,12 +245,6 @@ function lineCleanupEnabled(cleanup: LineCleanupState): boolean {
     !cleanup.showDots ||
     cleanup.allowedSources.length !== LINE_CLEANUP_SOURCE_OPTIONS.length
   )
-}
-
-function formatPixelValue(value: number, locale: string): string {
-  return `${value.toLocaleString(locale, {
-    maximumFractionDigits: 1,
-  })} px`
 }
 
 function formatDistanceThresholdKm(value: number, locale: string): string {
@@ -936,8 +926,6 @@ function App() {
   )
   const [lineCleanup, setLineCleanup] =
     useState<LineCleanupState>(DEFAULT_LINE_CLEANUP)
-  const [lineSimplificationTolerancePx, setLineSimplificationTolerancePx] =
-    useState(MAP_POLYLINE_TOLERANCE_PX)
   const [visibleMapViewport, setVisibleMapViewport] = useState<MapViewport>()
   const [hoveredResultId, setHoveredResultId] = useState<string>()
   const workspaceRef = useRef<HTMLElement | null>(null)
@@ -1057,7 +1045,7 @@ function App() {
           mapAggregation,
           mapMode: 'polyline',
           mapPolyline: {
-            tolerancePx: lineSimplificationTolerancePx,
+            tolerancePx: 0,
             maxPoints: MAP_POLYLINE_MAX_POINTS,
             cleanup: {
               enabled: lineCleanupEnabled(lineCleanup),
@@ -1102,7 +1090,6 @@ function App() {
       catalogSort,
       kindFilter,
       lineCleanup,
-      lineSimplificationTolerancePx,
       mapBubbleCellSize,
       mapBubbleScale,
       mapDisplayMode,
@@ -1498,20 +1485,6 @@ function App() {
     }))
   }, [])
 
-  const setLineSimplificationTolerance = useCallback((value: number) => {
-    const boundedValue = Number.isFinite(value)
-      ? clamp(
-          value,
-          LINE_SIMPLIFICATION_TOLERANCE_MIN,
-          LINE_SIMPLIFICATION_TOLERANCE_MAX,
-        )
-      : MAP_POLYLINE_TOLERANCE_PX
-    const steppedValue =
-      Math.round(boundedValue / LINE_SIMPLIFICATION_TOLERANCE_STEP) *
-      LINE_SIMPLIFICATION_TOLERANCE_STEP
-    setLineSimplificationTolerancePx(steppedValue)
-  }, [])
-
   const setLineCleanupFlag = useCallback((
     key:
       | 'removeIsolatedJumps'
@@ -1523,7 +1496,6 @@ function App() {
 
   const resetLineCleanup = useCallback(() => {
     setLineCleanup(DEFAULT_LINE_CLEANUP)
-    setLineSimplificationTolerancePx(MAP_POLYLINE_TOLERANCE_PX)
   }, [])
 
   const toggleMetadata = useCallback((enabled: boolean) => {
@@ -1940,25 +1912,6 @@ function App() {
                         </option>
                       ))}
                     </select>
-                  </label>
-                  <label className="settings-slider-row">
-                    <span>
-                      {t('simplificationTolerance')}
-                      <strong>
-                        {formatPixelValue(lineSimplificationTolerancePx, locale)}
-                      </strong>
-                    </span>
-                    <input
-                      aria-label={t('simplificationTolerance')}
-                      type="range"
-                      min={LINE_SIMPLIFICATION_TOLERANCE_MIN}
-                      max={LINE_SIMPLIFICATION_TOLERANCE_MAX}
-                      step={LINE_SIMPLIFICATION_TOLERANCE_STEP}
-                      value={lineSimplificationTolerancePx}
-                      onChange={(event) =>
-                        setLineSimplificationTolerance(Number(event.target.value))
-                      }
-                    />
                   </label>
                   <label className="settings-slider-row">
                     <span>
@@ -2676,17 +2629,6 @@ function App() {
                   <div>
                     <dt>{t('renderedLineDots')}</dt>
                     <dd>{statsNumber(mapMetrics.renderedLineDots, locale)}</dd>
-                  </div>
-                  <div>
-                    <dt>{t('simplificationTolerance')}</dt>
-                    <dd>
-                      {`${statsNumber(
-                        typeof mapMetrics.simplificationTolerancePx === 'number'
-                          ? Number(mapMetrics.simplificationTolerancePx.toFixed(2))
-                          : undefined,
-                        locale,
-                      )} px`}
-                    </dd>
                   </div>
                   <div>
                     <dt>{t('largestBubble')}</dt>
