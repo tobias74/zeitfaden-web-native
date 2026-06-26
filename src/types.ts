@@ -1,4 +1,11 @@
-export type MediaKind = 'image' | 'video' | 'geo_point'
+export type MediaKind =
+  | 'image'
+  | 'video'
+  | 'geo_point'
+  | 'timeline_visit'
+  | 'timeline_activity'
+  | 'activity_sample'
+  | 'frequent_place'
 export type KindFilter = MediaKind | 'all' | 'media'
 export type MapDisplayMode = 'bubbles' | 'polyline'
 
@@ -10,6 +17,12 @@ export type MediaLocation = {
   relativePath?: string
   absolutePath?: string
   pointIndex?: number
+  sourceDataset?: string
+  sourceType?: string
+  groupId?: string
+  sequence?: number
+  timestamp?: number
+  endTimestamp?: number
 }
 
 export type MediaItem = {
@@ -23,8 +36,19 @@ export type MediaItem = {
   sizeBytes: number
   durationMs?: number
   timestamp?: number
+  endTimestamp?: number
   latitude?: number
   longitude?: number
+  sourceDataset?: string
+  sourceType?: string
+  accuracyMeters?: number
+  altitudeMeters?: number
+  verticalAccuracyMeters?: number
+  velocityMetersPerSecond?: number
+  headingDegrees?: number
+  groupId?: string
+  sequence?: number
+  metadata?: Record<string, unknown>
   thumbnailKey?: string
   locations: MediaLocation[]
 }
@@ -83,8 +107,27 @@ export type MapPolylinePoint = {
   lon: number
 }
 
+export type MapPolylineSegment = {
+  points: MapPolylinePoint[]
+  groupKey?: string
+}
+
+export type MapPolylineCleanupSource = 'GPS' | 'WIFI' | 'CELL' | 'UNKNOWN'
+
+export type MapPolylineCleanupSpec = {
+  enabled: boolean
+  groupLinesOnly: boolean
+  allowedSources: MapPolylineCleanupSource[]
+  maxAccuracyMeters?: number
+  breakSpeedKmh?: number
+  maxSegmentDistanceKm?: number
+  removeIsolatedJumps: boolean
+  showDots?: boolean
+}
+
 export type MapPolyline = {
   points: MapPolylinePoint[]
+  segments?: MapPolylineSegment[]
   bounds?: GeoBounds
   sourcePointCount: number
   simplifiedPointCount: number
@@ -146,6 +189,7 @@ export type SearchSpec = TimeRange & {
   mapPolyline?: {
     tolerancePx: number
     maxPoints: number
+    cleanup?: MapPolylineCleanupSpec
   }
   order: SearchOrder
   limit?: number
@@ -227,7 +271,15 @@ export type SearchIndexStats = GeoIndexStats & {
   renderedBubbles?: number
   largestBubbleCount?: number
   sourceLinePoints?: number
+  acceptedLinePoints?: number
+  filteredLinePoints?: number
+  filteredQualityPoints?: number
+  filteredJumpPoints?: number
+  lineSpeedBreaks?: number
+  lineDistanceBreaks?: number
+  lineSegments?: number
   renderedLinePoints?: number
+  renderedLineDots?: number
   simplificationTolerancePx?: number
   aggregationZoom?: number
   aggregationCellSizePx?: number

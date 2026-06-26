@@ -104,6 +104,7 @@ let resultSearchSignals: AbortSignal[]
 let resultSearchError: Error | undefined
 let mapSearchDelay: Promise<void> | undefined
 let mapSearchSignals: AbortSignal[]
+let resultItemsOverride: MediaItem[] | undefined
 
 function abortError(): Error {
   const error = new Error('Catalog request aborted')
@@ -207,7 +208,9 @@ function createPlatform(): PlatformBackend {
         throw resultSearchError
       }
       return createSearchPage(
-        createItems(spec.offset ?? 0, spec.limit ?? 100),
+        resultItemsOverride && spec.purpose === 'results'
+          ? resultItemsOverride
+          : createItems(spec.offset ?? 0, spec.limit ?? 100),
         spec.purpose === 'results',
       )
     },
@@ -342,6 +345,7 @@ describe('App pagination', () => {
     resultSearchDelay = undefined
     resultSearchSignals = []
     resultSearchError = undefined
+    resultItemsOverride = undefined
     mapSearchDelay = undefined
     mapSearchSignals = []
   })
@@ -389,6 +393,57 @@ describe('App pagination', () => {
       ).toBe(true)
       expect(screen.getAllByText('item-100.jpg')).not.toHaveLength(0)
     })
+  })
+
+  it('shows imported timeline metadata and visible groups', async () => {
+    window.localStorage.setItem('geo-media-index-lab:result-metadata', 'true')
+    resultItemsOverride = [
+      {
+        id: 'timeline-point-1',
+        contentHash: 'timeline-point-1',
+        sourceId: 'timeline-source',
+        relativePath: 'Timeline.json',
+        displayName: 'Timeline path point',
+        kind: 'geo_point',
+        mimeType: 'application/json',
+        sizeBytes: 0,
+        timestamp: Date.parse('2026-06-01T10:10:00.000Z'),
+        latitude: 48.1370673,
+        longitude: 11.5775995,
+        sourceDataset: 'google_timeline',
+        sourceType: 'timeline_path',
+        accuracyMeters: 12,
+        altitudeMeters: 366,
+        verticalAccuracyMeters: 2,
+        velocityMetersPerSecond: 3.5,
+        headingDegrees: 80,
+        groupId: 'google_timeline_segment:v1:7:1780308000000:1780311600000',
+        sequence: 3,
+        locations: [
+          {
+            id: 'timeline-location-1',
+            sourceId: 'timeline-source',
+            sourceLabel: 'Timeline.json',
+            pointIndex: 1,
+            sourceDataset: 'google_timeline',
+            sourceType: 'timeline_path',
+            groupId: 'google_timeline_segment:v1:7:1780308000000:1780311600000',
+            sequence: 3,
+            timestamp: Date.parse('2026-06-01T10:10:00.000Z'),
+          },
+        ],
+      },
+    ]
+    const { default: App } = await import('./App')
+
+    render(<App />)
+
+    expect((await screen.findAllByText('Timeline path point')).length).toBeGreaterThan(0)
+    expect(screen.getByText('Tours / groups')).toBeTruthy()
+    expect(screen.getAllByText(/Segment 7/).length).toBeGreaterThan(0)
+    expect(screen.getByText(/Dataset: google_timeline/)).toBeTruthy()
+    expect(screen.getByText(/Source type: timeline_path/)).toBeTruthy()
+    expect(screen.getByText(/Accuracy: 12 m/)).toBeTruthy()
   })
 
   it('shows a map loading strip while map events are loading', async () => {
@@ -500,9 +555,74 @@ describe('App pagination', () => {
             query.order.sort === 'timestamp_asc' &&
             query.limit === 10_000 &&
             query.mapPolyline?.tolerancePx === 2 &&
-            query.mapPolyline.maxPoints === 10_000,
+            query.mapPolyline?.maxPoints === 10_000 &&
+            query.mapPolyline.cleanup?.enabled === false &&
+            query.mapPolyline.cleanup.groupLinesOnly === true,
         ),
       ).toBe(true)
+    })
+  })
+
+  it('sends runtime-only line cleanup filters for polyline map queries', async () => {
+    const { default: App } = await import('./App')
+
+    render(<App />)
+
+    expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Line' }))
+
+    fireEvent.click(screen.getByLabelText('GPS'))
+    fireEvent.change(screen.getByLabelText('Max accuracy'), {
+      target: { value: '100' },
+    })
+    const toleranceSlider = screen.getByRole('slider', {
+      name: 'Simplification tolerance',
+    })
+    expect((toleranceSlider as HTMLInputElement).type).toBe('range')
+    fireEvent.change(toleranceSlider, {
+      target: { value: '6' },
+    })
+    const speedBreakSlider = screen.getByRole('slider', { name: 'Speed break' })
+    expect((speedBreakSlider as HTMLInputElement).type).toBe('range')
+    fireEvent.change(speedBreakSlider, {
+      target: { value: '130' },
+    })
+    const maxSegmentSlider = screen.getByRole('slider', {
+      name: 'Max segment length',
+    })
+    expect((maxSegmentSlider as HTMLInputElement).type).toBe('range')
+    fireEvent.change(maxSegmentSlider, {
+      target: { value: '5' },
+    })
+    fireEvent.click(screen.getByLabelText('Remove isolated jumps'))
+    expect(screen.queryByLabelText('Grouped lines only')).toBeNull()
+    fireEvent.click(screen.getByLabelText('Show standalone dots'))
+
+    await waitFor(() => {
+      expect(
+        searchMapPointCalls.some((query) => {
+          const cleanup = query.mapPolyline?.cleanup
+          return (
+            query.purpose === 'map' &&
+            query.mapMode === 'polyline' &&
+            query.kind === 'geo_point' &&
+            query.mapPolyline?.tolerancePx === 6 &&
+            cleanup?.enabled === true &&
+            cleanup.groupLinesOnly === true &&
+            cleanup.maxAccuracyMeters === 100 &&
+            cleanup.breakSpeedKmh === 130 &&
+            cleanup.maxSegmentDistanceKm === 0.25 &&
+            cleanup.removeIsolatedJumps === true &&
+            cleanup.showDots === false &&
+            cleanup.allowedSources.join(',') === 'WIFI,CELL,UNKNOWN'
+          )
+        }),
+      ).toBe(true)
+      expect(
+        Array.from({ length: window.localStorage.length }, (_, index) =>
+          window.localStorage.key(index),
+        ).some((key) => key?.includes('line-cleanup')),
+      ).toBe(false)
     })
   })
 

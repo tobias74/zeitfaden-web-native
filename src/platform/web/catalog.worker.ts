@@ -11,21 +11,26 @@ import { GeoIndexRegistry } from '../../geo/registry'
 import {
   geoPointContentHash,
   parseGeoFilePoints,
+  semanticContentHash,
+  type ParsedGeoItem,
   type ParsedGeoPoint,
 } from '../../lib/geoPoint'
 import { GoogleTakeoutLocationStreamParser } from '../../lib/googleTakeoutStream'
+import { haversineMeters } from '../../lib/distance'
 import { detectMediaKind, pathDisplayName } from '../../lib/media'
 import { sha256Hex } from '../../lib/sha256'
 import { traceStartup } from '../../lib/startupTrace'
 import { SearchIndexRegistry as SearchIndexEngineRegistry } from '../../search/registry'
 import type {
   CatalogQuery,
+  GeoBounds,
   GeoIndexPoint,
   GeoSearchQuery,
   GeoSearchResult,
   MapPoint,
   MapPointPage,
   MapPolyline,
+  MediaKind,
   MediaItem,
   MediaLocation,
   MediaSource,
@@ -70,7 +75,7 @@ type ImportGeoFilePayload = {
 type CancellationSignal = () => boolean
 
 type CatalogManifest = {
-  schemaVersion: 1
+  schemaVersion: 2
   catalogVersion: number
   nextAssetId: number
   assetStoreVersion: number
@@ -203,21 +208,35 @@ const TIME_GEO_INDEX_FILE = 'time-geo.idx'
 const ASSET_TABLE_MAGIC = 0x41535431
 const ASSET_ID_MAP_MAGIC = 0x41494431
 const PACKED_INDEX_MAGIC = 0x50495831
-const BINARY_SCHEMA_VERSION = 1
+const BINARY_SCHEMA_VERSION = 3
 const ASSET_TABLE_HEADER_SIZE = 32
 const ASSET_RECORD_INDEX_ENTRY_SIZE = 16
 const ASSET_ID_MAP_HEADER_SIZE = 32
 const ASSET_ID_MAP_ENTRY_SIZE = 72
 const PACKED_INDEX_HEADER_SIZE = 96
-const TIME_GEO_RECORD_SIZE = 20
+const TIME_GEO_RECORD_SIZE = 44
 const PACKED_SCAN_RECORDS = 8192
 const PACKED_MAP_SCAN_RECORDS = 131_072
 const MAX_RENDERED_MAP_BUBBLES = 5_000
 const INDEX_KIND_TIME_GEO = 1
-const KIND_FLAG_IMAGE = 0
-const KIND_FLAG_VIDEO = 1
-const KIND_FLAG_GEO_POINT = 2
-const KIND_FLAG_HAS_GEO = 1 << 2
+const KIND_CODE_IMAGE = 0
+const KIND_CODE_VIDEO = 1
+const KIND_CODE_GEO_POINT = 2
+const KIND_CODE_TIMELINE_VISIT = 3
+const KIND_CODE_TIMELINE_ACTIVITY = 4
+const KIND_CODE_ACTIVITY_SAMPLE = 5
+const KIND_CODE_FREQUENT_PLACE = 6
+const KIND_CODE_MASK = 0x7f
+const KIND_FLAG_HAS_GEO = 1 << 7
+const LINE_SOURCE_UNKNOWN = 0
+const LINE_SOURCE_GPS = 1
+const LINE_SOURCE_WIFI = 2
+const LINE_SOURCE_CELL = 3
+const LINE_QUALITY_HAS_ACCURACY = 1 << 0
+const LINE_QUALITY_HAS_VELOCITY = 1 << 1
+const LINE_QUALITY_HAS_HEADING = 1 << 2
+const LINE_QUALITY_HAS_GROUP = 1 << 3
+const LINE_QUALITY_HAS_SEQUENCE = 1 << 4
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 
@@ -441,29 +460,156 @@ function coordinateFromE7(value: number): number {
   return value / 10_000_000
 }
 
+function mediaKindFromUnknown(value: unknown): MediaKind {
+  switch (value) {
+    case 'video':
+    case 'geo_point':
+    case 'timeline_visit':
+    case 'timeline_activity':
+    case 'activity_sample':
+    case 'frequent_place':
+      return value
+    default:
+      return 'image'
+  }
+}
+
+function kindCode(kind: MediaKind): number {
+  switch (kind) {
+    case 'video':
+      return KIND_CODE_VIDEO
+    case 'geo_point':
+      return KIND_CODE_GEO_POINT
+    case 'timeline_visit':
+      return KIND_CODE_TIMELINE_VISIT
+    case 'timeline_activity':
+      return KIND_CODE_TIMELINE_ACTIVITY
+    case 'activity_sample':
+      return KIND_CODE_ACTIVITY_SAMPLE
+    case 'frequent_place':
+      return KIND_CODE_FREQUENT_PLACE
+    case 'image':
+      return KIND_CODE_IMAGE
+  }
+}
+
 function kindFlags(item: MediaItem): number {
-  const kind =
-    item.kind === 'video'
-      ? KIND_FLAG_VIDEO
-      : item.kind === 'geo_point'
-        ? KIND_FLAG_GEO_POINT
-        : KIND_FLAG_IMAGE
+  const kind = kindCode(item.kind)
   return kind |
     (item.latitude !== undefined && item.longitude !== undefined
       ? KIND_FLAG_HAS_GEO
       : 0)
 }
 
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function sourceCodeFromValue(value: unknown): number {
+  if (typeof value !== 'string') return LINE_SOURCE_UNKNOWN
+  const normalized = value.trim().toUpperCase()
+  if (normalized === 'GPS') return LINE_SOURCE_GPS
+  if (normalized === 'WIFI' || normalized === 'WI_FI') return LINE_SOURCE_WIFI
+  if (normalized === 'CELL' || normalized === 'CELLULAR') return LINE_SOURCE_CELL
+  return LINE_SOURCE_UNKNOWN
+}
+
+function sourceCodeFromItem(item: MediaItem): number {
+  const metadataSource = item.metadata && typeof item.metadata === 'object'
+    ? (item.metadata as Record<string, unknown>).source
+    : undefined
+  return sourceCodeFromValue(item.sourceType) || sourceCodeFromValue(metadataSource)
+}
+
+function lineSourceFromCode(code: number): 'GPS' | 'WIFI' | 'CELL' | 'UNKNOWN' {
+  if (code === LINE_SOURCE_GPS) return 'GPS'
+  if (code === LINE_SOURCE_WIFI) return 'WIFI'
+  if (code === LINE_SOURCE_CELL) return 'CELL'
+  return 'UNKNOWN'
+}
+
+function hashString64(value: string | undefined): { lo: number; hi: number } {
+  if (!value) return { lo: 0, hi: 0 }
+  let hash = 0xcbf29ce484222325n
+  const prime = 0x100000001b3n
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= BigInt(value.charCodeAt(index))
+    hash = BigInt.asUintN(64, hash * prime)
+  }
+  return {
+    lo: Number(hash & 0xffff_ffffn),
+    hi: Number((hash >> 32n) & 0xffff_ffffn),
+  }
+}
+
+function linePayloadFromItem(item: MediaItem): Pick<
+  PackedIndexRecord,
+  | 'sourceCode'
+  | 'qualityFlags'
+  | 'accuracyMeters'
+  | 'velocityMetersPerSecond'
+  | 'headingDegrees'
+  | 'groupHashLo'
+  | 'groupHashHi'
+  | 'sequence'
+> {
+  const groupHash = hashString64(item.groupId)
+  const sequence = finiteNumber(item.sequence)
+  let qualityFlags = 0
+  const accuracyMeters = finiteNumber(item.accuracyMeters)
+  const velocityMetersPerSecond = finiteNumber(item.velocityMetersPerSecond)
+  const headingDegrees = finiteNumber(item.headingDegrees)
+  if (accuracyMeters !== undefined) qualityFlags |= LINE_QUALITY_HAS_ACCURACY
+  if (velocityMetersPerSecond !== undefined) qualityFlags |= LINE_QUALITY_HAS_VELOCITY
+  if (headingDegrees !== undefined) qualityFlags |= LINE_QUALITY_HAS_HEADING
+  if (groupHash.lo !== 0 || groupHash.hi !== 0) qualityFlags |= LINE_QUALITY_HAS_GROUP
+  if (sequence !== undefined) qualityFlags |= LINE_QUALITY_HAS_SEQUENCE
+  return {
+    sourceCode: sourceCodeFromItem(item),
+    qualityFlags,
+    accuracyMeters,
+    velocityMetersPerSecond,
+    headingDegrees,
+    groupHashLo: groupHash.lo,
+    groupHashHi: groupHash.hi,
+    sequence,
+  }
+}
+
 function kindFromFlags(flags: number): MapPoint['kind'] {
-  const encoded = flags & 0b11
-  if (encoded === KIND_FLAG_VIDEO) return 'video'
-  if (encoded === KIND_FLAG_GEO_POINT) return 'geo_point'
+  const encoded = flags & KIND_CODE_MASK
+  if (encoded === KIND_CODE_VIDEO) return 'video'
+  if (encoded === KIND_CODE_GEO_POINT) return 'geo_point'
+  if (encoded === KIND_CODE_TIMELINE_VISIT) return 'timeline_visit'
+  if (encoded === KIND_CODE_TIMELINE_ACTIVITY) return 'timeline_activity'
+  if (encoded === KIND_CODE_ACTIVITY_SAMPLE) return 'activity_sample'
+  if (encoded === KIND_CODE_FREQUENT_PLACE) return 'frequent_place'
   return 'image'
+}
+
+function acceptedKindMask(kind: CatalogQuery['kind']): number {
+  if (!kind || kind === 'all') return 0xffffffff
+  if (kind === 'media') return (1 << KIND_CODE_IMAGE) | (1 << KIND_CODE_VIDEO)
+  return 1 << kindCode(kind)
+}
+
+function queryMayMatchIntervalKinds(kind: CatalogQuery['kind']): boolean {
+  return (
+    !kind ||
+    kind === 'all' ||
+    kind === 'timeline_visit' ||
+    kind === 'timeline_activity'
+  )
+}
+
+function scanMinTimestampSec(query: CatalogQuery): number {
+  if (query.startTime === undefined) return 0
+  return queryMayMatchIntervalKinds(query.kind) ? 0 : timestampSeconds(query.startTime)
 }
 
 function emptyManifest(): CatalogManifest {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     catalogVersion: 0,
     nextAssetId: 0,
     assetStoreVersion: -1,
@@ -480,7 +626,7 @@ function emptyManifest(): CatalogManifest {
 }
 
 function normalizeManifest(value: unknown): CatalogManifest {
-  if (!isRecord(value) || value.schemaVersion !== 1) return emptyManifest()
+  if (!isRecord(value) || value.schemaVersion !== 2) return emptyManifest()
   const base = emptyManifest()
   const catalogVersion = numeric(value.catalogVersion) ?? base.catalogVersion
   return {
@@ -527,6 +673,13 @@ function locationFromUnknown(value: unknown): MediaLocation | undefined {
     absolutePath:
       typeof value.absolutePath === 'string' ? value.absolutePath : undefined,
     pointIndex: numeric(value.pointIndex),
+    sourceDataset:
+      typeof value.sourceDataset === 'string' ? value.sourceDataset : undefined,
+    sourceType: typeof value.sourceType === 'string' ? value.sourceType : undefined,
+    groupId: typeof value.groupId === 'string' ? value.groupId : undefined,
+    sequence: numeric(value.sequence),
+    timestamp: numeric(value.timestamp),
+    endTimestamp: numeric(value.endTimestamp),
   }
 }
 
@@ -540,8 +693,10 @@ function mediaFromUnknown(value: unknown): MediaItem | undefined {
       })
     : []
   if (!contentHash || locations.length === 0) return undefined
-  const kind =
-    value.kind === 'video' || value.kind === 'geo_point' ? value.kind : 'image'
+  const kind = mediaKindFromUnknown(value.kind)
+  const metadata = isRecord(value.metadata)
+    ? (value.metadata as Record<string, unknown>)
+    : undefined
   return {
     id: contentHash,
     contentHash,
@@ -553,8 +708,20 @@ function mediaFromUnknown(value: unknown): MediaItem | undefined {
     sizeBytes: numeric(value.sizeBytes) ?? 0,
     durationMs: numeric(value.durationMs),
     timestamp: numeric(value.timestamp),
+    endTimestamp: numeric(value.endTimestamp),
     latitude: numeric(value.latitude),
     longitude: numeric(value.longitude),
+    sourceDataset:
+      typeof value.sourceDataset === 'string' ? value.sourceDataset : undefined,
+    sourceType: typeof value.sourceType === 'string' ? value.sourceType : undefined,
+    accuracyMeters: numeric(value.accuracyMeters),
+    altitudeMeters: numeric(value.altitudeMeters),
+    verticalAccuracyMeters: numeric(value.verticalAccuracyMeters),
+    velocityMetersPerSecond: numeric(value.velocityMetersPerSecond),
+    headingDegrees: numeric(value.headingDegrees),
+    groupId: typeof value.groupId === 'string' ? value.groupId : undefined,
+    sequence: numeric(value.sequence),
+    metadata,
     thumbnailKey:
       typeof value.thumbnailKey === 'string' ? value.thumbnailKey : undefined,
     locations,
@@ -586,6 +753,12 @@ function itemLocations(item: MediaItem): MediaLocation[] {
       sourceId: item.sourceId,
       sourceLabel: item.sourceId,
       relativePath: item.relativePath,
+      sourceDataset: item.sourceDataset,
+      sourceType: item.sourceType,
+      groupId: item.groupId,
+      sequence: item.sequence,
+      timestamp: item.timestamp,
+      endTimestamp: item.endTimestamp,
     },
   ]
 }
@@ -595,7 +768,7 @@ function displayNameForLocation(
   contentHash: string,
   location: MediaLocation | undefined,
 ): string {
-  if (kind === 'geo_point') {
+  if (kind !== 'image' && kind !== 'video') {
     const base = location?.sourceLabel ?? location?.relativePath ?? contentHash
     return typeof location?.pointIndex === 'number'
       ? `${base} #${location.pointIndex}`
@@ -630,6 +803,37 @@ function normalizeMediaItem(item: MediaItem, locations: MediaLocation[]): MediaI
   }
 }
 
+function mergeMediaItems(existing: MediaItem, incoming: MediaItem): MediaItem {
+  const mergedMetadata =
+    existing.metadata || incoming.metadata
+      ? {
+          ...(incoming.metadata ?? {}),
+          ...(existing.metadata ?? {}),
+        }
+      : undefined
+  return {
+    ...incoming,
+    ...existing,
+    timestamp: existing.timestamp ?? incoming.timestamp,
+    endTimestamp: existing.endTimestamp ?? incoming.endTimestamp,
+    latitude: existing.latitude ?? incoming.latitude,
+    longitude: existing.longitude ?? incoming.longitude,
+    sourceDataset: existing.sourceDataset ?? incoming.sourceDataset,
+    sourceType: existing.sourceType ?? incoming.sourceType,
+    accuracyMeters: existing.accuracyMeters ?? incoming.accuracyMeters,
+    altitudeMeters: existing.altitudeMeters ?? incoming.altitudeMeters,
+    verticalAccuracyMeters:
+      existing.verticalAccuracyMeters ?? incoming.verticalAccuracyMeters,
+    velocityMetersPerSecond:
+      existing.velocityMetersPerSecond ?? incoming.velocityMetersPerSecond,
+    headingDegrees: existing.headingDegrees ?? incoming.headingDegrees,
+    groupId: existing.groupId ?? incoming.groupId,
+    sequence: existing.sequence ?? incoming.sequence,
+    metadata: mergedMetadata,
+    locations: [...existing.locations, ...incoming.locations],
+  }
+}
+
 function itemMatchesQuery(item: MediaItem, query: CatalogQuery): boolean {
   if (query.kind === 'media') {
     if (item.kind !== 'image' && item.kind !== 'video') return false
@@ -653,8 +857,11 @@ function itemMatchesQuery(item: MediaItem, query: CatalogQuery): boolean {
       return false
     }
   }
-  if (item.timestamp === undefined) return false
-  if (query.startTime !== undefined && item.timestamp < query.startTime) return false
+  if (item.timestamp === undefined) {
+    return query.startTime === undefined && query.endTime === undefined
+  }
+  const itemEndTime = item.endTimestamp ?? item.timestamp
+  if (query.startTime !== undefined && itemEndTime < query.startTime) return false
   if (query.endTime !== undefined && item.timestamp > query.endTime) return false
   return true
 }
@@ -1064,6 +1271,14 @@ export type PackedIndexRecord = {
   lonE7: number
   assetId: number
   kindFlags: number
+  sourceCode?: number
+  qualityFlags?: number
+  accuracyMeters?: number
+  velocityMetersPerSecond?: number
+  headingDegrees?: number
+  groupHashLo?: number
+  groupHashHi?: number
+  sequence?: number
 }
 
 type PackedIndexMetrics = {
@@ -1091,8 +1306,39 @@ type PackedMapPolylineScanPage = MapPointPage & {
   metrics: PackedIndexMetrics
   matchedRecords: number
   sourceLinePoints: number
+  acceptedLinePoints: number
+  filteredLinePoints: number
+  filteredQualityPoints: number
+  filteredJumpPoints: number
+  lineSpeedBreaks: number
+  lineDistanceBreaks: number
+  lineSegments: number
   renderedLinePoints: number
+  renderedLineDots: number
   simplificationTolerancePx: number
+}
+
+type PolylineCandidate = {
+  assetId: number
+  kind: MapPoint['kind']
+  lat: number
+  lon: number
+  timestampSec: number
+  source: 'GPS' | 'WIFI' | 'CELL' | 'UNKNOWN'
+  accuracyMeters?: number
+  groupKey?: string
+  sequence?: number
+}
+
+type PolylineCleanup = {
+  enabled: boolean
+  groupLinesOnly: boolean
+  allowedSources: Set<'GPS' | 'WIFI' | 'CELL' | 'UNKNOWN'>
+  maxAccuracyMeters?: number
+  breakSpeedKmh?: number
+  maxSegmentDistanceKm?: number
+  removeIsolatedJumps: boolean
+  showDots: boolean
 }
 
 type PackedMapPointBucket = {
@@ -1231,190 +1477,343 @@ function addPolylinePoint(
   accumulator.maxLon = Math.max(accumulator.maxLon, lon)
 }
 
-function radialDistanceSimplify(
-  accumulator: PolylineAccumulator,
-  tolerancePx: number,
-): number[] {
-  const count = accumulator.count
-  if (count <= 2 || tolerancePx <= 0) {
-    return Array.from({ length: count }, (_, index) => index)
-  }
-
-  const toleranceSq = tolerancePx * tolerancePx
-  const kept = [0]
-  let previous = 0
-  for (let index = 1; index < count - 1; index += 1) {
-    const dx = accumulator.x[index] - accumulator.x[previous]
-    const dy = accumulator.y[index] - accumulator.y[previous]
-    if (dx * dx + dy * dy >= toleranceSq) {
-      kept.push(index)
-      previous = index
-    }
-  }
-  kept.push(count - 1)
-  return kept
-}
-
-function perpendicularDistanceSq(
-  px: number,
-  py: number,
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number,
-): number {
-  const dx = bx - ax
-  const dy = by - ay
-  if (dx === 0 && dy === 0) {
-    const pointDx = px - ax
-    const pointDy = py - ay
-    return pointDx * pointDx + pointDy * pointDy
-  }
-
-  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
-  const closestX = ax + t * dx
-  const closestY = ay + t * dy
-  const pointDx = px - closestX
-  const pointDy = py - closestY
-  return pointDx * pointDx + pointDy * pointDy
-}
-
-function douglasPeuckerSimplify(
-  accumulator: PolylineAccumulator,
-  candidateIndices: number[],
-  tolerancePx: number,
-  isCancelled: CancellationSignal,
-): number[] {
-  if (candidateIndices.length <= 2 || tolerancePx <= 0) {
-    return candidateIndices
-  }
-
-  const toleranceSq = tolerancePx * tolerancePx
-  const keep = new Uint8Array(candidateIndices.length)
-  keep[0] = 1
-  keep[candidateIndices.length - 1] = 1
-  const stack: Array<[number, number]> = [[0, candidateIndices.length - 1]]
-  let iterations = 0
-
-  while (stack.length > 0) {
-    if (iterations % 4096 === 0) throwIfCancelled(isCancelled)
-    iterations += 1
-
-    const [start, end] = stack.pop()!
-    if (end <= start + 1) continue
-
-    const startIndex = candidateIndices[start]
-    const endIndex = candidateIndices[end]
-    const ax = accumulator.x[startIndex]
-    const ay = accumulator.y[startIndex]
-    const bx = accumulator.x[endIndex]
-    const by = accumulator.y[endIndex]
-    let maxDistanceSq = -1
-    let maxIndex = -1
-
-    for (let index = start + 1; index < end; index += 1) {
-      const pointIndex = candidateIndices[index]
-      const distanceSq = perpendicularDistanceSq(
-        accumulator.x[pointIndex],
-        accumulator.y[pointIndex],
-        ax,
-        ay,
-        bx,
-        by,
-      )
-      if (distanceSq > maxDistanceSq) {
-        maxDistanceSq = distanceSq
-        maxIndex = index
-      }
-    }
-
-    if (maxDistanceSq > toleranceSq && maxIndex !== -1) {
-      keep[maxIndex] = 1
-      stack.push([start, maxIndex], [maxIndex, end])
-    }
-  }
-
-  return candidateIndices.filter((_, index) => keep[index] === 1)
-}
-
 function simplifyPolyline(
   accumulator: PolylineAccumulator,
   requestedTolerancePx: number,
-  maxPoints: number,
+  _maxPoints: number,
   isCancelled: CancellationSignal,
 ): { indices: number[]; tolerancePx: number } {
-  const count = accumulator.count
-  if (count <= 2) {
-    return {
-      indices: Array.from({ length: count }, (_, index) => index),
-      tolerancePx: Math.max(0, requestedTolerancePx),
-    }
-  }
-
-  const safeMaxPoints = Math.max(2, Math.trunc(maxPoints))
-  let tolerancePx = Math.max(0, requestedTolerancePx)
-  let indices: number[] = []
-  for (let attempt = 0; attempt < 16; attempt += 1) {
-    throwIfCancelled(isCancelled)
-    const radial = radialDistanceSimplify(accumulator, tolerancePx)
-    indices = douglasPeuckerSimplify(
-      accumulator,
-      radial,
-      tolerancePx,
-      isCancelled,
-    )
-    if (indices.length <= safeMaxPoints) {
-      return { indices, tolerancePx }
-    }
-    tolerancePx = Math.max(
-      tolerancePx + 0.5,
-      tolerancePx * Math.sqrt(indices.length / safeMaxPoints) * 1.25,
-    )
-  }
-
-  if (indices.length <= safeMaxPoints) return { indices, tolerancePx }
-
-  const sampled = [0]
-  const last = accumulator.count - 1
-  for (let index = 1; index < safeMaxPoints - 1; index += 1) {
-    sampled.push(Math.round((index / (safeMaxPoints - 1)) * last))
-  }
-  sampled.push(last)
+  throwIfCancelled(isCancelled)
   return {
-    indices: Array.from(new Set(sampled)).sort((left, right) => left - right),
-    tolerancePx,
+    indices: Array.from({ length: accumulator.count }, (_, index) => index),
+    tolerancePx: Math.max(0, requestedTolerancePx),
   }
 }
 
-function polylineFromAccumulator(
-  accumulator: PolylineAccumulator,
+function normalizePolylineCleanup(
+  mapPolyline: SearchSpec['mapPolyline'] | undefined,
+): PolylineCleanup {
+  const cleanup = mapPolyline?.cleanup
+  return {
+    enabled: cleanup?.enabled === true,
+    groupLinesOnly: true,
+    allowedSources: new Set(
+      cleanup?.allowedSources?.length
+        ? cleanup.allowedSources
+        : ['GPS', 'WIFI', 'CELL', 'UNKNOWN'],
+    ),
+    maxAccuracyMeters:
+      typeof cleanup?.maxAccuracyMeters === 'number' &&
+      Number.isFinite(cleanup.maxAccuracyMeters)
+        ? cleanup.maxAccuracyMeters
+        : undefined,
+    breakSpeedKmh:
+      typeof cleanup?.breakSpeedKmh === 'number' &&
+      Number.isFinite(cleanup.breakSpeedKmh)
+        ? cleanup.breakSpeedKmh
+        : undefined,
+    maxSegmentDistanceKm:
+      typeof cleanup?.maxSegmentDistanceKm === 'number' &&
+      Number.isFinite(cleanup.maxSegmentDistanceKm) &&
+      cleanup.maxSegmentDistanceKm > 0
+        ? cleanup.maxSegmentDistanceKm
+        : undefined,
+    removeIsolatedJumps: cleanup?.removeIsolatedJumps === true,
+    showDots: cleanup?.showDots !== false,
+  }
+}
+
+function groupKeyFromRecord(record: PackedIndexRecord): string | undefined {
+  if ((record.qualityFlags ?? 0) & LINE_QUALITY_HAS_GROUP) {
+    return `${record.groupHashHi ?? 0}:${record.groupHashLo ?? 0}`
+  }
+  return undefined
+}
+
+function recordAccuracy(record: PackedIndexRecord): number | undefined {
+  return (record.qualityFlags ?? 0) & LINE_QUALITY_HAS_ACCURACY &&
+    typeof record.accuracyMeters === 'number' &&
+    Number.isFinite(record.accuracyMeters)
+    ? record.accuracyMeters
+    : undefined
+}
+
+function recordSequence(record: PackedIndexRecord): number | undefined {
+  const sequence = record.sequence
+  return (record.qualityFlags ?? 0) & LINE_QUALITY_HAS_SEQUENCE &&
+    typeof sequence === 'number' &&
+    Number.isSafeInteger(sequence) &&
+    sequence >= 0
+    ? sequence
+    : undefined
+}
+
+function lineCandidateFromRecord(record: PackedIndexRecord): PolylineCandidate {
+  return {
+    assetId: record.assetId,
+    kind: kindFromFlags(record.kindFlags),
+    lat: coordinateFromE7(record.latE7),
+    lon: coordinateFromE7(record.lonE7),
+    timestampSec: record.timestampSec,
+    source: lineSourceFromCode(record.sourceCode ?? LINE_SOURCE_UNKNOWN),
+    accuracyMeters: recordAccuracy(record),
+    groupKey: groupKeyFromRecord(record),
+    sequence: recordSequence(record),
+  }
+}
+
+function candidatePassesQualityFilter(
+  candidate: PolylineCandidate,
+  cleanup: PolylineCleanup,
+): boolean {
+  if (!cleanup.enabled) return true
+  if (!cleanup.allowedSources.has(candidate.source)) return false
+  if (
+    cleanup.maxAccuracyMeters !== undefined &&
+    candidate.accuracyMeters !== undefined &&
+    candidate.accuracyMeters > cleanup.maxAccuracyMeters
+  ) {
+    return false
+  }
+  return true
+}
+
+function mapPointFromCandidate(candidate: PolylineCandidate): MapPoint {
+  return {
+    assetId: candidate.assetId,
+    kind: candidate.kind,
+    lat: candidate.lat,
+    lon: candidate.lon,
+    timestamp: candidate.timestampSec * 1000,
+    count: 1,
+  }
+}
+
+function speedKmh(left: PolylineCandidate, right: PolylineCandidate): number {
+  const seconds = right.timestampSec - left.timestampSec
+  if (seconds <= 0) return 0
+  return (haversineMeters(left.lat, left.lon, right.lat, right.lon) / seconds) * 3.6
+}
+
+function removeIsolatedJumps(
+  candidates: PolylineCandidate[],
+  breakSpeedKmh: number | undefined,
+): { candidates: PolylineCandidate[]; removed: number } {
+  if (breakSpeedKmh === undefined || candidates.length < 3) {
+    return { candidates, removed: 0 }
+  }
+  const kept: PolylineCandidate[] = [candidates[0]]
+  let removed = 0
+  for (let index = 1; index < candidates.length - 1; index += 1) {
+    const previous = candidates[index - 1]
+    const current = candidates[index]
+    const next = candidates[index + 1]
+    if (
+      speedKmh(previous, current) > breakSpeedKmh &&
+      speedKmh(current, next) > breakSpeedKmh &&
+      speedKmh(previous, next) <= breakSpeedKmh
+    ) {
+      removed += 1
+      continue
+    }
+    kept.push(current)
+  }
+  kept.push(candidates[candidates.length - 1])
+  return { candidates: kept, removed }
+}
+
+function splitBySpeed(
+  candidates: PolylineCandidate[],
+  breakSpeedKmh: number | undefined,
+): { segments: PolylineCandidate[][]; breaks: number } {
+  if (candidates.length === 0) return { segments: [], breaks: 0 }
+  if (breakSpeedKmh === undefined || candidates.length < 2) {
+    return { segments: [candidates], breaks: 0 }
+  }
+  const segments: PolylineCandidate[][] = []
+  let current: PolylineCandidate[] = [candidates[0]]
+  let breaks = 0
+  for (let index = 1; index < candidates.length; index += 1) {
+    const candidate = candidates[index]
+    if (speedKmh(candidates[index - 1], candidate) > breakSpeedKmh) {
+      if (current.length > 0) segments.push(current)
+      current = [candidate]
+      breaks += 1
+    } else {
+      current.push(candidate)
+    }
+  }
+  if (current.length > 0) segments.push(current)
+  return { segments, breaks }
+}
+
+function splitByMaxSegmentDistance(
+  candidates: PolylineCandidate[],
+  maxSegmentDistanceKm: number | undefined,
+): { segments: PolylineCandidate[][]; breaks: number } {
+  if (candidates.length === 0) return { segments: [], breaks: 0 }
+  if (maxSegmentDistanceKm === undefined || candidates.length < 2) {
+    return { segments: [candidates], breaks: 0 }
+  }
+  const maxSegmentDistanceMeters = maxSegmentDistanceKm * 1000
+  const segments: PolylineCandidate[][] = []
+  let current: PolylineCandidate[] = [candidates[0]]
+  let breaks = 0
+  for (let index = 1; index < candidates.length; index += 1) {
+    const candidate = candidates[index]
+    const previous = candidates[index - 1]
+    if (
+      haversineMeters(previous.lat, previous.lon, candidate.lat, candidate.lon) >
+      maxSegmentDistanceMeters
+    ) {
+      if (current.length > 0) segments.push(current)
+      current = [candidate]
+      breaks += 1
+    } else {
+      current.push(candidate)
+    }
+  }
+  if (current.length > 0) segments.push(current)
+  return { segments, breaks }
+}
+
+function flushSequenceRun(
+  groupKey: string,
+  run: PolylineCandidate[],
+  lineSegments: Array<{ groupKey: string; candidates: PolylineCandidate[] }>,
+  dotPoints: MapPoint[],
+): void {
+  if (run.length >= 2) {
+    lineSegments.push({ groupKey, candidates: run })
+    return
+  }
+  if (run.length === 1) dotPoints.push(mapPointFromCandidate(run[0]))
+}
+
+function splitGroupByConsecutiveSequence(
+  groupKey: string,
+  candidates: PolylineCandidate[],
+): {
+  lineSegments: Array<{ groupKey: string; candidates: PolylineCandidate[] }>
+  dotPoints: MapPoint[]
+} {
+  const lineSegments: Array<{ groupKey: string; candidates: PolylineCandidate[] }> = []
+  const dotPoints: MapPoint[] = []
+  const sorted = [...candidates].sort(
+    (left, right) =>
+      (left.sequence ?? Number.MAX_SAFE_INTEGER) -
+        (right.sequence ?? Number.MAX_SAFE_INTEGER) ||
+      left.timestampSec - right.timestampSec ||
+      left.assetId - right.assetId,
+  )
+  let currentRun: PolylineCandidate[] = []
+
+  for (const candidate of sorted) {
+    if (candidate.sequence === undefined) {
+      flushSequenceRun(groupKey, currentRun, lineSegments, dotPoints)
+      currentRun = []
+      dotPoints.push(mapPointFromCandidate(candidate))
+      continue
+    }
+
+    const previous = currentRun[currentRun.length - 1]
+    if (
+      previous &&
+      previous.sequence !== undefined &&
+      candidate.sequence !== previous.sequence + 1
+    ) {
+      flushSequenceRun(groupKey, currentRun, lineSegments, dotPoints)
+      currentRun = []
+    }
+    currentRun.push(candidate)
+  }
+
+  flushSequenceRun(groupKey, currentRun, lineSegments, dotPoints)
+  return { lineSegments, dotPoints }
+}
+
+function accumulatorFromCandidates(
+  candidates: PolylineCandidate[],
+  worldSize: number,
+): PolylineAccumulator {
+  const accumulator = createPolylineAccumulator(Math.max(2, candidates.length))
+  for (const candidate of candidates) {
+    addPolylinePoint(accumulator, candidate.lat, candidate.lon, worldSize)
+  }
+  return accumulator
+}
+
+function polylineFromCandidateSegments(
+  candidateSegments: Array<{ groupKey?: string; candidates: PolylineCandidate[] }>,
   requestedTolerancePx: number,
-  maxPoints: number,
+  _maxPoints: number,
+  worldSize: number,
   isCancelled: CancellationSignal,
 ): MapPolyline {
-  const { indices, tolerancePx } = simplifyPolyline(
-    accumulator,
-    requestedTolerancePx,
-    maxPoints,
-    isCancelled,
-  )
+  const nonEmptySegments = candidateSegments.filter((segment) => segment.candidates.length >= 2)
+  if (nonEmptySegments.length === 0) {
+    return {
+      points: [],
+      segments: [],
+      sourcePointCount: candidateSegments.reduce(
+        (total, segment) => total + segment.candidates.length,
+        0,
+      ),
+      simplifiedPointCount: 0,
+      tolerancePx: requestedTolerancePx,
+    }
+  }
 
-  return {
-    points: indices.map((index) => ({
+  const tolerancePx = Math.max(0, requestedTolerancePx)
+  const renderedSegments: NonNullable<MapPolyline['segments']> = []
+  const flattened: MapPolyline['points'] = []
+  for (const segment of nonEmptySegments) {
+    throwIfCancelled(isCancelled)
+    const accumulator = accumulatorFromCandidates(segment.candidates, worldSize)
+    const { indices } = simplifyPolyline(
+      accumulator,
+      tolerancePx,
+      Number.MAX_SAFE_INTEGER,
+      isCancelled,
+    )
+    const points = indices.map((index) => ({
       lat: accumulator.lat[index],
       lon: accumulator.lon[index],
-    })),
-    bounds:
-      accumulator.count > 0
-        ? {
-            minLat: accumulator.minLat,
-            maxLat: accumulator.maxLat,
-            minLon: accumulator.minLon,
-            maxLon: accumulator.maxLon,
-          }
-        : undefined,
-    sourcePointCount: accumulator.count,
-    simplifiedPointCount: indices.length,
+    }))
+    if (points.length >= 2) {
+      renderedSegments.push({ points, groupKey: segment.groupKey })
+      flattened.push(...points)
+    }
+  }
+
+  const sourcePointCount = nonEmptySegments.reduce(
+    (total, segment) => total + segment.candidates.length,
+    0,
+  )
+  const bounds =
+    flattened.length > 0
+      ? flattened.reduce<GeoBounds>(
+          (current, point) => ({
+            minLat: Math.min(current.minLat, point.lat),
+            maxLat: Math.max(current.maxLat, point.lat),
+            minLon: Math.min(current.minLon, point.lon),
+            maxLon: Math.max(current.maxLon, point.lon),
+          }),
+          {
+            minLat: Number.POSITIVE_INFINITY,
+            maxLat: Number.NEGATIVE_INFINITY,
+            minLon: Number.POSITIVE_INFINITY,
+            maxLon: Number.NEGATIVE_INFINITY,
+          },
+        )
+      : undefined
+
+  return {
+    points: flattened,
+    segments: renderedSegments,
+    bounds,
+    sourcePointCount,
+    simplifiedPointCount: flattened.length,
     tolerancePx,
   }
 }
@@ -1929,6 +2328,14 @@ export function encodeTimeGeoIndexForTests(
     view.setInt32(offset + 8, record.lonE7, true)
     view.setUint32(offset + 12, record.assetId, true)
     view.setUint8(offset + 16, record.kindFlags)
+    view.setUint8(offset + 17, record.sourceCode ?? LINE_SOURCE_UNKNOWN)
+    view.setUint16(offset + 18, record.qualityFlags ?? 0, true)
+    view.setFloat32(offset + 20, record.accuracyMeters ?? Number.NaN, true)
+    view.setFloat32(offset + 24, record.velocityMetersPerSecond ?? Number.NaN, true)
+    view.setFloat32(offset + 28, record.headingDegrees ?? Number.NaN, true)
+    view.setUint32(offset + 32, record.groupHashLo ?? 0, true)
+    view.setUint32(offset + 36, record.groupHashHi ?? 0, true)
+    view.setInt32(offset + 40, record.sequence ?? -1, true)
   }
   return bytes.buffer
 }
@@ -1947,10 +2354,21 @@ export const catalogWorkerTestConstants = {
   ASSET_TABLE_MAGIC,
   BINARY_SCHEMA_VERSION,
   INDEX_KIND_TIME_GEO,
-  KIND_FLAG_GEO_POINT,
+  KIND_CODE_GEO_POINT,
+  KIND_CODE_TIMELINE_VISIT,
+  KIND_CODE_TIMELINE_ACTIVITY,
+  KIND_CODE_ACTIVITY_SAMPLE,
+  KIND_CODE_FREQUENT_PLACE,
   KIND_FLAG_HAS_GEO,
-  KIND_FLAG_IMAGE,
-  KIND_FLAG_VIDEO,
+  KIND_CODE_IMAGE,
+  KIND_CODE_VIDEO,
+  LINE_SOURCE_UNKNOWN,
+  LINE_SOURCE_GPS,
+  LINE_SOURCE_WIFI,
+  LINE_SOURCE_CELL,
+  LINE_QUALITY_HAS_ACCURACY,
+  LINE_QUALITY_HAS_GROUP,
+  LINE_QUALITY_HAS_SEQUENCE,
   PACKED_INDEX_HEADER_SIZE,
   PACKED_INDEX_MAGIC,
   TIME_GEO_RECORD_SIZE,
@@ -2034,6 +2452,14 @@ export class ResidentPackedGeoIndex {
       lonE7: this.view.getInt32(offset + 8, true),
       assetId: this.view.getUint32(offset + 12, true),
       kindFlags: this.view.getUint8(offset + 16),
+      sourceCode: this.view.getUint8(offset + 17),
+      qualityFlags: this.view.getUint16(offset + 18, true),
+      accuracyMeters: this.view.getFloat32(offset + 20, true),
+      velocityMetersPerSecond: this.view.getFloat32(offset + 24, true),
+      headingDegrees: this.view.getFloat32(offset + 28, true),
+      groupHashLo: this.view.getUint32(offset + 32, true),
+      groupHashHi: this.view.getUint32(offset + 36, true),
+      sequence: this.view.getInt32(offset + 40, true),
     }
   }
 
@@ -2107,16 +2533,7 @@ export class ResidentPackedGeoIndex {
       return page()
     }
 
-    const acceptedKindMask =
-      !query.kind || query.kind === 'all'
-        ? 0b1111
-        : query.kind === 'media'
-          ? (1 << KIND_FLAG_IMAGE) | (1 << KIND_FLAG_VIDEO)
-          : query.kind === 'image'
-            ? 1 << KIND_FLAG_IMAGE
-            : query.kind === 'video'
-              ? 1 << KIND_FLAG_VIDEO
-              : 1 << KIND_FLAG_GEO_POINT
+    const acceptedKinds = acceptedKindMask(query.kind)
     const bounds = query.geoBounds
     const minLatE7 = bounds
       ? minLatBoundE7(bounds.minLat)
@@ -2163,7 +2580,7 @@ export class ResidentPackedGeoIndex {
           metrics.candidatesInspected += 1
           const recordOffset = PACKED_INDEX_HEADER_SIZE + recordIndex * recordSize
           const kindFlags = view.getUint8(recordOffset + 16)
-          if ((acceptedKindMask & (1 << (kindFlags & 0b11))) === 0) continue
+          if ((acceptedKinds & (1 << (kindFlags & KIND_CODE_MASK))) === 0) continue
           const hasGeo = (kindFlags & KIND_FLAG_HAS_GEO) !== 0
           if (requiresGeo && !hasGeo) continue
           if (rejectsGeo && hasGeo) continue
@@ -2197,7 +2614,7 @@ export class ResidentPackedGeoIndex {
         metrics.candidatesInspected += 1
         const recordOffset = PACKED_INDEX_HEADER_SIZE + recordIndex * recordSize
         const kindFlags = view.getUint8(recordOffset + 16)
-        if ((acceptedKindMask & (1 << (kindFlags & 0b11))) === 0) continue
+        if ((acceptedKinds & (1 << (kindFlags & KIND_CODE_MASK))) === 0) continue
         const hasGeo = (kindFlags & KIND_FLAG_HAS_GEO) !== 0
         if (requiresGeo && !hasGeo) continue
         if (rejectsGeo && hasGeo) continue
@@ -2237,41 +2654,90 @@ export class ResidentPackedGeoIndex {
     const metrics = { pagesRead: 0, diskReadBytes: 0, candidatesInspected: 0 }
     const zoom = Math.max(0, Math.min(24, Math.floor(mapAggregation?.zoom ?? 0)))
     const worldSize = WEB_MERCATOR_TILE_SIZE * 2 ** zoom
-    const accumulator = createPolylineAccumulator()
+    const cleanup = normalizePolylineCleanup(mapPolyline)
+    const groupedLineCandidates = new Map<string, PolylineCandidate[]>()
+    const dotPoints: MapPoint[] = []
+    let matchedRecords = 0
+    let filteredQualityPoints = 0
     const requestedTolerancePx = Math.max(0, mapPolyline?.tolerancePx ?? 2)
     const maxPoints = Math.max(2, Math.min(100_000, mapPolyline?.maxPoints ?? 10_000))
 
     const page = (): PackedMapPolylineScanPage => {
-      const polyline = polylineFromAccumulator(
-        accumulator,
+      const candidateSegments: Array<{ groupKey: string; candidates: PolylineCandidate[] }> = []
+      const sequenceDotPoints: MapPoint[] = []
+      for (const [groupKey, candidates] of groupedLineCandidates) {
+        const groupedSegments = splitGroupByConsecutiveSequence(groupKey, candidates)
+        candidateSegments.push(...groupedSegments.lineSegments)
+        if (cleanup.showDots) sequenceDotPoints.push(...groupedSegments.dotPoints)
+      }
+
+      let filteredJumpPoints = 0
+      let lineSpeedBreaks = 0
+      let lineDistanceBreaks = 0
+      const processedSegments: Array<{ groupKey: string; candidates: PolylineCandidate[] }> = []
+      const segmentDotPoints: MapPoint[] = []
+      for (const segment of candidateSegments) {
+        const jumpFiltered = cleanup.enabled && cleanup.removeIsolatedJumps
+          ? removeIsolatedJumps(segment.candidates, cleanup.breakSpeedKmh)
+          : { candidates: segment.candidates, removed: 0 }
+        filteredJumpPoints += jumpFiltered.removed
+        const distanceSplit = splitByMaxSegmentDistance(
+          jumpFiltered.candidates,
+          cleanup.maxSegmentDistanceKm,
+        )
+        lineDistanceBreaks += distanceSplit.breaks
+        for (const distanceSegment of distanceSplit.segments) {
+          const speedSplit = splitBySpeed(distanceSegment, cleanup.breakSpeedKmh)
+          lineSpeedBreaks += speedSplit.breaks
+          for (const candidates of speedSplit.segments) {
+            if (candidates.length >= 2) {
+              processedSegments.push({ groupKey: segment.groupKey, candidates })
+            } else if (cleanup.showDots && candidates.length === 1) {
+              segmentDotPoints.push(mapPointFromCandidate(candidates[0]))
+            }
+          }
+        }
+      }
+
+      const polyline = polylineFromCandidateSegments(
+        processedSegments,
         requestedTolerancePx,
         maxPoints,
+        worldSize,
         isCancelled,
       )
+      const allDotPoints = cleanup.showDots
+        ? [...dotPoints, ...sequenceDotPoints, ...segmentDotPoints]
+        : []
+      const renderedDots = allDotPoints.slice(0, maxPoints)
+      const acceptedLinePoints = candidateSegments.reduce(
+        (total, segment) => total + segment.candidates.length,
+        0,
+      )
+      const filteredLinePoints = filteredQualityPoints + filteredJumpPoints
       return {
-        points: [],
+        points: renderedDots,
         polyline,
-        limitReached: polyline.simplifiedPointCount > maxPoints,
+        limitReached: renderedDots.length < allDotPoints.length,
         metrics,
-        matchedRecords: accumulator.count,
-        sourceLinePoints: polyline.sourcePointCount,
+        matchedRecords,
+        sourceLinePoints: matchedRecords,
+        acceptedLinePoints,
+        filteredLinePoints,
+        filteredQualityPoints,
+        filteredJumpPoints,
+        lineSpeedBreaks,
+        lineDistanceBreaks,
+        lineSegments: polyline.segments?.length ?? 0,
         renderedLinePoints: polyline.simplifiedPointCount,
+        renderedLineDots: renderedDots.length,
         simplificationTolerancePx: polyline.tolerancePx,
       }
     }
 
     if (end <= start) return page()
 
-    const acceptedKindMask =
-      !query.kind || query.kind === 'all'
-        ? 0b1111
-        : query.kind === 'media'
-          ? (1 << KIND_FLAG_IMAGE) | (1 << KIND_FLAG_VIDEO)
-          : query.kind === 'image'
-            ? 1 << KIND_FLAG_IMAGE
-            : query.kind === 'video'
-              ? 1 << KIND_FLAG_VIDEO
-              : 1 << KIND_FLAG_GEO_POINT
+    const acceptedKinds = acceptedKindMask(query.kind)
     const bounds = query.geoBounds
     const minLatE7 = bounds ? minLatBoundE7(bounds.minLat) : 0
     const maxLatE7 = bounds ? maxLatBoundE7(bounds.maxLat) : 0
@@ -2279,16 +2745,26 @@ export class ResidentPackedGeoIndex {
     const maxLonE7 = bounds ? maxLonBoundE7(bounds.maxLon) : 0
     const requiresGeo = query.hasGeo === true || bounds !== undefined
     const rejectsGeo = query.hasGeo === false
-    const view = this.view
     const recordSize = this.recordSize
 
-    const addMatchedPoint = (latE7: number, lonE7: number) => {
-      addPolylinePoint(
-        accumulator,
-        coordinateFromE7(latE7),
-        coordinateFromE7(lonE7),
-        worldSize,
-      )
+    const addMatchedRecord = (record: PackedIndexRecord) => {
+      matchedRecords += 1
+      const candidate = lineCandidateFromRecord(record)
+      if (!candidatePassesQualityFilter(candidate, cleanup)) {
+        filteredQualityPoints += 1
+        return
+      }
+
+      if (!candidate.groupKey) {
+        if (cleanup.showDots) {
+          dotPoints.push(mapPointFromCandidate(candidate))
+        }
+        return
+      }
+
+      const group = groupedLineCandidates.get(candidate.groupKey) ?? []
+      group.push(candidate)
+      groupedLineCandidates.set(candidate.groupKey, group)
     }
 
     if (direction === 'desc') {
@@ -2300,17 +2776,17 @@ export class ResidentPackedGeoIndex {
         for (let recordIndex = chunkEnd - 1; recordIndex >= chunkStart; recordIndex -= 1) {
           metrics.candidatesInspected += 1
           const recordOffset = PACKED_INDEX_HEADER_SIZE + recordIndex * recordSize
-          const kindFlags = view.getUint8(recordOffset + 16)
-          if ((acceptedKindMask & (1 << (kindFlags & 0b11))) === 0) continue
-          const hasGeo = (kindFlags & KIND_FLAG_HAS_GEO) !== 0
+          const record = this.readRecord(recordOffset)
+          if ((acceptedKinds & (1 << (record.kindFlags & KIND_CODE_MASK))) === 0) continue
+          const hasGeo = (record.kindFlags & KIND_FLAG_HAS_GEO) !== 0
           if (requiresGeo && !hasGeo) continue
           if (rejectsGeo && hasGeo) continue
 
-          const latE7 = view.getInt32(recordOffset + 4, true)
+          const latE7 = record.latE7
           if (bounds && (latE7 < minLatE7 || latE7 > maxLatE7)) continue
-          const lonE7 = view.getInt32(recordOffset + 8, true)
+          const lonE7 = record.lonE7
           if (bounds && (lonE7 < minLonE7 || lonE7 > maxLonE7)) continue
-          addMatchedPoint(latE7, lonE7)
+          addMatchedRecord(record)
         }
         chunkEnd = chunkStart
         if (chunkEnd > start) await yieldToEventLoop()
@@ -2325,17 +2801,17 @@ export class ResidentPackedGeoIndex {
       for (let recordIndex = chunkStart; recordIndex < chunkEnd; recordIndex += 1) {
         metrics.candidatesInspected += 1
         const recordOffset = PACKED_INDEX_HEADER_SIZE + recordIndex * recordSize
-        const kindFlags = view.getUint8(recordOffset + 16)
-        if ((acceptedKindMask & (1 << (kindFlags & 0b11))) === 0) continue
-        const hasGeo = (kindFlags & KIND_FLAG_HAS_GEO) !== 0
+        const record = this.readRecord(recordOffset)
+        if ((acceptedKinds & (1 << (record.kindFlags & KIND_CODE_MASK))) === 0) continue
+        const hasGeo = (record.kindFlags & KIND_FLAG_HAS_GEO) !== 0
         if (requiresGeo && !hasGeo) continue
         if (rejectsGeo && hasGeo) continue
 
-        const latE7 = view.getInt32(recordOffset + 4, true)
+        const latE7 = record.latE7
         if (bounds && (latE7 < minLatE7 || latE7 > maxLatE7)) continue
-        const lonE7 = view.getInt32(recordOffset + 8, true)
+        const lonE7 = record.lonE7
         if (bounds && (lonE7 < minLonE7 || lonE7 > maxLonE7)) continue
-        addMatchedPoint(latE7, lonE7)
+        addMatchedRecord(record)
       }
       chunkStart = chunkEnd
       if (chunkStart < end) await yieldToEventLoop()
@@ -2359,16 +2835,7 @@ export class ResidentPackedGeoIndex {
       return { assetIds, limitReached: false, metrics }
     }
 
-    const acceptedKindMask =
-      !query.kind || query.kind === 'all'
-        ? 0b1111
-        : query.kind === 'media'
-          ? (1 << KIND_FLAG_IMAGE) | (1 << KIND_FLAG_VIDEO)
-          : query.kind === 'image'
-            ? 1 << KIND_FLAG_IMAGE
-            : query.kind === 'video'
-              ? 1 << KIND_FLAG_VIDEO
-              : 1 << KIND_FLAG_GEO_POINT
+    const acceptedKinds = acceptedKindMask(query.kind)
     const bounds = query.geoBounds
     const minLatE7 = bounds
       ? minLatBoundE7(bounds.minLat)
@@ -2398,7 +2865,7 @@ export class ResidentPackedGeoIndex {
           metrics.candidatesInspected += 1
           const recordOffset = PACKED_INDEX_HEADER_SIZE + recordIndex * recordSize
           const kindFlags = view.getUint8(recordOffset + 16)
-          if ((acceptedKindMask & (1 << (kindFlags & 0b11))) === 0) continue
+          if ((acceptedKinds & (1 << (kindFlags & KIND_CODE_MASK))) === 0) continue
           const hasGeo = (kindFlags & KIND_FLAG_HAS_GEO) !== 0
           if (requiresGeo && !hasGeo) continue
           if (rejectsGeo && hasGeo) continue
@@ -2431,7 +2898,7 @@ export class ResidentPackedGeoIndex {
         metrics.candidatesInspected += 1
         const recordOffset = PACKED_INDEX_HEADER_SIZE + recordIndex * recordSize
         const kindFlags = view.getUint8(recordOffset + 16)
-        if ((acceptedKindMask & (1 << (kindFlags & 0b11))) === 0) continue
+        if ((acceptedKinds & (1 << (kindFlags & KIND_CODE_MASK))) === 0) continue
         const hasGeo = (kindFlags & KIND_FLAG_HAS_GEO) !== 0
         if (requiresGeo && !hasGeo) continue
         if (rejectsGeo && hasGeo) continue
@@ -2654,7 +3121,7 @@ class FileCatalogStore implements CatalogStore {
     const limit = Math.max(1, Math.min(spec.limit ?? 500, MAX_RENDERED_MAP_BUBBLES))
     const offset = Math.max(0, spec.offset ?? 0)
     const query = searchSpecToCatalogQuery(spec, limit + 1)
-    const minTime = query.startTime === undefined ? 0 : timestampSeconds(query.startTime)
+    const minTime = scanMinTimestampSec(query)
     const maxTime = query.endTime === undefined ? 0xffffffff : timestampSeconds(query.endTime)
 
     const scanStartedAt = performance.now()
@@ -2671,7 +3138,7 @@ class FileCatalogStore implements CatalogStore {
       const queryIndexScanMs = performance.now() - scanStartedAt
       throwIfCancelled(isCancelled)
       return {
-        points: [],
+        points: page.points,
         polyline: page.polyline,
         limitReached: page.limitReached,
         resultMetrics: withQueryMetrics(
@@ -2686,7 +3153,7 @@ class FileCatalogStore implements CatalogStore {
           },
           spec,
           performance.now() - startedAt,
-          page.renderedLinePoints,
+          page.renderedLinePoints + page.renderedLineDots,
           spec.mapPolyline?.maxPoints ?? limit,
           offset,
           Boolean(page.limitReached),
@@ -2695,7 +3162,15 @@ class FileCatalogStore implements CatalogStore {
             queryIndexScanMs,
             matchedRecords: page.matchedRecords,
             sourceLinePoints: page.sourceLinePoints,
+            acceptedLinePoints: page.acceptedLinePoints,
+            filteredLinePoints: page.filteredLinePoints,
+            filteredQualityPoints: page.filteredQualityPoints,
+            filteredJumpPoints: page.filteredJumpPoints,
+            lineSpeedBreaks: page.lineSpeedBreaks,
+            lineDistanceBreaks: page.lineDistanceBreaks,
+            lineSegments: page.lineSegments,
             renderedLinePoints: page.renderedLinePoints,
+            renderedLineDots: page.renderedLineDots,
             simplificationTolerancePx: page.simplificationTolerancePx,
           },
         ),
@@ -3078,7 +3553,7 @@ class FileCatalogStore implements CatalogStore {
     throwIfCancelled(isCancelled)
     const limit = Math.max(1, Math.min(query.limit ?? 500, 10_000))
     const offset = Math.max(0, query.offset ?? 0)
-    const minTime = query.startTime === undefined ? 0 : timestampSeconds(query.startTime)
+    const minTime = scanMinTimestampSec(query)
     const maxTime = query.endTime === undefined ? 0xffffffff : timestampSeconds(query.endTime)
     let assetDiskReadBytes = 0
     let assetDiskReadCount = 0
@@ -3351,7 +3826,10 @@ class FileCatalogStore implements CatalogStore {
         const source = manifest.sources[occurrence.sourceId]
         if (!source?.active || source.generation !== occurrence.generation) continue
         const existing = assetsByHash.get(occurrence.item.contentHash)
-        if (!existing) assetsByHash.set(occurrence.item.contentHash, occurrence.item)
+        assetsByHash.set(
+          occurrence.item.contentHash,
+          existing ? mergeMediaItems(existing, occurrence.item) : occurrence.item,
+        )
         const locationMap =
           locationsByHash.get(occurrence.item.contentHash) ?? new Map<string, MediaLocation>()
         for (const location of itemLocations(occurrence.item)) {
@@ -3656,14 +4134,19 @@ class FileCatalogStore implements CatalogStore {
     const timeRecords: PackedIndexRecord[] = []
     let processed = 0
     for await (const { assetId, item } of assetTable.scan()) {
-      if (item.timestamp !== undefined) {
+      if (
+        item.timestamp !== undefined ||
+        (item.latitude !== undefined && item.longitude !== undefined)
+      ) {
         const hasGeo = item.latitude !== undefined && item.longitude !== undefined
         const record: PackedIndexRecord = {
-          timestampSec: timestampSeconds(item.timestamp),
+          timestampSec:
+            item.timestamp === undefined ? 0 : timestampSeconds(item.timestamp),
           latE7: hasGeo ? latE7(item.latitude!) : 0,
           lonE7: hasGeo ? lonE7(item.longitude!) : 0,
           assetId,
           kindFlags: kindFlags(item),
+          ...linePayloadFromItem(item),
         }
         timeRecords.push(record)
       }
@@ -3769,6 +4252,18 @@ class FileCatalogStore implements CatalogStore {
         view.setInt32(recordOffset + 8, record.lonE7, true)
         view.setUint32(recordOffset + 12, record.assetId, true)
         view.setUint8(recordOffset + 16, record.kindFlags)
+        view.setUint8(recordOffset + 17, record.sourceCode ?? LINE_SOURCE_UNKNOWN)
+        view.setUint16(recordOffset + 18, record.qualityFlags ?? 0, true)
+        view.setFloat32(recordOffset + 20, record.accuracyMeters ?? Number.NaN, true)
+        view.setFloat32(
+          recordOffset + 24,
+          record.velocityMetersPerSecond ?? Number.NaN,
+          true,
+        )
+        view.setFloat32(recordOffset + 28, record.headingDegrees ?? Number.NaN, true)
+        view.setUint32(recordOffset + 32, record.groupHashLo ?? 0, true)
+        view.setUint32(recordOffset + 36, record.groupHashHi ?? 0, true)
+        view.setInt32(recordOffset + 40, record.sequence ?? -1, true)
       }
       parts.push(bytes)
       const processed = Math.min(records.length, offset + chunk.length)
@@ -4197,8 +4692,97 @@ async function mediaFromFile(
   }
 }
 
-function geoPointLocationId(sourceId: string, contentHash: string): string {
-  return `geo_point_location:v1:${sourceId}:${contentHash}`
+function parsedItemContentHash(item: ParsedGeoItem): string {
+  if (item.contentHash) return item.contentHash
+  if (
+    item.kind === 'geo_point' &&
+    item.latitude !== undefined &&
+    item.longitude !== undefined &&
+    item.timestamp !== undefined
+  ) {
+    return geoPointContentHash(item.latitude, item.longitude, item.timestamp)
+  }
+  return semanticContentHash(item.kind, [
+    item.timestamp,
+    item.endTimestamp,
+    item.latitude,
+    item.longitude,
+    item.sourceDataset,
+    item.sourceType,
+    item.groupId,
+    item.sequence,
+    JSON.stringify(item.metadata ?? {}),
+  ])
+}
+
+function geoPointLocationId(
+  sourceId: string,
+  contentHash: string,
+  item?: Pick<ParsedGeoItem, 'sourceDataset' | 'sourceType' | 'groupId' | 'sequence'>,
+): string {
+  return [
+    'geo_point_location:v2',
+    sourceId,
+    contentHash,
+    item?.sourceDataset ?? '',
+    item?.sourceType ?? '',
+    item?.groupId ?? '',
+    item?.sequence ?? '',
+  ].join(':')
+}
+
+function semanticLocationId(sourceId: string, contentHash: string): string {
+  return `semantic_location:v1:${sourceId}:${contentHash}`
+}
+
+function mediaItemFromParsedGeoItem(
+  sourceId: string,
+  sourceLabel: string,
+  mimeType: string,
+  item: ParsedGeoItem,
+): MediaItem {
+  const contentHash = parsedItemContentHash(item)
+  const isPoint = item.kind === 'geo_point'
+  const location: MediaLocation = {
+    id: isPoint
+      ? geoPointLocationId(sourceId, contentHash, item)
+      : semanticLocationId(sourceId, contentHash),
+    sourceId,
+    sourceLabel,
+    pointIndex: item.index,
+    sourceDataset: item.sourceDataset,
+    sourceType: item.sourceType,
+    groupId: item.groupId,
+    sequence: item.sequence,
+    timestamp: item.timestamp,
+    endTimestamp: item.endTimestamp,
+  }
+  return {
+    id: contentHash,
+    contentHash,
+    sourceId,
+    relativePath: sourceLabel,
+    displayName: item.displayName ?? `${sourceLabel} #${item.index}`,
+    kind: item.kind,
+    mimeType,
+    sizeBytes: 0,
+    durationMs: numeric(item.metadata?.durationMs),
+    timestamp: item.timestamp,
+    endTimestamp: item.endTimestamp,
+    latitude: item.latitude,
+    longitude: item.longitude,
+    sourceDataset: item.sourceDataset,
+    sourceType: item.sourceType,
+    accuracyMeters: item.accuracyMeters,
+    altitudeMeters: item.altitudeMeters,
+    verticalAccuracyMeters: item.verticalAccuracyMeters,
+    velocityMetersPerSecond: item.velocityMetersPerSecond,
+    headingDegrees: item.headingDegrees,
+    groupId: item.groupId,
+    sequence: item.sequence,
+    metadata: item.metadata,
+    locations: [location],
+  }
 }
 
 function geoPointItemFromParsedPoint(
@@ -4213,10 +4797,16 @@ function geoPointItemFromParsedPoint(
     point.timestamp,
   )
   const location: MediaLocation = {
-    id: geoPointLocationId(sourceId, contentHash),
+    id: geoPointLocationId(sourceId, contentHash, point),
     sourceId,
     sourceLabel,
     pointIndex: point.index,
+    sourceDataset: point.sourceDataset,
+    sourceType: point.sourceType,
+    groupId: point.groupId,
+    sequence: point.sequence,
+    timestamp: point.timestamp,
+    endTimestamp: point.endTimestamp,
   }
   return {
     id: contentHash,
@@ -4228,10 +4818,32 @@ function geoPointItemFromParsedPoint(
     mimeType,
     sizeBytes: 0,
     timestamp: point.timestamp,
+    endTimestamp: point.endTimestamp,
     latitude: point.latitude,
     longitude: point.longitude,
+    sourceDataset: point.sourceDataset,
+    sourceType: point.sourceType,
+    accuracyMeters: point.accuracyMeters,
+    altitudeMeters: point.altitudeMeters,
+    verticalAccuracyMeters: point.verticalAccuracyMeters,
+    velocityMetersPerSecond: point.velocityMetersPerSecond,
+    headingDegrees: point.headingDegrees,
+    groupId: point.groupId,
+    sequence: point.sequence,
+    metadata: point.metadata,
     locations: [location],
   }
+}
+
+function geoItemsFromParsedItems(
+  sourceId: string,
+  sourceLabel: string,
+  mimeType: string,
+  items: ParsedGeoItem[],
+): MediaItem[] {
+  return items.map((item) =>
+    mediaItemFromParsedGeoItem(sourceId, sourceLabel, mimeType, item),
+  )
 }
 
 function geoPointItemsFromParsedPoints(
@@ -4590,6 +5202,62 @@ async function importGoogleTakeoutIntoCatalog(
   return { acceptedMedia, skippedFiles, cancelled }
 }
 
+async function importGoogleTimelineIntoCatalog(
+  file: File,
+  source: MediaSource,
+  store: CatalogStore,
+  postProgress: (progress: ImportProgress) => void,
+  isCancelled: CancellationSignal,
+): Promise<{ acceptedMedia: number; skippedFiles: number; cancelled: boolean }> {
+  const sourceLabel = source.label
+  const readResult = await readFileTextWithProgress(file, sourceLabel, postProgress, isCancelled)
+  if (readResult.cancelled) return { acceptedMedia: 0, skippedFiles: 0, cancelled: true }
+  const parsed = parseGeoFilePoints(file.name || sourceLabel, readResult.text)
+  const items = parsed.items ?? parsed.points.map((point) => ({ ...point, kind: 'geo_point' as const }))
+  let acceptedMedia = 0
+  let cancelled = false
+  const batch: MediaItem[] = []
+
+  const flushBatch = async (phase: ImportProgress['phase']) => {
+    if (batch.length === 0) return
+    const flushedItems = batch.length
+    await store.writeMediaBatch(batch.splice(0))
+    acceptedMedia += flushedItems
+    postProgress({
+      phase,
+      sourceLabel,
+      scannedFiles: 1,
+      totalFiles: 1,
+      acceptedMedia,
+      skippedFiles: parsed.skippedPoints,
+      currentPath: sourceLabel,
+      scannedBytes: file.size,
+      totalBytes: file.size,
+    })
+    await yieldToEventLoop()
+  }
+
+  await store.withImportTransaction(async () => {
+    for (let offset = 0; offset < items.length; offset += GEO_POINT_ITEM_BUILD_CHUNK_SIZE) {
+      if (isCancelled()) {
+        cancelled = true
+        break
+      }
+      batch.push(
+        ...geoItemsFromParsedItems(
+          source.id,
+          sourceLabel,
+          parsed.mimeType,
+          items.slice(offset, offset + GEO_POINT_ITEM_BUILD_CHUNK_SIZE),
+        ),
+      )
+      if (batch.length >= store.geoImportWriteBatchSize) await flushBatch('storing')
+    }
+    await flushBatch('storing')
+  })
+  return { acceptedMedia, skippedFiles: parsed.skippedPoints, cancelled }
+}
+
 async function importGeoFileIntoCatalog(
   payload: ImportGeoFilePayload,
   store: CatalogStore,
@@ -4627,6 +5295,13 @@ async function importGeoFileIntoCatalog(
   const result = jsonLikePrefix(prefix)
     ? await (async () => {
         throwKnownUnsupportedJsonPrefix(prefix)
+        if (
+          /"semanticSegments"\s*:/.test(prefix) ||
+          /"rawSignals"\s*:/.test(prefix) ||
+          /"userLocationProfile"\s*:/.test(prefix)
+        ) {
+          return importGoogleTimelineIntoCatalog(file, source, store, postProgress, isCancelled)
+        }
         return importGoogleTakeoutIntoCatalog(file, source, store, postProgress, isCancelled)
       })()
     : await importGpxIntoCatalog(file, source, store, postProgress, isCancelled)

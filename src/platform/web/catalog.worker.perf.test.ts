@@ -28,7 +28,7 @@ function makeNoImagePackedRecords(count: number): PackedIndexRecord[] {
     latE7: Math.round(fixtureLat(index) * 10_000_000),
     lonE7: Math.round(fixtureLon(index) * 10_000_000),
     assetId: index,
-    kindFlags: constants.KIND_FLAG_GEO_POINT | constants.KIND_FLAG_HAS_GEO,
+    kindFlags: constants.KIND_CODE_GEO_POINT | constants.KIND_FLAG_HAS_GEO,
   }))
 }
 

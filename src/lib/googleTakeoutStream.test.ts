@@ -45,17 +45,21 @@ describe('GoogleTakeoutLocationStreamParser', () => {
     expect(result.skippedPoints).toBe(0)
     expect(result.finalSkippedPoints).toBe(0)
     expect(result.totalEntries).toBe(2)
-    expect(result.points).toEqual([
+    expect(result.points).toMatchObject([
       {
         index: 1,
+        kind: 'geo_point',
         latitude: 48.1370673,
         longitude: 11.5775995,
+        sourceDataset: 'google_records',
         timestamp: Date.parse('2012-10-28T14:21:22.010Z'),
       },
       {
         index: 2,
+        kind: 'geo_point',
         latitude: 48.1374628,
         longitude: 11.5781587,
+        sourceDataset: 'google_records',
         timestamp: 1_351_434_206_077,
       },
     ])
@@ -73,11 +77,13 @@ describe('GoogleTakeoutLocationStreamParser', () => {
     expect(result.skippedPoints).toBe(1)
     expect(result.finalSkippedPoints).toBe(1)
     expect(result.totalEntries).toBe(2)
-    expect(result.points).toEqual([
+    expect(result.points).toMatchObject([
       {
         index: 2,
+        kind: 'geo_point',
         latitude: 48.1370674,
         longitude: 11.5775996,
+        sourceDataset: 'google_records',
         timestamp: 1_351_434_206_077,
       },
     ])

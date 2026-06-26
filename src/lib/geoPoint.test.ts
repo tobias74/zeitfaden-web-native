@@ -124,29 +124,49 @@ describe('geo point helpers', () => {
 
     expect(result.mimeType).toBe('application/json')
     expect(result.skippedPoints).toBe(1)
-    expect(result.points).toEqual([
+    expect(result.points).toMatchObject([
       {
         index: 1,
+        kind: 'geo_point',
         latitude: 48.1370673,
         longitude: 11.5775995,
+        accuracyMeters: 540,
+        sourceDataset: 'google_records',
+        sourceType: 'CELL',
         timestamp: Date.parse('2012-10-28T14:21:22.010Z'),
       },
       {
         index: 2,
+        kind: 'geo_point',
         latitude: 48.1374628,
         longitude: 11.5781587,
+        accuracyMeters: 22,
+        sourceDataset: 'google_records',
+        sourceType: 'CELL',
+        metadata: {
+          activity: [
+            {
+              activity: [{ type: 'STILL', confidence: 100 }],
+              timestamp: '2012-10-28T14:21:46.568Z',
+            },
+          ],
+        },
         timestamp: Date.parse('2012-10-28T14:22:24.784Z'),
       },
       {
         index: 4,
+        kind: 'geo_point',
         latitude: 48.1374628,
         longitude: 11.5781587,
+        sourceDataset: 'google_records',
         timestamp: 1_351_434_205_077,
       },
       {
         index: 5,
+        kind: 'geo_point',
         latitude: 48.1374629,
         longitude: 11.5781588,
+        sourceDataset: 'google_records',
         timestamp: 1_351_434_206_077,
       },
     ])
@@ -195,17 +215,127 @@ describe('geo point helpers', () => {
     expect(() =>
       parseGeoFilePoints('unknown.json', JSON.stringify({ items: [] })),
     ).toThrow('not a supported geo import format')
-  })
 
-  it('identifies Google Semantic Location History JSON as valid but unsupported', () => {
     expect(() =>
       parseGeoFilePoints(
         '2024_JANUARY.json',
-        JSON.stringify({
-          timelineObjects: [{ placeVisit: {} }],
-        }),
+        JSON.stringify({ timelineObjects: [{ placeVisit: {} }] }),
       ),
     ).toThrow('Google Semantic Location History')
+  })
+
+  it('parses Google Timeline semantic JSON', () => {
+    const result = parseGeoFilePoints(
+      'Zeitachse.json',
+      JSON.stringify({
+        semanticSegments: [
+          {
+            startTime: '2026-06-01T10:00:00.000+02:00',
+            endTime: '2026-06-01T11:00:00.000+02:00',
+            timelinePath: [
+              {
+                point: '48.1370673°, 11.5775995°',
+                time: '2026-06-01T10:10:00.000+02:00',
+              },
+            ],
+            visit: {
+              hierarchyLevel: 0,
+              probability: 0.9,
+              topCandidate: {
+                placeId: 'place-1',
+                semanticType: 'UNKNOWN',
+                probability: 0.8,
+                placeLocation: { latLng: '48.1370673°, 11.5775995°' },
+              },
+            },
+            activity: {
+              distanceMeters: 1234,
+              start: { latLng: '48.1370673°, 11.5775995°' },
+              end: { latLng: '48.2°, 11.6°' },
+              topCandidate: { type: 'WALKING', probability: 0.75 },
+            },
+          },
+        ],
+        rawSignals: [
+          {
+            position: {
+              latitudeE7: 482000000,
+              longitudeE7: 116000000,
+              accuracy: 12,
+              altitude: 366,
+              verticalAccuracy: 2,
+              velocity: 3.5,
+              heading: 80,
+              source: 'GPS',
+              timestamp: '2026-06-01T12:00:00.000+02:00',
+            },
+          },
+          {
+            activityRecord: {
+              timestamp: '2026-06-01T12:05:00.000+02:00',
+              probableActivities: [{ type: 'STILL', probability: 0.9 }],
+            },
+          },
+          {
+            wifiScan: {
+              deliveryTime: '2026-06-01T12:00:00.000+02:00',
+              devicesRecords: [{ mac: 1, rawRssi: -50 }],
+            },
+          },
+        ],
+        userLocationProfile: {
+          frequentPlaces: [
+            {
+              placeId: 'home',
+              label: 'HOME',
+              placeLocation: { latLng: '48.3°, 11.7°' },
+            },
+          ],
+        },
+      }),
+    )
+
+    expect(result.points).toHaveLength(2)
+    expect(result.items).toMatchObject([
+      {
+        kind: 'geo_point',
+        sourceDataset: 'google_timeline_raw_signals',
+        sourceType: 'GPS',
+        accuracyMeters: 12,
+        altitudeMeters: 366,
+        verticalAccuracyMeters: 2,
+        velocityMetersPerSecond: 3.5,
+        headingDegrees: 80,
+      },
+      {
+        kind: 'activity_sample',
+        sourceType: 'activity_record',
+      },
+      {
+        kind: 'geo_point',
+        sourceDataset: 'google_timeline',
+        sourceType: 'timeline_path',
+        sequence: 0,
+      },
+      {
+        kind: 'timeline_visit',
+        sourceType: 'visit',
+        endTimestamp: Date.parse('2026-06-01T11:00:00.000+02:00'),
+      },
+      {
+        kind: 'timeline_activity',
+        sourceType: 'activity',
+        endTimestamp: Date.parse('2026-06-01T11:00:00.000+02:00'),
+        metadata: {
+          distanceMeters: 1234,
+          activityType: 'WALKING',
+        },
+      },
+      {
+        kind: 'frequent_place',
+        sourceType: 'frequent_place',
+      },
+    ])
   })
 
   it('rejects files whose geo format cannot be detected', () => {

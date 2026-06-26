@@ -232,6 +232,8 @@ function installGeneratedGeoFile(pageContext: BrowserContext): Promise<void> {
               10_000_000,
           ),
           timestamp: new Date(baseTime + index * 60_000).toISOString(),
+          source: 'GPS',
+          accuracy: index % 5 === 0 ? 600 : 10,
         }))
         return new File(
           [JSON.stringify({ locations })],
@@ -349,6 +351,14 @@ describeE2E('geo import and query UI e2e', () => {
       expect(renderedLinePoints).toBeGreaterThan(0)
       expect(renderedLinePoints).toBeLessThanOrEqual(10_000)
 
+      await openSettings(page)
+      await page.getByLabel('Grouped lines only').check()
+      await waitForMapMetricAtLeast(page, 'Rendered line dots', 1)
+      await waitForMapIdle(page)
+      await expectNoUiError(page)
+      await page.getByRole('button', { name: 'Reset line filters' }).click()
+      await closeSettings(page)
+
       await page.getByRole('button', { name: 'Bubbles' }).click()
       await waitForMapIdle(page)
       await expectNoUiError(page)
@@ -357,8 +367,8 @@ describeE2E('geo import and query UI e2e', () => {
     })
 
     await runStep(page, 'Run bounded timeframe query', async () => {
-      await page.getByRole('textbox', { name: 'From' }).fill('2024-01-10T00:00')
-      await page.getByRole('textbox', { name: 'To' }).fill('2024-01-12T00:00')
+      await page.getByRole('textbox', { name: 'From' }).fill('2024-01-02T00:00')
+      await page.getByRole('textbox', { name: 'To' }).fill('2024-01-03T00:00')
       await waitForResultCards(page)
       await waitForMapIdle(page)
       await expectNoUiError(page)

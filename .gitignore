@@ -16,6 +16,9 @@ src-tauri/target
 # Generated test fixtures
 tmp/geo-fixtures/
 
+# Local reference exports
+reference_resources/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

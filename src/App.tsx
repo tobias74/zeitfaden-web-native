@@ -49,6 +49,11 @@ import privacyDeHtml from './legal/privacy.de.html?raw'
 import privacyEnHtml from './legal/privacy.en.html?raw'
 import { formatDistance } from './lib/distance'
 import {
+  formatTimelineGroupId,
+  importedMediaFacts,
+  itemGroupId,
+} from './lib/mediaMetadata'
+import {
   LANGUAGES,
   LANGUAGE_STORAGE_KEY,
   type Language,
@@ -71,6 +76,7 @@ import type {
   GeoBounds,
   KindFilter,
   MapDisplayMode,
+  MapPolylineCleanupSource,
   MediaItem,
   SearchIndexStats,
   SearchSpec,
@@ -91,6 +97,22 @@ type ActivityLogEntry = {
   values?: TranslationValues
   createdAt: number
 }
+type TimelineGroupSummary = {
+  id: string
+  label: string
+  count: number
+  startTime?: number
+  endTime?: number
+  sourceTypes: string[]
+}
+type LineCleanupState = {
+  allowedSources: MapPolylineCleanupSource[]
+  maxAccuracyMeters?: number
+  breakSpeedKmh?: number
+  maxSegmentDistanceKm?: number
+  removeIsolatedJumps: boolean
+  showDots: boolean
+}
 
 const LEFT_WIDTH_KEY = 'geo-media-index-lab:left-width'
 const MAP_HEIGHT_KEY = 'geo-media-index-lab:map-height'
@@ -109,6 +131,53 @@ const MAP_BUBBLE_CELL_SIZE_OPTIONS = [48, 64, 80] as const
 const MAP_RENDER_BATCH_SIZE_OPTIONS = [100, 250, 500, 1_000, 2_500] as const
 const MAP_BUBBLE_SCALE_OPTIONS = [0.75, 1, 1.35] as const
 const MAP_MAX_BUBBLES_OPTIONS = [2_000, 5_000, 10_000] as const
+const LINE_CLEANUP_SOURCE_OPTIONS: MapPolylineCleanupSource[] = [
+  'GPS',
+  'WIFI',
+  'CELL',
+  'UNKNOWN',
+]
+const LINE_MAX_ACCURACY_OPTIONS = [0, 25, 50, 100, 250, 500, 1_000] as const
+const LINE_BREAK_SPEED_MIN = 0
+const LINE_BREAK_SPEED_MAX = 1_000
+const LINE_BREAK_SPEED_STEP = 10
+const LINE_MAX_SEGMENT_DISTANCE_OPTIONS = [
+  0,
+  0.05,
+  0.1,
+  0.15,
+  0.2,
+  0.25,
+  0.3,
+  0.4,
+  0.5,
+  0.75,
+  1,
+  1.5,
+  2,
+  2.5,
+  3,
+  4,
+  5,
+  7.5,
+  10,
+  15,
+  20,
+  25,
+  30,
+  40,
+  50,
+  75,
+  100,
+  150,
+  250,
+  500,
+  750,
+  1_000,
+] as const
+const LINE_SIMPLIFICATION_TOLERANCE_MIN = 0
+const LINE_SIMPLIFICATION_TOLERANCE_MAX = 20
+const LINE_SIMPLIFICATION_TOLERANCE_STEP = 0.5
 const DEFAULT_RESULT_PAGE_SIZE = 100
 const DEFAULT_MAP_BUBBLE_CELL_SIZE = 64
 const DEFAULT_MAP_RENDER_BATCH_SIZE = 500
@@ -116,6 +185,11 @@ const DEFAULT_MAP_BUBBLE_SCALE = 1
 const DEFAULT_MAP_MAX_BUBBLES = 5_000
 const MAP_POLYLINE_TOLERANCE_PX = 2
 const MAP_POLYLINE_MAX_POINTS = 10_000
+const DEFAULT_LINE_CLEANUP: LineCleanupState = {
+  allowedSources: LINE_CLEANUP_SOURCE_OPTIONS,
+  removeIsolatedJumps: false,
+  showDots: true,
+}
 const DEFAULT_DISTANCE_ENGINE_ID = 'segmented-ball-tree'
 const CATALOG_QUERY_INDEX_ID = 'file-time-geo'
 const DISTANCE_ENGINE_IDS = [
@@ -166,6 +240,53 @@ function mapViewportEqual(
   )
 }
 
+function lineCleanupEnabled(cleanup: LineCleanupState): boolean {
+  return (
+    cleanup.removeIsolatedJumps ||
+    cleanup.maxAccuracyMeters !== undefined ||
+    cleanup.breakSpeedKmh !== undefined ||
+    cleanup.maxSegmentDistanceKm !== undefined ||
+    !cleanup.showDots ||
+    cleanup.allowedSources.length !== LINE_CLEANUP_SOURCE_OPTIONS.length
+  )
+}
+
+function formatPixelValue(value: number, locale: string): string {
+  return `${value.toLocaleString(locale, {
+    maximumFractionDigits: 1,
+  })} px`
+}
+
+function formatDistanceThresholdKm(value: number, locale: string): string {
+  if (value < 1) {
+    return `${Math.round(value * 1000).toLocaleString(locale)} m`
+  }
+  return `${value.toLocaleString(locale, {
+    maximumFractionDigits: 1,
+  })} km`
+}
+
+function lineMaxSegmentDistanceOptionIndex(value: number | undefined): number {
+  const normalizedValue = value ?? 0
+  const exactIndex = LINE_MAX_SEGMENT_DISTANCE_OPTIONS.indexOf(
+    normalizedValue as (typeof LINE_MAX_SEGMENT_DISTANCE_OPTIONS)[number],
+  )
+  if (exactIndex >= 0) return exactIndex
+
+  let nearestIndex = 0
+  let nearestDistance = Math.abs(
+    LINE_MAX_SEGMENT_DISTANCE_OPTIONS[0] - normalizedValue,
+  )
+  LINE_MAX_SEGMENT_DISTANCE_OPTIONS.forEach((option, index) => {
+    const distance = Math.abs(option - normalizedValue)
+    if (distance < nearestDistance) {
+      nearestIndex = index
+      nearestDistance = distance
+    }
+  })
+  return nearestIndex
+}
+
 function storedNumber(key: string, fallback: number): number {
   const stored = window.localStorage.getItem(key)
   if (stored === null || stored.trim() === '') return fallback
@@ -208,6 +329,10 @@ function filterValueToKind(value: string): KindFilter {
   return value === 'image' ||
     value === 'video' ||
     value === 'geo_point' ||
+    value === 'timeline_visit' ||
+    value === 'timeline_activity' ||
+    value === 'activity_sample' ||
+    value === 'frequent_place' ||
     value === 'media'
     ? value
     : 'all'
@@ -440,6 +565,67 @@ function formatGeo(item: MediaItem): string | undefined {
   return `${item.latitude.toFixed(5)}, ${item.longitude.toFixed(5)}`
 }
 
+function mediaKindIcon(kind: MediaItem['kind']) {
+  if (
+    kind === 'geo_point' ||
+    kind === 'timeline_visit' ||
+    kind === 'frequent_place'
+  ) return <MapPin size={15} />
+  if (kind === 'video') return <Video size={15} />
+  if (kind === 'timeline_activity') return <Route size={15} />
+  if (kind === 'activity_sample') return <Activity size={15} />
+  return <ImageIcon size={15} />
+}
+
+function summarizeTimelineGroups(
+  results: EnrichedSearchResult[],
+  locale: string,
+  t: (key: TranslationKey, values?: TranslationValues) => string,
+): TimelineGroupSummary[] {
+  const groups = new Map<string, TimelineGroupSummary & { sourceTypeSet: Set<string> }>()
+  for (const result of results) {
+    const { item } = result
+    const groupId = itemGroupId(item)
+    if (!groupId) continue
+    const existing = groups.get(groupId) ?? {
+      id: groupId,
+      label: formatTimelineGroupId(groupId, t),
+      count: 0,
+      startTime: undefined,
+      endTime: undefined,
+      sourceTypes: [],
+      sourceTypeSet: new Set<string>(),
+    }
+    existing.count += 1
+    if (typeof item.timestamp === 'number') {
+      existing.startTime = Math.min(existing.startTime ?? item.timestamp, item.timestamp)
+      existing.endTime = Math.max(existing.endTime ?? item.timestamp, item.timestamp)
+    }
+    if (typeof item.endTimestamp === 'number') {
+      existing.endTime = Math.max(existing.endTime ?? item.endTimestamp, item.endTimestamp)
+    }
+    if (item.sourceType) existing.sourceTypeSet.add(item.sourceType)
+    groups.set(groupId, existing)
+  }
+
+  return Array.from(groups.values())
+    .map((group) => ({
+      id: group.id,
+      label: group.label,
+      count: group.count,
+      startTime: group.startTime,
+      endTime: group.endTime,
+      sourceTypes: Array.from(group.sourceTypeSet).sort((a, b) =>
+        a.localeCompare(b, locale),
+      ),
+    }))
+    .sort((a, b) => {
+      const left = a.startTime ?? Number.MAX_SAFE_INTEGER
+      const right = b.startTime ?? Number.MAX_SAFE_INTEGER
+      return left - right || a.id.localeCompare(b.id, locale)
+    })
+}
+
 function resultSkeletonCount(
   displayMode: ResultDisplayMode,
   pageSize: number,
@@ -518,6 +704,11 @@ const ResultCard = memo(function ResultCard({
   onHoverResultChange,
 }: ResultCardProps) {
   const { item } = result
+  const metadataFacts = importedMediaFacts(item, locale, t)
+  const metadataSummary = metadataFacts
+    .slice(0, 4)
+    .map((fact) => `${fact.label}: ${fact.value}`)
+    .join(' - ')
 
   return (
     <article
@@ -542,13 +733,7 @@ const ResultCard = memo(function ResultCard({
       {displayMode !== 'images' && (
         <div className="media-card-body">
           <div className="media-title-row">
-            {item.kind === 'geo_point' ? (
-              <MapPin size={15} />
-            ) : item.kind === 'video' ? (
-              <Video size={15} />
-            ) : (
-              <ImageIcon size={15} />
-            )}
+            {mediaKindIcon(item.kind)}
             <h3>{item.displayName}</h3>
           </div>
           {showMetadata && (
@@ -566,6 +751,7 @@ const ResultCard = memo(function ResultCard({
                   item.mimeType,
                   formatDimensions(item),
                   formatGeo(item),
+                  metadataSummary,
                 ]
                   .filter(Boolean)
                   .join(' - ')}
@@ -602,6 +788,8 @@ const ResultCard = memo(function ResultCard({
           {typeof result.distanceMeters === 'number' &&
           Number.isFinite(result.distanceMeters) ? (
             <strong>{formatDistance(result.distanceMeters)}</strong>
+          ) : metadataSummary ? (
+            <span>{metadataSummary}</span>
           ) : (
             <span>{t('metadataCatalog')}</span>
           )}
@@ -746,6 +934,10 @@ function App() {
   const [mapDisplayMode, setMapDisplayModeState] = useState<MapDisplayMode>(() =>
     storedString(MAP_DISPLAY_MODE_KEY, 'bubbles', ['bubbles', 'polyline']),
   )
+  const [lineCleanup, setLineCleanup] =
+    useState<LineCleanupState>(DEFAULT_LINE_CLEANUP)
+  const [lineSimplificationTolerancePx, setLineSimplificationTolerancePx] =
+    useState(MAP_POLYLINE_TOLERANCE_PX)
   const [visibleMapViewport, setVisibleMapViewport] = useState<MapViewport>()
   const [hoveredResultId, setHoveredResultId] = useState<string>()
   const workspaceRef = useRef<HTMLElement | null>(null)
@@ -865,8 +1057,18 @@ function App() {
           mapAggregation,
           mapMode: 'polyline',
           mapPolyline: {
-            tolerancePx: MAP_POLYLINE_TOLERANCE_PX,
+            tolerancePx: lineSimplificationTolerancePx,
             maxPoints: MAP_POLYLINE_MAX_POINTS,
+            cleanup: {
+              enabled: lineCleanupEnabled(lineCleanup),
+              groupLinesOnly: true,
+              allowedSources: lineCleanup.allowedSources,
+              maxAccuracyMeters: lineCleanup.maxAccuracyMeters,
+              breakSpeedKmh: lineCleanup.breakSpeedKmh,
+              maxSegmentDistanceKm: lineCleanup.maxSegmentDistanceKm,
+              removeIsolatedJumps: lineCleanup.removeIsolatedJumps,
+              showDots: lineCleanup.showDots,
+            },
           },
           order: {
             kind: 'timestamp',
@@ -899,6 +1101,8 @@ function App() {
     [
       catalogSort,
       kindFilter,
+      lineCleanup,
+      lineSimplificationTolerancePx,
       mapBubbleCellSize,
       mapBubbleScale,
       mapDisplayMode,
@@ -1016,6 +1220,7 @@ function App() {
     : resultItems.length === 0
       ? '0'
       : `${visibleStart.toLocaleString(locale)}-${visibleEnd.toLocaleString(locale)}`
+  const timelineGroups = summarizeTimelineGroups(resultItems, locale, t).slice(0, 8)
   const canPageBackward = resultPage > 0
   const canPageForward = pageLimitReached
   const loadViewerWindow = useCallback(
@@ -1231,6 +1436,94 @@ function App() {
       : DEFAULT_MAP_MAX_BUBBLES
     setMapMaxBubblesState(nextValue)
     window.localStorage.setItem(MAP_MAX_BUBBLES_KEY, String(nextValue))
+  }, [])
+
+  const toggleLineCleanupSource = useCallback((
+    source: MapPolylineCleanupSource,
+    enabled: boolean,
+  ) => {
+    setLineCleanup((current) => {
+      const sources = new Set(current.allowedSources)
+      if (enabled) sources.add(source)
+      else sources.delete(source)
+      return {
+        ...current,
+        allowedSources: LINE_CLEANUP_SOURCE_OPTIONS.filter((option) =>
+          sources.has(option),
+        ),
+      }
+    })
+  }, [])
+
+  const setLineMaxAccuracy = useCallback((value: number) => {
+    setLineCleanup((current) => ({
+      ...current,
+      maxAccuracyMeters:
+        value > 0 &&
+        LINE_MAX_ACCURACY_OPTIONS.includes(
+          value as (typeof LINE_MAX_ACCURACY_OPTIONS)[number],
+        )
+          ? value
+          : undefined,
+    }))
+  }, [])
+
+  const setLineBreakSpeed = useCallback((value: number) => {
+    const nextValue = Number.isFinite(value)
+      ? Math.round(
+          clamp(value, LINE_BREAK_SPEED_MIN, LINE_BREAK_SPEED_MAX) /
+            LINE_BREAK_SPEED_STEP,
+        ) * LINE_BREAK_SPEED_STEP
+      : LINE_BREAK_SPEED_MIN
+    setLineCleanup((current) => ({
+      ...current,
+      breakSpeedKmh: nextValue > 0 ? nextValue : undefined,
+    }))
+  }, [])
+
+  const setLineMaxSegmentDistance = useCallback((optionIndex: number) => {
+    const nextOptionIndex = Number.isFinite(optionIndex)
+      ? Math.trunc(
+          clamp(
+            optionIndex,
+            0,
+            LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1,
+          ),
+        )
+      : 0
+    const nextValue = LINE_MAX_SEGMENT_DISTANCE_OPTIONS[nextOptionIndex]
+    setLineCleanup((current) => ({
+      ...current,
+      maxSegmentDistanceKm: nextValue > 0 ? nextValue : undefined,
+    }))
+  }, [])
+
+  const setLineSimplificationTolerance = useCallback((value: number) => {
+    const boundedValue = Number.isFinite(value)
+      ? clamp(
+          value,
+          LINE_SIMPLIFICATION_TOLERANCE_MIN,
+          LINE_SIMPLIFICATION_TOLERANCE_MAX,
+        )
+      : MAP_POLYLINE_TOLERANCE_PX
+    const steppedValue =
+      Math.round(boundedValue / LINE_SIMPLIFICATION_TOLERANCE_STEP) *
+      LINE_SIMPLIFICATION_TOLERANCE_STEP
+    setLineSimplificationTolerancePx(steppedValue)
+  }, [])
+
+  const setLineCleanupFlag = useCallback((
+    key:
+      | 'removeIsolatedJumps'
+      | 'showDots',
+    enabled: boolean,
+  ) => {
+    setLineCleanup((current) => ({ ...current, [key]: enabled }))
+  }, [])
+
+  const resetLineCleanup = useCallback(() => {
+    setLineCleanup(DEFAULT_LINE_CLEANUP)
+    setLineSimplificationTolerancePx(MAP_POLYLINE_TOLERANCE_PX)
   }, [])
 
   const toggleMetadata = useCallback((enabled: boolean) => {
@@ -1618,6 +1911,139 @@ function App() {
                   </p>
                 </div>
                 <div className="display-section">
+                  <span>{t('lineCleanup')}</span>
+                  <div className="settings-checkbox-grid" aria-label={t('lineAllowedSources')}>
+                    {LINE_CLEANUP_SOURCE_OPTIONS.map((source) => (
+                      <label key={source} className="settings-checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={lineCleanup.allowedSources.includes(source)}
+                          onChange={(event) =>
+                            toggleLineCleanupSource(source, event.target.checked)
+                          }
+                        />
+                        {source}
+                      </label>
+                    ))}
+                  </div>
+                  <label className="settings-select-row">
+                    {t('lineMaxAccuracy')}
+                    <select
+                      value={lineCleanup.maxAccuracyMeters ?? 0}
+                      onChange={(event) =>
+                        setLineMaxAccuracy(Number(event.target.value))
+                      }
+                    >
+                      {LINE_MAX_ACCURACY_OPTIONS.map((value) => (
+                        <option key={value} value={value}>
+                          {value === 0 ? t('off') : `${value.toLocaleString(locale)} m`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="settings-slider-row">
+                    <span>
+                      {t('simplificationTolerance')}
+                      <strong>
+                        {formatPixelValue(lineSimplificationTolerancePx, locale)}
+                      </strong>
+                    </span>
+                    <input
+                      aria-label={t('simplificationTolerance')}
+                      type="range"
+                      min={LINE_SIMPLIFICATION_TOLERANCE_MIN}
+                      max={LINE_SIMPLIFICATION_TOLERANCE_MAX}
+                      step={LINE_SIMPLIFICATION_TOLERANCE_STEP}
+                      value={lineSimplificationTolerancePx}
+                      onChange={(event) =>
+                        setLineSimplificationTolerance(Number(event.target.value))
+                      }
+                    />
+                  </label>
+                  <label className="settings-slider-row">
+                    <span>
+                      {t('lineBreakSpeed')}
+                      <strong>
+                        {lineCleanup.breakSpeedKmh === undefined
+                          ? t('off')
+                          : `${lineCleanup.breakSpeedKmh.toLocaleString(locale)} km/h`}
+                      </strong>
+                    </span>
+                    <input
+                      aria-label={t('lineBreakSpeed')}
+                      type="range"
+                      min={LINE_BREAK_SPEED_MIN}
+                      max={LINE_BREAK_SPEED_MAX}
+                      step={LINE_BREAK_SPEED_STEP}
+                      value={lineCleanup.breakSpeedKmh ?? 0}
+                      onChange={(event) =>
+                        setLineBreakSpeed(Number(event.target.value))
+                      }
+                    />
+                  </label>
+                  <label className="settings-slider-row">
+                    <span>
+                      {t('lineMaxSegmentDistance')}
+                      <strong>
+                        {lineCleanup.maxSegmentDistanceKm === undefined
+                          ? t('off')
+                          : formatDistanceThresholdKm(
+                              lineCleanup.maxSegmentDistanceKm,
+                              locale,
+                            )}
+                      </strong>
+                    </span>
+                    <input
+                      aria-label={t('lineMaxSegmentDistance')}
+                      aria-valuetext={
+                        lineCleanup.maxSegmentDistanceKm === undefined
+                          ? t('off')
+                          : formatDistanceThresholdKm(
+                              lineCleanup.maxSegmentDistanceKm,
+                              locale,
+                            )
+                      }
+                      type="range"
+                      min={0}
+                      max={LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1}
+                      step={1}
+                      value={lineMaxSegmentDistanceOptionIndex(
+                        lineCleanup.maxSegmentDistanceKm,
+                      )}
+                      onChange={(event) =>
+                        setLineMaxSegmentDistance(Number(event.target.value))
+                      }
+                    />
+                  </label>
+                  <label className="settings-checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={lineCleanup.removeIsolatedJumps}
+                      onChange={(event) =>
+                        setLineCleanupFlag(
+                          'removeIsolatedJumps',
+                          event.target.checked,
+                        )
+                      }
+                    />
+                    {t('lineRemoveIsolatedJumps')}
+                  </label>
+                  <label className="settings-checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={lineCleanup.showDots}
+                      onChange={(event) =>
+                        setLineCleanupFlag('showDots', event.target.checked)
+                      }
+                    />
+                    {t('lineShowDots')}
+                  </label>
+                  <button type="button" onClick={resetLineCleanup}>
+                    {t('lineResetFilters')}
+                  </button>
+                  <p className="settings-hint">{t('lineCleanupHint')}</p>
+                </div>
+                <div className="display-section">
                   <label className="toggle-row">
                     <input
                       type="checkbox"
@@ -1657,106 +2083,106 @@ function App() {
               </div>
             </details>
           </div>
-          <div
-            className={`topbar-progress-slot ${
-              importProgress || geoIndexProgress || error ? 'active' : 'idle'
-            }`}
-            aria-live="polite"
-          >
-            {importProgress ? (
-              <div className="import-progress-strip">
-                <div className="import-progress-header">
-                  <span>{importProgressLabel(importProgress, t, locale)}</span>
-                  <div className="import-progress-actions">
-                    <strong>{importProgressDetail(importProgress, t, locale)}</strong>
-                    {canCommitImport && (
-                      <button
-                        type="button"
-                        className="import-cancel-button"
-                        onClick={commitImport}
-                      >
-                        <Save size={13} />
-                        {t('commitImport')}
-                      </button>
-                    )}
+        </div>
+        <div
+          className={`topbar-progress-slot ${
+            importProgress || geoIndexProgress || error ? 'active' : 'idle'
+          }`}
+          aria-live="polite"
+        >
+          {importProgress ? (
+            <div className="import-progress-strip">
+              <div className="import-progress-header">
+                <span>{importProgressLabel(importProgress, t, locale)}</span>
+                <div className="import-progress-actions">
+                  <strong>{importProgressDetail(importProgress, t, locale)}</strong>
+                  {canCommitImport && (
                     <button
                       type="button"
                       className="import-cancel-button"
-                      onClick={cancelImport}
-                      disabled={cancellingImport}
+                      onClick={commitImport}
                     >
-                      <X size={13} />
-                      {t('cancelImport')}
+                      <Save size={13} />
+                      {t('commitImport')}
                     </button>
-                  </div>
-                </div>
-                <div
-                  className={`progress-track ${
-                    importProgress.phase === 'counting' ? 'indeterminate' : ''
-                  }`}
-                  role="progressbar"
-                  aria-label={t('importProgress')}
-                  aria-valuemax={importProgressMax(importProgress)}
-                  aria-valuemin={0}
-                  aria-valuenow={importProgressCurrent(importProgress)}
-                >
-                  <div
-                    className="progress-fill"
-                    style={{
-                      width:
-                        importProgressPercent(importProgress) === undefined
-                          ? undefined
-                          : `${importProgressPercent(importProgress)}%`,
-                    }}
-                  />
-                </div>
-              </div>
-            ) : geoIndexProgress ? (
-              <div className="import-progress-strip">
-                <div className="import-progress-header">
-                  <span>{geoIndexProgressLabel(geoIndexProgress, t)}</span>
-                  <strong>
-                    {geoIndexProgressDetail(geoIndexProgress, t, locale)}
-                  </strong>
-                </div>
-                <div
-                  className={`progress-track ${
-                    geoIndexProgress.phase === 'loading' ? 'indeterminate' : ''
-                  }`}
-                  role="progressbar"
-                  aria-label={t('buildingGeoIndex', { indexLabel: '' })}
-                  aria-valuemax={100}
-                  aria-valuemin={0}
-                  aria-valuenow={
-                    geoIndexProgress.phase === 'loading'
-                      ? undefined
-                      : geoIndexProgressPercent(geoIndexProgress)
-                  }
-                  aria-valuetext={geoIndexProgressDetail(
-                    geoIndexProgress,
-                    t,
-                    locale,
                   )}
-                >
-                  <div
-                    className="progress-fill"
-                    style={{
-                      width:
-                        geoIndexProgressPercent(geoIndexProgress) === undefined
-                          ? undefined
-                          : `${geoIndexProgressPercent(geoIndexProgress)}%`,
-                    }}
-                  />
+                  <button
+                    type="button"
+                    className="import-cancel-button"
+                    onClick={cancelImport}
+                    disabled={cancellingImport}
+                  >
+                    <X size={13} />
+                    {t('cancelImport')}
+                  </button>
                 </div>
               </div>
-            ) : error ? (
-              <div className="topbar-error-strip" role="alert" title={error}>
-                {error}
+              <div
+                className={`progress-track ${
+                  importProgress.phase === 'counting' ? 'indeterminate' : ''
+                }`}
+                role="progressbar"
+                aria-label={t('importProgress')}
+                aria-valuemax={importProgressMax(importProgress)}
+                aria-valuemin={0}
+                aria-valuenow={importProgressCurrent(importProgress)}
+              >
+                <div
+                  className="progress-fill"
+                  style={{
+                    width:
+                      importProgressPercent(importProgress) === undefined
+                        ? undefined
+                        : `${importProgressPercent(importProgress)}%`,
+                  }}
+                />
               </div>
-            ) : (
-              <div className="import-progress-idle" aria-hidden="true" />
-            )}
-          </div>
+            </div>
+          ) : geoIndexProgress ? (
+            <div className="import-progress-strip">
+              <div className="import-progress-header">
+                <span>{geoIndexProgressLabel(geoIndexProgress, t)}</span>
+                <strong>
+                  {geoIndexProgressDetail(geoIndexProgress, t, locale)}
+                </strong>
+              </div>
+              <div
+                className={`progress-track ${
+                  geoIndexProgress.phase === 'loading' ? 'indeterminate' : ''
+                }`}
+                role="progressbar"
+                aria-label={t('buildingGeoIndex', { indexLabel: '' })}
+                aria-valuemax={100}
+                aria-valuemin={0}
+                aria-valuenow={
+                  geoIndexProgress.phase === 'loading'
+                    ? undefined
+                    : geoIndexProgressPercent(geoIndexProgress)
+                }
+                aria-valuetext={geoIndexProgressDetail(
+                  geoIndexProgress,
+                  t,
+                  locale,
+                )}
+              >
+                <div
+                  className="progress-fill"
+                  style={{
+                    width:
+                      geoIndexProgressPercent(geoIndexProgress) === undefined
+                        ? undefined
+                        : `${geoIndexProgressPercent(geoIndexProgress)}%`,
+                  }}
+                />
+              </div>
+            </div>
+          ) : error ? (
+            <div className="topbar-error-strip" role="alert" title={error}>
+              {error}
+            </div>
+          ) : (
+            <div className="import-progress-idle" aria-hidden="true" />
+          )}
         </div>
       </header>
 
@@ -1898,6 +2324,10 @@ function App() {
                     <option value="image">{t('images')}</option>
                     <option value="video">{t('videos')}</option>
                     <option value="geo_point">{t('geoPoints')}</option>
+                    <option value="timeline_visit">{t('timelineVisits')}</option>
+                    <option value="timeline_activity">{t('timelineActivities')}</option>
+                    <option value="activity_sample">{t('activitySamples')}</option>
+                    <option value="frequent_place">{t('frequentPlaces')}</option>
                   </select>
                 </label>
                 <label>
@@ -2212,8 +2642,40 @@ function App() {
                     <dd>{statsNumber(mapMetrics.sourceLinePoints, locale)}</dd>
                   </div>
                   <div>
+                    <dt>{t('acceptedLinePoints')}</dt>
+                    <dd>{statsNumber(mapMetrics.acceptedLinePoints, locale)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('filteredLinePoints')}</dt>
+                    <dd>{statsNumber(mapMetrics.filteredLinePoints, locale)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('filteredQualityPoints')}</dt>
+                    <dd>{statsNumber(mapMetrics.filteredQualityPoints, locale)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('filteredJumpPoints')}</dt>
+                    <dd>{statsNumber(mapMetrics.filteredJumpPoints, locale)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('lineSpeedBreaks')}</dt>
+                    <dd>{statsNumber(mapMetrics.lineSpeedBreaks, locale)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('lineDistanceBreaks')}</dt>
+                    <dd>{statsNumber(mapMetrics.lineDistanceBreaks, locale)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('lineSegments')}</dt>
+                    <dd>{statsNumber(mapMetrics.lineSegments, locale)}</dd>
+                  </div>
+                  <div>
                     <dt>{t('renderedLinePoints')}</dt>
                     <dd>{statsNumber(mapMetrics.renderedLinePoints, locale)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('renderedLineDots')}</dt>
+                    <dd>{statsNumber(mapMetrics.renderedLineDots, locale)}</dd>
                   </div>
                   <div>
                     <dt>{t('simplificationTolerance')}</dt>
@@ -2544,6 +3006,38 @@ function App() {
               </button>
             </div>
           </div>
+          {timelineGroups.length > 0 && (
+            <section className="timeline-group-overview" aria-label={t('timelineGroups')}>
+              <div className="timeline-group-overview-header">
+                <h3>{t('timelineGroups')}</h3>
+                <span>
+                  {t('timelineGroupsOnPage', {
+                    count: timelineGroups.length.toLocaleString(locale),
+                  })}
+                </span>
+              </div>
+              <div className="timeline-group-list">
+                {timelineGroups.map((group) => (
+                  <article key={group.id} className="timeline-group-card">
+                    <strong>{group.label}</strong>
+                    <span>
+                      {group.count.toLocaleString(locale)} {t('visible')}
+                      {group.sourceTypes.length > 0
+                        ? ` · ${group.sourceTypes.join(', ')}`
+                        : ''}
+                    </span>
+                    <span>
+                      {formatDateTime(group.startTime, locale, t('noTimestamp'))}
+                      {group.endTime !== undefined &&
+                      group.endTime !== group.startTime
+                        ? ` - ${formatDateTime(group.endTime, locale, t('noTimestamp'))}`
+                        : ''}
+                    </span>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
         <div
           className={`media-grid media-grid-${resultDisplayMode} media-thumb-${resultThumbnailSize}`}
           aria-busy={resultItemsLoading}

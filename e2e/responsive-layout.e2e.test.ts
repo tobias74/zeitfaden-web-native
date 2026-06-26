@@ -28,6 +28,10 @@ const APPBAR_VIEWPORTS = [
   { name: 'wide desktop', width: 1440, height: 900 },
   { name: 'large desktop', width: 1600, height: 900 },
 ] as const
+const APPBAR_ALERT_VIEWPORTS = [
+  { name: 'desktop', width: 1280, height: 720 },
+  { name: 'large desktop', width: 1600, height: 900 },
+] as const
 
 let server: ViteDevServer | undefined
 let baseUrl = ''
@@ -272,6 +276,91 @@ async function appbarReport(page: Page): Promise<{
   })
 }
 
+async function appbarAlertReport(page: Page): Promise<{
+  alertMissing: boolean
+  alertOutside: string[]
+  overlaps: string[]
+  alertBelowFirstRow: boolean
+  titleTopDeltaPx: number
+  alertLeftDeltaToTitlePx: number
+  alertRightDeltaToActionsPx: number
+  topbarOverflowPx: number
+  viewportWidth: number
+}> {
+  return page.evaluate(() => {
+    const topbar = document.querySelector('.topbar')
+    const alert = topbar?.querySelector('[role="alert"]')
+    if (!topbar || !alert) {
+      return {
+        alertMissing: true,
+        alertOutside: [],
+        overlaps: [],
+        alertBelowFirstRow: false,
+        titleTopDeltaPx: Number.POSITIVE_INFINITY,
+        alertLeftDeltaToTitlePx: Number.POSITIVE_INFINITY,
+        alertRightDeltaToActionsPx: Number.POSITIVE_INFINITY,
+        topbarOverflowPx: 0,
+        viewportWidth: window.innerWidth,
+      }
+    }
+
+    const topbarRect = topbar.getBoundingClientRect()
+    const alertRect = alert.getBoundingClientRect()
+    const viewportLeft = -(window.visualViewport?.offsetLeft ?? 0)
+    const viewportRight = viewportLeft + window.innerWidth
+    const visibleRect = (rect: DOMRect) => rect.width > 1 && rect.height > 1
+    const outside = (rect: DOMRect) =>
+      visibleRect(rect) &&
+      (
+        rect.left < Math.max(topbarRect.left, viewportLeft) - 2 ||
+        rect.right > Math.min(topbarRect.right, viewportRight) + 2 ||
+        rect.top < topbarRect.top - 2 ||
+        rect.bottom > topbarRect.bottom + 2
+      )
+    const intersects = (a: DOMRect, b: DOMRect) =>
+      visibleRect(a) &&
+      visibleRect(b) &&
+      a.left < b.right - 1 &&
+      a.right > b.left + 1 &&
+      a.top < b.bottom - 1 &&
+      a.bottom > b.top + 1
+    const summary = (selector: string, rect: DOMRect) =>
+      `${selector} ${Math.round(rect.left)},${Math.round(rect.top)}-${Math.round(
+        rect.right,
+      )},${Math.round(rect.bottom)}`
+
+    const firstRowSelectors = ['.topbar h1', '.topbar-nav', '.topbar-actions']
+    const firstRowRects = firstRowSelectors.flatMap((selector) => {
+      const element = topbar.querySelector(selector)
+      return element ? [{ selector, rect: element.getBoundingClientRect() }] : []
+    })
+    const actionRect = topbar.querySelector('.topbar-actions')?.getBoundingClientRect()
+    const titleRect = topbar.querySelector('.topbar h1')?.getBoundingClientRect()
+    const firstRowBottom = Math.max(...firstRowRects.map(({ rect }) => rect.bottom))
+
+    return {
+      alertMissing: false,
+      alertOutside: outside(alertRect) ? [summary('[role="alert"]', alertRect)] : [],
+      overlaps: firstRowRects.flatMap(({ selector, rect }) =>
+        intersects(alertRect, rect) ? [summary(selector, rect)] : [],
+      ),
+      alertBelowFirstRow: alertRect.top >= firstRowBottom + 4,
+      titleTopDeltaPx:
+        actionRect && titleRect ? Math.abs(titleRect.top - actionRect.top) : Number.POSITIVE_INFINITY,
+      alertLeftDeltaToTitlePx:
+        titleRect ? Math.abs(alertRect.left - titleRect.left) : Number.POSITIVE_INFINITY,
+      alertRightDeltaToActionsPx:
+        actionRect ? Math.abs(alertRect.right - actionRect.right) : Number.POSITIVE_INFINITY,
+      topbarOverflowPx: Math.max(
+        0,
+        topbar.scrollWidth - topbar.clientWidth,
+        document.documentElement.scrollWidth - window.innerWidth,
+      ),
+      viewportWidth: window.innerWidth,
+    }
+  })
+}
+
 describeE2E('responsive layout e2e', () => {
   beforeAll(async () => {
     const port = 6000 + Math.floor(Math.random() * 500)
@@ -301,6 +390,7 @@ describeE2E('responsive layout e2e', () => {
       for (const viewport of APPBAR_VIEWPORTS) {
         await page.setViewportSize(viewport)
         await page.goto(baseUrl)
+        await page.locator('.topbar').waitFor({ timeout: STEP_TIMEOUT_MS })
         const report = await appbarReport(page)
         expect(report.controlsOutside, `${viewport.name} ${JSON.stringify(report)}`).toEqual(
           [],
@@ -309,6 +399,39 @@ describeE2E('responsive layout e2e', () => {
           report.wrappedLegalLinks,
           `${viewport.name} ${JSON.stringify(report)}`,
         ).toEqual([])
+        expect(report.topbarOverflowPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
+      }
+    } finally {
+      await page.close().catch(() => undefined)
+      await context.close()
+      await rm(userDataDir, { force: true, recursive: true })
+    }
+  }, TEST_TIMEOUT_MS)
+
+  it('keeps the index error banner in its own appbar row on desktop widths', async () => {
+    const { context, userDataDir } = await createContext({
+      width: 1600,
+      height: 900,
+    })
+    const page = await context.newPage()
+    try {
+      for (const viewport of APPBAR_ALERT_VIEWPORTS) {
+        await page.setViewportSize(viewport)
+        await page.goto(baseUrl)
+        await page.locator('.topbar').waitFor({ timeout: STEP_TIMEOUT_MS })
+        await page
+          .getByRole('alert')
+          .filter({ hasText: /index.*missing/i })
+          .waitFor({ timeout: STEP_TIMEOUT_MS })
+
+        const report = await appbarAlertReport(page)
+        expect(report.alertMissing, `${viewport.name} ${JSON.stringify(report)}`).toBe(false)
+        expect(report.alertOutside, `${viewport.name} ${JSON.stringify(report)}`).toEqual([])
+        expect(report.overlaps, `${viewport.name} ${JSON.stringify(report)}`).toEqual([])
+        expect(report.alertBelowFirstRow, `${viewport.name} ${JSON.stringify(report)}`).toBe(true)
+        expect(report.titleTopDeltaPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(10)
+        expect(report.alertLeftDeltaToTitlePx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
+        expect(report.alertRightDeltaToActionsPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
         expect(report.topbarOverflowPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
       }
     } finally {

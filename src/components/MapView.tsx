@@ -82,6 +82,14 @@ const polylineStyle = [
   }),
 ]
 
+const lineDotStyle = new Style({
+  image: new CircleStyle({
+    radius: 4,
+    fill: new Fill({ color: '#235d67' }),
+    stroke: new Stroke({ color: 'rgba(255, 255, 255, 0.88)', width: 1.5 }),
+  }),
+})
+
 const mapPointStyleCache = new globalThis.Map<string, Style>()
 const AREA_CURSOR_TOLERANCE_PX = 10
 
@@ -98,6 +106,8 @@ function featureBubbleCount(feature: FeatureLike): number {
 }
 
 function mapPointStyle(feature: FeatureLike, scale: number): Style {
+  if (feature.get('lineDot') === true) return lineDotStyle
+
   const count = featureBubbleCount(feature)
 
   const sizeBucket =
@@ -420,6 +430,7 @@ export function MapView({
         onGeoBoundsChange(clickedBounds)
         return
       }
+      if (clickedPoint?.get('lineDot') === true) return
 
       if (boundsDrawingRef.current) return
 
@@ -501,7 +512,7 @@ export function MapView({
     let timer: number | undefined
 
     source.clear(true)
-    if (mapMode !== 'bubbles') return
+    if (mapMode !== 'bubbles' && mapMode !== 'polyline') return
 
     function addNextBatch() {
       if (jobId !== renderJobRef.current) return
@@ -514,10 +525,14 @@ export function MapView({
           continue
         }
         const feature = pointFeature(item.lon, item.lat)
-        feature.set('mediaId', item.mediaId ?? item.assetId, true)
-        if (item.cellId) feature.set('cellId', item.cellId, true)
-        feature.set('count', item.count ?? 1, true)
-        if (item.bounds) feature.set('bounds', item.bounds, true)
+        if (mapMode === 'polyline') {
+          feature.set('lineDot', true, true)
+        } else {
+          feature.set('mediaId', item.mediaId ?? item.assetId, true)
+          if (item.cellId) feature.set('cellId', item.cellId, true)
+          feature.set('count', item.count ?? 1, true)
+          if (item.bounds) feature.set('bounds', item.bounds, true)
+        }
         features.push(feature)
       }
 
@@ -539,16 +554,24 @@ export function MapView({
     const lineSource = lineSourceRef.current
     lineSource.clear(true)
 
-    if (mapMode !== 'polyline' || !polyline || polyline.points.length < 2) {
+    if (mapMode !== 'polyline' || !polyline) {
       return
     }
 
-    const feature = new Feature({
-      geometry: new LineString(
-        polyline.points.map((point) => fromLonLat([point.lon, point.lat])),
-      ),
+    const segments = polyline.segments?.length
+      ? polyline.segments
+      : [{ points: polyline.points }]
+    const features = segments.flatMap((segment) => {
+      if (segment.points.length < 2) return []
+      return [
+        new Feature({
+          geometry: new LineString(
+            segment.points.map((point) => fromLonLat([point.lon, point.lat])),
+          ),
+        }),
+      ]
     })
-    lineSource.addFeature(feature)
+    if (features.length > 0) lineSource.addFeatures(features)
   }, [mapMode, polyline])
 
   useEffect(() => {

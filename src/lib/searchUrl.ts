@@ -60,6 +60,10 @@ function kindFilter(value: string | null): KindFilter {
     value === 'image' ||
     value === 'video' ||
     value === 'geo_point' ||
+    value === 'timeline_visit' ||
+    value === 'timeline_activity' ||
+    value === 'activity_sample' ||
+    value === 'frequent_place' ||
     value === 'media'
   ) {
     return value

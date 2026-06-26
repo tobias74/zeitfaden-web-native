@@ -71,12 +71,15 @@ function coordinateE7(value: number): number {
 }
 
 function kindFlags(kind: MediaKind, hasGeo = true): number {
-  const encoded =
-    kind === 'video'
-      ? constants.KIND_FLAG_VIDEO
-      : kind === 'geo_point'
-        ? constants.KIND_FLAG_GEO_POINT
-        : constants.KIND_FLAG_IMAGE
+  const encoded = {
+    image: constants.KIND_CODE_IMAGE,
+    video: constants.KIND_CODE_VIDEO,
+    geo_point: constants.KIND_CODE_GEO_POINT,
+    timeline_visit: constants.KIND_CODE_TIMELINE_VISIT,
+    timeline_activity: constants.KIND_CODE_TIMELINE_ACTIVITY,
+    activity_sample: constants.KIND_CODE_ACTIVITY_SAMPLE,
+    frequent_place: constants.KIND_CODE_FREQUENT_PLACE,
+  }[kind]
   return encoded | (hasGeo ? constants.KIND_FLAG_HAS_GEO : 0)
 }
 
@@ -99,6 +102,23 @@ function makePackedRecords(
   )
 }
 
+function withGroupSequence(
+  record: PackedIndexRecord,
+  sequence: number,
+  groupHashLo = 1,
+): PackedIndexRecord {
+  return {
+    ...record,
+    qualityFlags:
+      (record.qualityFlags ?? 0) |
+      constants.LINE_QUALITY_HAS_GROUP |
+      constants.LINE_QUALITY_HAS_SEQUENCE,
+    groupHashLo,
+    groupHashHi: 0,
+    sequence,
+  }
+}
+
 function makePackedIndex(records: PackedIndexRecord[]): ResidentPackedGeoIndex {
   const index = ResidentPackedGeoIndex.fromArrayBuffer(
     encodeTimeGeoIndexForTests(records, {
@@ -112,9 +132,13 @@ function makePackedIndex(records: PackedIndexRecord[]): ResidentPackedGeoIndex {
 }
 
 function mediaKindFromFlags(flags: number): MediaKind {
-  const encoded = flags & 0b11
-  if (encoded === constants.KIND_FLAG_VIDEO) return 'video'
-  if (encoded === constants.KIND_FLAG_GEO_POINT) return 'geo_point'
+  const encoded = flags & 0x7f
+  if (encoded === constants.KIND_CODE_VIDEO) return 'video'
+  if (encoded === constants.KIND_CODE_GEO_POINT) return 'geo_point'
+  if (encoded === constants.KIND_CODE_TIMELINE_VISIT) return 'timeline_visit'
+  if (encoded === constants.KIND_CODE_TIMELINE_ACTIVITY) return 'timeline_activity'
+  if (encoded === constants.KIND_CODE_ACTIVITY_SAMPLE) return 'activity_sample'
+  if (encoded === constants.KIND_CODE_FREQUENT_PLACE) return 'frequent_place'
   return 'image'
 }
 
@@ -251,6 +275,38 @@ describe('catalog worker packed query hot paths', () => {
     expect(page.metrics.candidatesInspected).toBeGreaterThan(25_000)
     expect(page.metrics.candidatesInspected).toBeLessThanOrEqual(LARGE_RECORD_COUNT)
   }, 15_000)
+
+  it('round-trips every catalog kind through packed kind filters', async () => {
+    const kinds: MediaKind[] = [
+      'image',
+      'video',
+      'geo_point',
+      'timeline_visit',
+      'timeline_activity',
+      'activity_sample',
+      'frequent_place',
+    ]
+    const records = kinds.map((kind, index): PackedIndexRecord => ({
+      timestampSec: 1_700_000_000 + index,
+      latE7: coordinateE7(48 + index / 100),
+      lonE7: coordinateE7(11 + index / 100),
+      assetId: index,
+      kindFlags: kindFlags(kind, kind !== 'activity_sample'),
+    }))
+    const index = makePackedIndex(records)
+
+    for (const [assetId, kind] of kinds.entries()) {
+      const page = await index.scanAssetIds(
+        0,
+        0xffffffff,
+        'asc',
+        { sort: 'timestamp_asc', kind, limit: 10 },
+        10,
+        () => false,
+      )
+      expect(page.assetIds, kind).toEqual([assetId])
+    }
+  })
 
   it('returns map points with time, kind, bounds, offset, and limit filters', async () => {
     const records = makePackedRecords(20_000)
@@ -556,7 +612,9 @@ describe('catalog worker packed query hot paths', () => {
   })
 
   it('scans map polylines in chronological timestamp order', async () => {
-    const records = makePackedRecords(2_000, () => 'geo_point')
+    const records = makePackedRecords(2_000, () => 'geo_point').map((record, index) =>
+      withGroupSequence(record, index),
+    )
     const index = makePackedIndex(records)
     const query: CatalogQuery = {
       sort: 'timestamp_asc',
@@ -586,7 +644,7 @@ describe('catalog worker packed query hot paths', () => {
   it('applies time, visible bounds, and geo point filtering to map polylines', async () => {
     const records = makePackedRecords(5_000, (index) =>
       index % 3 === 0 ? 'image' : 'geo_point',
-    )
+    ).map((record, index) => withGroupSequence(record, index))
     const index = makePackedIndex(records)
     const query: CatalogQuery = {
       sort: 'timestamp_asc',
@@ -622,14 +680,423 @@ describe('catalog worker packed query hot paths', () => {
     ).toBe(true)
   })
 
-  it('simplifies map polylines while keeping endpoints and the requested cap', async () => {
-    const records = Array.from({ length: 2_000 }, (_, index): PackedIndexRecord => ({
-      timestampSec: 1_700_000_000 + index,
-      latE7: coordinateE7(46 + index / 20_000 + Math.sin(index / 8) / 1_000),
-      lonE7: coordinateE7(7 + index / 18_000),
-      assetId: index,
-      kindFlags: kindFlags('geo_point'),
-    }))
+  it('renders grouped line segments and ungrouped dots in grouped-only mode', async () => {
+    const baseTime = 1_700_000_000
+    const records: PackedIndexRecord[] = [
+      {
+        timestampSec: baseTime,
+        latE7: coordinateE7(47),
+        lonE7: coordinateE7(8),
+        assetId: 0,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+        qualityFlags:
+          constants.LINE_QUALITY_HAS_GROUP |
+          constants.LINE_QUALITY_HAS_SEQUENCE,
+        groupHashLo: 1,
+        groupHashHi: 0,
+        sequence: 0,
+      },
+      {
+        timestampSec: baseTime + 1,
+        latE7: coordinateE7(47.1),
+        lonE7: coordinateE7(8.1),
+        assetId: 1,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+        qualityFlags:
+          constants.LINE_QUALITY_HAS_GROUP |
+          constants.LINE_QUALITY_HAS_SEQUENCE,
+        groupHashLo: 1,
+        groupHashHi: 0,
+        sequence: 1,
+      },
+      {
+        timestampSec: baseTime + 2,
+        latE7: coordinateE7(48),
+        lonE7: coordinateE7(9),
+        assetId: 2,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+      },
+      {
+        timestampSec: baseTime + 3,
+        latE7: coordinateE7(49),
+        lonE7: coordinateE7(10),
+        assetId: 3,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+        qualityFlags:
+          constants.LINE_QUALITY_HAS_GROUP |
+          constants.LINE_QUALITY_HAS_SEQUENCE,
+        groupHashLo: 2,
+        groupHashHi: 0,
+        sequence: 0,
+      },
+      {
+        timestampSec: baseTime + 4,
+        latE7: coordinateE7(49.1),
+        lonE7: coordinateE7(10.1),
+        assetId: 4,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+        qualityFlags:
+          constants.LINE_QUALITY_HAS_GROUP |
+          constants.LINE_QUALITY_HAS_SEQUENCE,
+        groupHashLo: 2,
+        groupHashHi: 0,
+        sequence: 1,
+      },
+    ]
+    const page = await makePackedIndex(records).scanMapPolyline(
+      0,
+      0xffffffff,
+      'asc',
+      { sort: 'timestamp_asc', kind: 'geo_point', hasGeo: true },
+      { zoom: 10, viewportWidthPx: 900, viewportHeightPx: 430, bubbleCellSizePx: 64 },
+      {
+        tolerancePx: 0,
+        maxPoints: 10_000,
+        cleanup: {
+          enabled: true,
+          groupLinesOnly: true,
+          allowedSources: ['GPS', 'WIFI', 'CELL', 'UNKNOWN'],
+          removeIsolatedJumps: false,
+        },
+      },
+      () => false,
+    )
+
+    expect(page.polyline?.segments).toHaveLength(2)
+    expect(page.polyline?.segments?.map((segment) => segment.points.length)).toEqual([2, 2])
+    expect(page.points).toHaveLength(1)
+    expect(page.points[0].assetId).toBe(2)
+    expect(page.renderedLineDots).toBe(1)
+  })
+
+  it('splits grouped map polylines when sequence values are not consecutive', async () => {
+    const baseTime = 1_700_050_000
+    const records: PackedIndexRecord[] = [
+      withGroupSequence({
+        timestampSec: baseTime,
+        latE7: coordinateE7(47),
+        lonE7: coordinateE7(8),
+        assetId: 0,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+      }, 0),
+      withGroupSequence({
+        timestampSec: baseTime + 1,
+        latE7: coordinateE7(47.1),
+        lonE7: coordinateE7(8.1),
+        assetId: 1,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+      }, 1),
+      withGroupSequence({
+        timestampSec: baseTime + 2,
+        latE7: coordinateE7(48),
+        lonE7: coordinateE7(9),
+        assetId: 2,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+      }, 3),
+      withGroupSequence({
+        timestampSec: baseTime + 3,
+        latE7: coordinateE7(48.1),
+        lonE7: coordinateE7(9.1),
+        assetId: 3,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+      }, 4),
+    ]
+    const page = await makePackedIndex(records).scanMapPolyline(
+      0,
+      0xffffffff,
+      'asc',
+      { sort: 'timestamp_asc', kind: 'geo_point', hasGeo: true },
+      { zoom: 10, viewportWidthPx: 900, viewportHeightPx: 430, bubbleCellSizePx: 64 },
+      {
+        tolerancePx: 0,
+        maxPoints: 10_000,
+        cleanup: {
+          enabled: true,
+          groupLinesOnly: false,
+          allowedSources: ['GPS', 'WIFI', 'CELL', 'UNKNOWN'],
+          removeIsolatedJumps: false,
+        },
+      },
+      () => false,
+    )
+
+    expect(page.polyline?.segments).toHaveLength(2)
+    expect(page.polyline?.segments?.map((segment) => segment.points)).toEqual([
+      [
+        { lat: 47, lon: 8 },
+        { lat: 47.1, lon: 8.1 },
+      ],
+      [
+        { lat: 48, lon: 9 },
+        { lat: 48.1, lon: 9.1 },
+      ],
+    ])
+    expect(page.points).toHaveLength(0)
+  })
+
+  it('filters map polylines by source and accuracy payload fields', async () => {
+    const baseTime = 1_700_100_000
+    const records: PackedIndexRecord[] = [
+      withGroupSequence({
+        timestampSec: baseTime,
+        latE7: coordinateE7(47),
+        lonE7: coordinateE7(8),
+        assetId: 0,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+        qualityFlags: constants.LINE_QUALITY_HAS_ACCURACY,
+        accuracyMeters: 10,
+      }, 0),
+      {
+        timestampSec: baseTime + 1,
+        latE7: coordinateE7(47.01),
+        lonE7: coordinateE7(8.01),
+        assetId: 1,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_CELL,
+        qualityFlags: constants.LINE_QUALITY_HAS_ACCURACY,
+        accuracyMeters: 10,
+      },
+      {
+        timestampSec: baseTime + 2,
+        latE7: coordinateE7(47.02),
+        lonE7: coordinateE7(8.02),
+        assetId: 2,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+        qualityFlags: constants.LINE_QUALITY_HAS_ACCURACY,
+        accuracyMeters: 500,
+      },
+      withGroupSequence({
+        timestampSec: baseTime + 3,
+        latE7: coordinateE7(47.03),
+        lonE7: coordinateE7(8.03),
+        assetId: 3,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+        qualityFlags: constants.LINE_QUALITY_HAS_ACCURACY,
+        accuracyMeters: 12,
+      }, 1),
+    ]
+    const page = await makePackedIndex(records).scanMapPolyline(
+      0,
+      0xffffffff,
+      'asc',
+      { sort: 'timestamp_asc', kind: 'geo_point', hasGeo: true },
+      { zoom: 12, viewportWidthPx: 900, viewportHeightPx: 430, bubbleCellSizePx: 64 },
+      {
+        tolerancePx: 0,
+        maxPoints: 10_000,
+        cleanup: {
+          enabled: true,
+          groupLinesOnly: false,
+          allowedSources: ['GPS'],
+          maxAccuracyMeters: 100,
+          removeIsolatedJumps: false,
+        },
+      },
+      () => false,
+    )
+
+    expect(page.matchedRecords).toBe(4)
+    expect(page.acceptedLinePoints).toBe(2)
+    expect(page.filteredQualityPoints).toBe(2)
+    expect(page.polyline?.points).toEqual([
+      { lat: 47, lon: 8 },
+      { lat: 47.03, lon: 8.03 },
+    ])
+  })
+
+  it('removes isolated jump points before speed splitting map polylines', async () => {
+    const baseTime = 1_700_200_000
+    const records: PackedIndexRecord[] = [
+      {
+        timestampSec: baseTime,
+        latE7: coordinateE7(48.137),
+        lonE7: coordinateE7(11.575),
+        assetId: 0,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+      },
+      {
+        timestampSec: baseTime + 60,
+        latE7: coordinateE7(5),
+        lonE7: coordinateE7(30),
+        assetId: 1,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+      },
+      {
+        timestampSec: baseTime + 120,
+        latE7: coordinateE7(48.1371),
+        lonE7: coordinateE7(11.5751),
+        assetId: 2,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+      },
+    ].map((record, index) => withGroupSequence(record, index))
+    const page = await makePackedIndex(records).scanMapPolyline(
+      0,
+      0xffffffff,
+      'asc',
+      { sort: 'timestamp_asc', kind: 'geo_point', hasGeo: true },
+      { zoom: 12, viewportWidthPx: 900, viewportHeightPx: 430, bubbleCellSizePx: 64 },
+      {
+        tolerancePx: 0,
+        maxPoints: 10_000,
+        cleanup: {
+          enabled: true,
+          groupLinesOnly: false,
+          allowedSources: ['GPS', 'WIFI', 'CELL', 'UNKNOWN'],
+          breakSpeedKmh: 300,
+          removeIsolatedJumps: true,
+        },
+      },
+      () => false,
+    )
+
+    expect(page.filteredJumpPoints).toBe(1)
+    expect(page.lineSpeedBreaks).toBe(0)
+    expect(page.polyline?.points).toEqual([
+      { lat: 48.137, lon: 11.575 },
+      { lat: 48.1371, lon: 11.5751 },
+    ])
+  })
+
+  it('breaks map polylines by maximum segment distance and renders singleton fragments as dots', async () => {
+    const baseTime = 1_700_250_000
+    const records: PackedIndexRecord[] = [
+      {
+        timestampSec: baseTime,
+        latE7: coordinateE7(48.137),
+        lonE7: coordinateE7(11.575),
+        assetId: 10,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+      },
+      {
+        timestampSec: baseTime + 60,
+        latE7: coordinateE7(51.5),
+        lonE7: coordinateE7(0),
+        assetId: 11,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+      },
+      {
+        timestampSec: baseTime + 120,
+        latE7: coordinateE7(51.5005),
+        lonE7: coordinateE7(0.0005),
+        assetId: 12,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+      },
+    ].map((record, index) => withGroupSequence(record, index))
+    const page = await makePackedIndex(records).scanMapPolyline(
+      0,
+      0xffffffff,
+      'asc',
+      { sort: 'timestamp_asc', kind: 'geo_point', hasGeo: true },
+      { zoom: 12, viewportWidthPx: 900, viewportHeightPx: 430, bubbleCellSizePx: 64 },
+      {
+        tolerancePx: 0,
+        maxPoints: 10_000,
+        cleanup: {
+          enabled: true,
+          groupLinesOnly: false,
+          allowedSources: ['GPS', 'WIFI', 'CELL', 'UNKNOWN'],
+          maxSegmentDistanceKm: 25,
+          removeIsolatedJumps: false,
+        },
+      },
+      () => false,
+    )
+
+    expect(page.lineDistanceBreaks).toBe(1)
+    expect(page.polyline?.segments).toHaveLength(1)
+    expect(page.polyline?.points).toEqual([
+      { lat: 51.5, lon: 0 },
+      { lat: 51.5005, lon: 0.0005 },
+    ])
+    expect(page.points).toHaveLength(1)
+    expect(page.points[0].assetId).toBe(10)
+    expect(page.renderedLineDots).toBe(1)
+  })
+
+  it('can suppress singleton map polyline dots after distance splitting', async () => {
+    const baseTime = 1_700_260_000
+    const records: PackedIndexRecord[] = [
+      {
+        timestampSec: baseTime,
+        latE7: coordinateE7(48.137),
+        lonE7: coordinateE7(11.575),
+        assetId: 20,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+      },
+      {
+        timestampSec: baseTime + 60,
+        latE7: coordinateE7(51.5),
+        lonE7: coordinateE7(0),
+        assetId: 21,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+      },
+      {
+        timestampSec: baseTime + 120,
+        latE7: coordinateE7(51.5005),
+        lonE7: coordinateE7(0.0005),
+        assetId: 22,
+        kindFlags: kindFlags('geo_point'),
+        sourceCode: constants.LINE_SOURCE_GPS,
+      },
+    ].map((record, index) => withGroupSequence(record, index))
+    const page = await makePackedIndex(records).scanMapPolyline(
+      0,
+      0xffffffff,
+      'asc',
+      { sort: 'timestamp_asc', kind: 'geo_point', hasGeo: true },
+      { zoom: 12, viewportWidthPx: 900, viewportHeightPx: 430, bubbleCellSizePx: 64 },
+      {
+        tolerancePx: 0,
+        maxPoints: 10_000,
+        cleanup: {
+          enabled: true,
+          groupLinesOnly: false,
+          allowedSources: ['GPS', 'WIFI', 'CELL', 'UNKNOWN'],
+          maxSegmentDistanceKm: 25,
+          removeIsolatedJumps: false,
+          showDots: false,
+        },
+      },
+      () => false,
+    )
+
+    expect(page.lineDistanceBreaks).toBe(1)
+    expect(page.polyline?.segments).toHaveLength(1)
+    expect(page.points).toHaveLength(0)
+    expect(page.renderedLineDots).toBe(0)
+    expect(page.limitReached).toBe(false)
+  })
+
+  it('preserves accepted map polyline vertices without Douglas-Peucker simplification', async () => {
+    const records = Array.from({ length: 2_000 }, (_, index): PackedIndexRecord =>
+      withGroupSequence({
+        timestampSec: 1_700_000_000 + index,
+        latE7: coordinateE7(46 + index / 20_000 + Math.sin(index / 8) / 1_000),
+        lonE7: coordinateE7(7 + index / 18_000),
+        assetId: index,
+        kindFlags: kindFlags('geo_point'),
+      }, index),
+    )
     const index = makePackedIndex(records)
     const query: CatalogQuery = {
       sort: 'timestamp_asc',
@@ -649,8 +1116,7 @@ describe('catalog worker packed query hot paths', () => {
     )
     const points = page.polyline?.points ?? []
 
-    expect(points.length).toBeGreaterThanOrEqual(2)
-    expect(points.length).toBeLessThanOrEqual(10)
+    expect(points).toHaveLength(records.length)
     expect(points[0]).toEqual({
       lat: records[0].latE7 / 10_000_000,
       lon: records[0].lonE7 / 10_000_000,
@@ -659,6 +1125,7 @@ describe('catalog worker packed query hot paths', () => {
       lat: records[records.length - 1].latE7 / 10_000_000,
       lon: records[records.length - 1].lonE7 / 10_000_000,
     })
+    expect(page.limitReached).toBe(false)
     expect(page.sourceLinePoints).toBe(records.length)
     expect(page.renderedLinePoints).toBe(points.length)
   })

@@ -10,6 +10,10 @@ type ThumbnailProps = {
   kind: MediaKind
 }
 
+function isCatalogOnlyKind(kind: MediaKind): boolean {
+  return kind !== 'image' && kind !== 'video'
+}
+
 export function Thumbnail({
   thumbnails,
   thumbnailKey,
@@ -28,7 +32,7 @@ export function Thumbnail({
       : undefined
 
   useEffect(() => {
-    if (shouldLoad || kind === 'geo_point' || !thumbnailKey) return
+    if (shouldLoad || isCatalogOnlyKind(kind) || !thumbnailKey) return
 
     const target = targetRef.current
     if (!target || !('IntersectionObserver' in window)) {
@@ -54,7 +58,7 @@ export function Thumbnail({
     let resolvedUrl: string | undefined
 
     async function loadThumbnail() {
-      if (!shouldLoad || kind === 'geo_point' || !thumbnailKey) return
+      if (!shouldLoad || isCatalogOnlyKind(kind) || !thumbnailKey) return
 
       try {
         resolvedUrl = await thumbnails.resolveThumbnailUrl(thumbnailKey)
@@ -88,7 +92,7 @@ export function Thumbnail({
     )
   }
 
-  if (kind === 'geo_point') {
+  if (isCatalogOnlyKind(kind)) {
     return (
       <div
         ref={(node) => {
@@ -98,7 +102,7 @@ export function Thumbnail({
         aria-label={label}
       >
         <MapPin size={24} />
-        <span>GEO</span>
+        <span>{kind === 'geo_point' ? 'GEO' : 'TL'}</span>
       </div>
     )
   }

@@ -32,23 +32,37 @@ const ASSET_BINARY_CHUNK_EXTENSION: &str = ".bin";
 const ASSET_TABLE_MAGIC: u32 = 0x4153_5431;
 const ASSET_ID_MAP_MAGIC: u32 = 0x4149_4431;
 const PACKED_INDEX_MAGIC: u32 = 0x5049_5831;
-const BINARY_SCHEMA_VERSION: u32 = 1;
+const BINARY_SCHEMA_VERSION: u32 = 3;
 const ASSET_CHUNK_SIZE: usize = 10_000;
 const ASSET_TABLE_HEADER_SIZE: usize = 32;
 const ASSET_RECORD_INDEX_ENTRY_SIZE: usize = 16;
 const ASSET_ID_MAP_HEADER_SIZE: usize = 32;
 const ASSET_ID_MAP_ENTRY_SIZE: usize = 72;
 const PACKED_INDEX_HEADER_SIZE: usize = 96;
-const TIME_GEO_RECORD_SIZE: usize = 20;
+const TIME_GEO_RECORD_SIZE: usize = 44;
 const PACKED_SCAN_RECORDS: usize = 8192;
 const MAX_RENDERED_MAP_BUBBLES: i64 = 5_000;
 const WEB_MERCATOR_MAX_LAT: f64 = 85.051_128_779_806_6;
 const WEB_MERCATOR_TILE_SIZE: f64 = 256.0;
 const INDEX_KIND_TIME_GEO: u32 = 1;
-const KIND_FLAG_IMAGE: u8 = 0;
-const KIND_FLAG_VIDEO: u8 = 1;
-const KIND_FLAG_GEO_POINT: u8 = 2;
-const KIND_FLAG_HAS_GEO: u8 = 1 << 2;
+const KIND_CODE_IMAGE: u8 = 0;
+const KIND_CODE_VIDEO: u8 = 1;
+const KIND_CODE_GEO_POINT: u8 = 2;
+const KIND_CODE_TIMELINE_VISIT: u8 = 3;
+const KIND_CODE_TIMELINE_ACTIVITY: u8 = 4;
+const KIND_CODE_ACTIVITY_SAMPLE: u8 = 5;
+const KIND_CODE_FREQUENT_PLACE: u8 = 6;
+const KIND_CODE_MASK: u8 = 0x7f;
+const KIND_FLAG_HAS_GEO: u8 = 1 << 7;
+const LINE_SOURCE_UNKNOWN: u8 = 0;
+const LINE_SOURCE_GPS: u8 = 1;
+const LINE_SOURCE_WIFI: u8 = 2;
+const LINE_SOURCE_CELL: u8 = 3;
+const LINE_QUALITY_HAS_ACCURACY: u16 = 1 << 0;
+const LINE_QUALITY_HAS_VELOCITY: u16 = 1 << 1;
+const LINE_QUALITY_HAS_HEADING: u16 = 1 << 2;
+const LINE_QUALITY_HAS_GROUP: u16 = 1 << 3;
+const LINE_QUALITY_HAS_SEQUENCE: u16 = 1 << 4;
 const SEGMENTED_BALL_TREE_SEGMENT_LIMIT: usize = 100_000;
 const SEGMENTED_BALL_TREE_DELTA_LIMIT: usize = 50_000;
 const SEGMENTED_BALL_TREE_LEAF_SIZE: usize = 64;
@@ -80,6 +94,12 @@ struct MediaLocation {
     relative_path: Option<String>,
     absolute_path: Option<String>,
     point_index: Option<i64>,
+    source_dataset: Option<String>,
+    source_type: Option<String>,
+    group_id: Option<String>,
+    sequence: Option<i64>,
+    timestamp: Option<i64>,
+    end_timestamp: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,9 +115,20 @@ struct MediaItem {
     size_bytes: i64,
     duration_ms: Option<i64>,
     timestamp: Option<i64>,
+    end_timestamp: Option<i64>,
     latitude: Option<f64>,
     longitude: Option<f64>,
     thumbnail_key: Option<String>,
+    source_dataset: Option<String>,
+    source_type: Option<String>,
+    accuracy_meters: Option<f64>,
+    altitude_meters: Option<f64>,
+    vertical_accuracy_meters: Option<f64>,
+    velocity_meters_per_second: Option<f64>,
+    heading_degrees: Option<f64>,
+    group_id: Option<String>,
+    sequence: Option<i64>,
+    metadata: Option<JsonValue>,
     locations: Vec<MediaLocation>,
 }
 
@@ -167,8 +198,18 @@ struct MapPolylinePoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct MapPolylineSegment {
+    points: Vec<MapPolylinePoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MapPolyline {
     points: Vec<MapPolylinePoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    segments: Option<Vec<MapPolylineSegment>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     bounds: Option<GeoBounds>,
     source_point_count: usize,
@@ -272,6 +313,20 @@ struct MapAggregationSpec {
 struct MapPolylineSpec {
     tolerance_px: f64,
     max_points: usize,
+    cleanup: Option<MapPolylineCleanupSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MapPolylineCleanupSpec {
+    enabled: bool,
+    group_lines_only: bool,
+    allowed_sources: Vec<String>,
+    max_accuracy_meters: Option<f64>,
+    break_speed_kmh: Option<f64>,
+    max_segment_distance_km: Option<f64>,
+    remove_isolated_jumps: bool,
+    show_dots: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,7 +391,15 @@ struct SearchIndexStats {
     rendered_bubbles: Option<usize>,
     largest_bubble_count: Option<usize>,
     source_line_points: Option<usize>,
+    accepted_line_points: Option<usize>,
+    filtered_line_points: Option<usize>,
+    filtered_quality_points: Option<usize>,
+    filtered_jump_points: Option<usize>,
+    line_speed_breaks: Option<usize>,
+    line_distance_breaks: Option<usize>,
+    line_segments: Option<usize>,
     rendered_line_points: Option<usize>,
+    rendered_line_dots: Option<usize>,
     simplification_tolerance_px: Option<f64>,
     aggregation_zoom: Option<usize>,
     aggregation_cell_size_px: Option<f64>,
@@ -431,9 +494,43 @@ struct ImportSummary {
 #[derive(Debug, Clone, PartialEq)]
 struct ParsedGeoPoint {
     index: i64,
+    kind: String,
     latitude: f64,
     longitude: f64,
     timestamp: i64,
+    end_timestamp: Option<i64>,
+    source_dataset: Option<String>,
+    source_type: Option<String>,
+    accuracy_meters: Option<f64>,
+    altitude_meters: Option<f64>,
+    vertical_accuracy_meters: Option<f64>,
+    velocity_meters_per_second: Option<f64>,
+    heading_degrees: Option<f64>,
+    group_id: Option<String>,
+    sequence: Option<i64>,
+    metadata: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ParsedGeoItem {
+    index: i64,
+    kind: String,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    timestamp: Option<i64>,
+    end_timestamp: Option<i64>,
+    source_dataset: Option<String>,
+    source_type: Option<String>,
+    accuracy_meters: Option<f64>,
+    altitude_meters: Option<f64>,
+    vertical_accuracy_meters: Option<f64>,
+    velocity_meters_per_second: Option<f64>,
+    heading_degrees: Option<f64>,
+    group_id: Option<String>,
+    sequence: Option<i64>,
+    content_hash: Option<String>,
+    display_name: Option<String>,
+    metadata: Option<JsonValue>,
 }
 
 #[cfg(test)]
@@ -448,6 +545,7 @@ struct ParsedGeoFile {
 enum GeoFileFormat {
     Gpx,
     GoogleTakeoutJson,
+    GoogleTimelineJson,
 }
 
 #[derive(Default)]
@@ -685,7 +783,15 @@ fn empty_search_index_stats(engine_id: &str, engine_label: &str) -> SearchIndexS
         rendered_bubbles: None,
         largest_bubble_count: None,
         source_line_points: None,
+        accepted_line_points: None,
+        filtered_line_points: None,
+        filtered_quality_points: None,
+        filtered_jump_points: None,
+        line_speed_breaks: None,
+        line_distance_breaks: None,
+        line_segments: None,
         rendered_line_points: None,
+        rendered_line_dots: None,
         simplification_tolerance_px: None,
         aggregation_zoom: None,
         aggregation_cell_size_px: None,
@@ -743,7 +849,15 @@ fn search_stats_from_geo(
         rendered_bubbles: None,
         largest_bubble_count: None,
         source_line_points: None,
+        accepted_line_points: None,
+        filtered_line_points: None,
+        filtered_quality_points: None,
+        filtered_jump_points: None,
+        line_speed_breaks: None,
+        line_distance_breaks: None,
+        line_segments: None,
         rendered_line_points: None,
+        rendered_line_dots: None,
         simplification_tolerance_px: None,
         aggregation_zoom: None,
         aggregation_cell_size_px: None,
@@ -2039,7 +2153,7 @@ struct FileOccurrence {
 
 fn empty_file_catalog_manifest() -> FileCatalogManifest {
     FileCatalogManifest {
-        schema_version: 1,
+        schema_version: BINARY_SCHEMA_VERSION as i64,
         catalog_version: 0,
         next_asset_id: 0,
         asset_store_version: -1,
@@ -2095,7 +2209,12 @@ fn load_file_catalog_manifest(app: &AppHandle) -> AppResult<FileCatalogManifest>
         return Ok(empty_file_catalog_manifest());
     }
     let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    serde_json::from_str(&text).map_err(|error| error.to_string())
+    let manifest: FileCatalogManifest =
+        serde_json::from_str(&text).map_err(|error| error.to_string())?;
+    if manifest.schema_version != BINARY_SCHEMA_VERSION as i64 {
+        return Ok(empty_file_catalog_manifest());
+    }
+    Ok(manifest)
 }
 
 fn save_file_catalog_manifest(app: &AppHandle, manifest: &FileCatalogManifest) -> AppResult<()> {
@@ -2140,8 +2259,25 @@ fn geo_point_content_hash(latitude: f64, longitude: f64, timestamp: i64) -> Stri
     geo_point_identity_input(latitude, longitude, timestamp)
 }
 
-fn geo_point_location_id(source_id: &str, content_hash: &str) -> String {
-    format!("geo_point_location:v1:{source_id}:{content_hash}")
+fn geo_point_location_id(
+    source_id: &str,
+    content_hash: &str,
+    source_dataset: Option<&str>,
+    source_type: Option<&str>,
+    group_id: Option<&str>,
+    sequence: Option<i64>,
+) -> String {
+    format!(
+        "geo_point_location:v2:{source_id}:{content_hash}:{}:{}:{}:{}",
+        source_dataset.unwrap_or_default(),
+        source_type.unwrap_or_default(),
+        group_id.unwrap_or_default(),
+        sequence.map(|value| value.to_string()).unwrap_or_default()
+    )
+}
+
+fn semantic_location_id(source_id: &str, content_hash: &str) -> String {
+    format!("semantic_location:v1:{source_id}:{content_hash}")
 }
 
 fn parse_gpx_time(value: &str) -> Option<i64> {
@@ -2171,6 +2307,47 @@ fn json_number(value: Option<&JsonValue>) -> Option<f64> {
     })
 }
 
+fn json_string(value: Option<&JsonValue>) -> Option<String> {
+    value
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.to_string())
+}
+
+fn json_bool(value: Option<&JsonValue>) -> Option<bool> {
+    value.and_then(|value| value.as_bool())
+}
+
+fn compact_json_object(entries: Vec<(&str, Option<JsonValue>)>) -> Option<JsonValue> {
+    let mut object = serde_json::Map::new();
+    for (key, value) in entries {
+        if let Some(value) = value {
+            if !value.is_null() {
+                object.insert(key.to_string(), value);
+            }
+        }
+    }
+    (!object.is_empty()).then_some(JsonValue::Object(object))
+}
+
+fn json_number_value(value: Option<f64>) -> Option<JsonValue> {
+    value
+        .and_then(serde_json::Number::from_f64)
+        .map(JsonValue::Number)
+}
+
+fn json_i64_value(value: Option<i64>) -> Option<JsonValue> {
+    value.map(|value| JsonValue::Number(value.into()))
+}
+
+fn json_string_value(value: Option<String>) -> Option<JsonValue> {
+    value.map(JsonValue::String)
+}
+
+fn json_bool_value(value: Option<bool>) -> Option<JsonValue> {
+    value.map(JsonValue::Bool)
+}
+
 #[cfg(test)]
 fn is_google_takeout_location_json(value: &JsonValue) -> bool {
     value
@@ -2181,10 +2358,9 @@ fn is_google_takeout_location_json(value: &JsonValue) -> bool {
 
 #[cfg(test)]
 fn is_google_semantic_location_json(value: &JsonValue) -> bool {
-    value
-        .get("timelineObjects")
-        .and_then(|value| value.as_array())
-        .is_some()
+    value.get("semanticSegments").is_some()
+        || value.get("rawSignals").is_some()
+        || value.get("userLocationProfile").is_some()
 }
 
 #[cfg(test)]
@@ -2273,12 +2449,19 @@ fn detect_geo_file_format(path: &Path, text: &str) -> AppResult<GeoFileFormat> {
                     return Ok(GeoFileFormat::GoogleTakeoutJson);
                 }
                 if is_google_semantic_location_json(&parsed) {
+                    return Ok(GeoFileFormat::GoogleTimelineJson);
+                }
+                if parsed
+                    .get("timelineObjects")
+                    .and_then(|value| value.as_array())
+                    .is_some()
+                {
                     geo_import_debug_json(
                         path,
                         "Google Semantic Location History is not supported yet",
                         &parsed,
                     );
-                    return Err("This looks like Google Semantic Location History JSON. That is valid Google Takeout data, but this importer currently supports only the raw Records.json location export.".to_string());
+                    return Err("This looks like Google Semantic Location History JSON. That is valid Google Takeout data, but this importer currently supports only raw Records.json and the newer Timeline JSON export.".to_string());
                 }
                 if is_geojson(&parsed) {
                     geo_import_debug_json(path, "GeoJSON is not supported yet", &parsed);
@@ -2340,9 +2523,21 @@ fn parse_gpx_points(xml: &str) -> AppResult<ParsedGeoFile> {
             {
                 points.push(ParsedGeoPoint {
                     index,
+                    kind: "geo_point".to_string(),
                     latitude,
                     longitude,
                     timestamp,
+                    end_timestamp: None,
+                    source_dataset: None,
+                    source_type: None,
+                    accuracy_meters: None,
+                    altitude_meters: None,
+                    vertical_accuracy_meters: None,
+                    velocity_meters_per_second: None,
+                    heading_degrees: None,
+                    group_id: None,
+                    sequence: None,
+                    metadata: None,
                 });
             }
             _ => {
@@ -2391,6 +2586,40 @@ fn parse_google_takeout_location_points(json: &str) -> AppResult<ParsedGeoFile> 
 fn parse_geo_file_points(path: &Path, text: &str) -> AppResult<ParsedGeoFile> {
     match detect_geo_file_format(path, text)? {
         GeoFileFormat::GoogleTakeoutJson => parse_google_takeout_location_points(text),
+        GeoFileFormat::GoogleTimelineJson => {
+            let (items, skipped_points) = parse_google_timeline_location_items(text)?;
+            let points = items
+                .iter()
+                .filter_map(|item| {
+                    if item.kind != "geo_point" {
+                        return None;
+                    }
+                    Some(ParsedGeoPoint {
+                        index: item.index,
+                        kind: "geo_point".to_string(),
+                        latitude: item.latitude?,
+                        longitude: item.longitude?,
+                        timestamp: item.timestamp?,
+                        end_timestamp: item.end_timestamp,
+                        source_dataset: item.source_dataset.clone(),
+                        source_type: item.source_type.clone(),
+                        accuracy_meters: item.accuracy_meters,
+                        altitude_meters: item.altitude_meters,
+                        vertical_accuracy_meters: item.vertical_accuracy_meters,
+                        velocity_meters_per_second: item.velocity_meters_per_second,
+                        heading_degrees: item.heading_degrees,
+                        group_id: item.group_id.clone(),
+                        sequence: item.sequence,
+                        metadata: item.metadata.clone(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(ParsedGeoFile {
+                points,
+                skipped_points,
+                mime_type: "application/json".to_string(),
+            })
+        }
         GeoFileFormat::Gpx => parse_gpx_points(text),
     }
 }
@@ -2403,6 +2632,12 @@ fn detect_geo_file_format_from_prefix(path: &Path, prefix: &str) -> AppResult<Ge
     }
 
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        if trimmed.contains("\"semanticSegments\"")
+            || trimmed.contains("\"rawSignals\"")
+            || trimmed.contains("\"userLocationProfile\"")
+        {
+            return Ok(GeoFileFormat::GoogleTimelineJson);
+        }
         if trimmed.contains("\"timelineObjects\"") {
             return Err("This looks like Google Semantic Location History JSON. That is valid Google Takeout data, but this importer currently supports only the raw Records.json location export.".to_string());
         }
@@ -2669,9 +2904,21 @@ fn stream_gpx_points(
                                 on_event(GpxStreamEvent::Point(
                                     ParsedGeoPoint {
                                         index: point.index,
+                                        kind: "geo_point".to_string(),
                                         latitude,
                                         longitude,
                                         timestamp,
+                                        end_timestamp: None,
+                                        source_dataset: None,
+                                        source_type: None,
+                                        accuracy_meters: None,
+                                        altitude_meters: None,
+                                        vertical_accuracy_meters: None,
+                                        velocity_meters_per_second: None,
+                                        heading_degrees: None,
+                                        group_id: None,
+                                        sequence: None,
+                                        metadata: None,
                                     },
                                     reader.buffer_position(),
                                 ))?;
@@ -2712,13 +2959,531 @@ fn parse_google_takeout_location_entry(entry: &JsonValue, index: i64) -> Option<
         {
             Some(ParsedGeoPoint {
                 index,
+                kind: "geo_point".to_string(),
                 latitude,
                 longitude,
                 timestamp,
+                end_timestamp: None,
+                source_dataset: Some("google_records".to_string()),
+                source_type: json_string(entry.get("source")),
+                accuracy_meters: json_number(entry.get("accuracy")),
+                altitude_meters: json_number(entry.get("altitude")),
+                vertical_accuracy_meters: json_number(entry.get("verticalAccuracy")),
+                velocity_meters_per_second: json_number(entry.get("velocity")),
+                heading_degrees: json_number(entry.get("heading")),
+                group_id: None,
+                sequence: None,
+                metadata: compact_json_object(vec![
+                    (
+                        "deviceTag",
+                        json_number_value(json_number(entry.get("deviceTag"))),
+                    ),
+                    (
+                        "platformType",
+                        json_string_value(json_string(entry.get("platformType"))),
+                    ),
+                    (
+                        "formFactor",
+                        json_string_value(json_string(entry.get("formFactor"))),
+                    ),
+                    (
+                        "osLevel",
+                        json_number_value(json_number(entry.get("osLevel"))),
+                    ),
+                    (
+                        "serverTimestamp",
+                        json_i64_value(entry.get("serverTimestamp").and_then(parse_json_timestamp)),
+                    ),
+                    (
+                        "deviceTimestamp",
+                        json_i64_value(entry.get("deviceTimestamp").and_then(parse_json_timestamp)),
+                    ),
+                    (
+                        "batteryCharging",
+                        json_bool_value(json_bool(entry.get("batteryCharging"))),
+                    ),
+                    ("activity", entry.get("activity").cloned()),
+                ]),
             })
         }
         _ => None,
     }
+}
+
+fn fixed_coordinate(value: Option<f64>) -> Option<String> {
+    value.map(|value| format!("{value:.9}"))
+}
+
+fn semantic_content_hash(kind: &str, parts: Vec<Option<String>>) -> String {
+    let mut values = Vec::with_capacity(parts.len() + 2);
+    values.push("timeline:v1".to_string());
+    values.push(kind.to_string());
+    values.extend(parts.into_iter().map(|value| value.unwrap_or_default()));
+    values.join(":")
+}
+
+fn stable_json(value: &JsonValue) -> String {
+    serde_json::to_string(value).unwrap_or_default()
+}
+
+fn duration_ms(start: Option<i64>, end: Option<i64>) -> Option<i64> {
+    match (start, end) {
+        (Some(start), Some(end)) if end >= start => Some(end - start),
+        _ => None,
+    }
+}
+
+fn coordinates_from_lat_lng_string(value: Option<&JsonValue>) -> Option<(f64, f64)> {
+    let text = value?.as_str()?;
+    let (lat_text, lon_text) = text.split_once(',')?;
+    let clean = |part: &str| {
+        part.chars()
+            .filter(|character| character.is_ascii_digit() || matches!(character, '.' | '-'))
+            .collect::<String>()
+    };
+    let latitude = clean(lat_text).parse::<f64>().ok()?;
+    let longitude = clean(lon_text).parse::<f64>().ok()?;
+    (valid_latitude(latitude) && valid_longitude(longitude)).then_some((latitude, longitude))
+}
+
+fn coordinates_from_object(value: Option<&JsonValue>) -> Option<(f64, f64)> {
+    let value = value?;
+    coordinates_from_lat_lng_string(value.get("LatLng"))
+        .or_else(|| coordinates_from_lat_lng_string(value.get("latLng")))
+        .or_else(|| {
+            let latitude =
+                json_number(value.get("latitudeE7")).map(|value| value / 10_000_000.0)?;
+            let longitude =
+                json_number(value.get("longitudeE7")).map(|value| value / 10_000_000.0)?;
+            (valid_latitude(latitude) && valid_longitude(longitude))
+                .then_some((latitude, longitude))
+        })
+}
+
+fn timeline_segment_group_id(
+    segment_index: usize,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> String {
+    format!(
+        "google_timeline_segment:v1:{}:{}:{}",
+        segment_index + 1,
+        start_time
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        end_time.map(|value| value.to_string()).unwrap_or_default()
+    )
+}
+
+fn timeline_path_item(
+    segment_index: usize,
+    point_index: usize,
+    segment: &JsonValue,
+    point: &JsonValue,
+) -> Option<ParsedGeoItem> {
+    let (latitude, longitude) = coordinates_from_lat_lng_string(point.get("point"))
+        .or_else(|| coordinates_from_object(Some(point)))?;
+    let timestamp = point.get("time").and_then(parse_json_timestamp)?;
+    let start_time = segment.get("startTime").and_then(parse_json_timestamp);
+    let end_time = segment.get("endTime").and_then(parse_json_timestamp);
+    Some(ParsedGeoItem {
+        index: point_index as i64 + 1,
+        kind: "geo_point".to_string(),
+        latitude: Some(latitude),
+        longitude: Some(longitude),
+        timestamp: Some(timestamp),
+        end_timestamp: None,
+        source_dataset: Some("google_timeline".to_string()),
+        source_type: Some("timeline_path".to_string()),
+        accuracy_meters: None,
+        altitude_meters: None,
+        vertical_accuracy_meters: None,
+        velocity_meters_per_second: None,
+        heading_degrees: None,
+        group_id: Some(timeline_segment_group_id(
+            segment_index,
+            start_time,
+            end_time,
+        )),
+        sequence: Some(point_index as i64),
+        content_hash: None,
+        display_name: None,
+        metadata: compact_json_object(vec![
+            ("segmentStartTime", json_i64_value(start_time)),
+            ("segmentEndTime", json_i64_value(end_time)),
+        ]),
+    })
+}
+
+fn raw_signal_position_item(index: usize, signal: &JsonValue) -> Option<ParsedGeoItem> {
+    let position = signal.get("position")?;
+    let (latitude, longitude) = coordinates_from_object(Some(position))?;
+    let timestamp = position
+        .get("timestamp")
+        .and_then(parse_json_timestamp)
+        .or_else(|| {
+            position
+                .get("timestampMs")
+                .and_then(parse_json_timestamp_ms)
+        })
+        .or_else(|| {
+            position
+                .get("timestampMS")
+                .and_then(parse_json_timestamp_ms)
+        })?;
+    Some(ParsedGeoItem {
+        index: index as i64,
+        kind: "geo_point".to_string(),
+        latitude: Some(latitude),
+        longitude: Some(longitude),
+        timestamp: Some(timestamp),
+        end_timestamp: None,
+        source_dataset: Some("google_timeline_raw_signals".to_string()),
+        source_type: json_string(position.get("source")),
+        accuracy_meters: json_number(position.get("accuracyMeters"))
+            .or_else(|| json_number(position.get("accuracy"))),
+        altitude_meters: json_number(position.get("altitudeMeters"))
+            .or_else(|| json_number(position.get("altitude"))),
+        vertical_accuracy_meters: json_number(position.get("verticalAccuracyMeters"))
+            .or_else(|| json_number(position.get("verticalAccuracy"))),
+        velocity_meters_per_second: json_number(position.get("speedMetersPerSecond"))
+            .or_else(|| json_number(position.get("velocity"))),
+        heading_degrees: json_number(position.get("headingDegrees"))
+            .or_else(|| json_number(position.get("heading"))),
+        group_id: None,
+        sequence: None,
+        content_hash: None,
+        display_name: None,
+        metadata: compact_json_object(vec![
+            (
+                "deviceTag",
+                json_number_value(json_number(position.get("deviceTag"))),
+            ),
+            (
+                "platformType",
+                json_string_value(json_string(position.get("platformType"))),
+            ),
+            (
+                "formFactor",
+                json_string_value(json_string(position.get("formFactor"))),
+            ),
+            (
+                "osLevel",
+                json_number_value(json_number(position.get("osLevel"))),
+            ),
+            (
+                "serverTimestamp",
+                json_i64_value(
+                    position
+                        .get("serverTimestamp")
+                        .and_then(parse_json_timestamp),
+                ),
+            ),
+            (
+                "deviceTimestamp",
+                json_i64_value(
+                    position
+                        .get("deviceTimestamp")
+                        .and_then(parse_json_timestamp),
+                ),
+            ),
+            (
+                "batteryCharging",
+                json_bool_value(json_bool(position.get("batteryCharging"))),
+            ),
+        ]),
+    })
+}
+
+fn timeline_visit_item(segment_index: usize, segment: &JsonValue) -> Option<ParsedGeoItem> {
+    let visit = segment.get("visit")?;
+    let top_candidate = visit.get("topCandidate")?;
+    let place_location = top_candidate.get("placeLocation")?;
+    let (latitude, longitude) = coordinates_from_object(Some(place_location))?;
+    let start_time = segment.get("startTime").and_then(parse_json_timestamp)?;
+    let end_time = segment.get("endTime").and_then(parse_json_timestamp);
+    let place_id = json_string(top_candidate.get("placeId"));
+    let semantic_type = json_string(top_candidate.get("semanticType"));
+    let content_hash = semantic_content_hash(
+        "timeline_visit",
+        vec![
+            Some(start_time.to_string()),
+            end_time.map(|value| value.to_string()),
+            fixed_coordinate(Some(latitude)),
+            fixed_coordinate(Some(longitude)),
+            place_id.clone(),
+            semantic_type.clone(),
+        ],
+    );
+    Some(ParsedGeoItem {
+        index: segment_index as i64 + 1,
+        kind: "timeline_visit".to_string(),
+        latitude: Some(latitude),
+        longitude: Some(longitude),
+        timestamp: Some(start_time),
+        end_timestamp: end_time,
+        source_dataset: Some("google_timeline".to_string()),
+        source_type: Some("visit".to_string()),
+        accuracy_meters: None,
+        altitude_meters: None,
+        vertical_accuracy_meters: None,
+        velocity_meters_per_second: None,
+        heading_degrees: None,
+        group_id: Some(timeline_segment_group_id(
+            segment_index,
+            Some(start_time),
+            end_time,
+        )),
+        sequence: None,
+        content_hash: Some(content_hash),
+        display_name: Some(format!("Visit {}", segment_index + 1)),
+        metadata: compact_json_object(vec![
+            (
+                "durationMs",
+                json_i64_value(duration_ms(Some(start_time), end_time)),
+            ),
+            (
+                "hierarchyLevel",
+                json_number_value(json_number(visit.get("hierarchyLevel"))),
+            ),
+            (
+                "probability",
+                json_number_value(json_number(visit.get("probability"))),
+            ),
+            ("placeId", json_string_value(place_id)),
+            ("semanticType", json_string_value(semantic_type)),
+            (
+                "topCandidateProbability",
+                json_number_value(json_number(top_candidate.get("probability"))),
+            ),
+        ]),
+    })
+}
+
+fn timeline_activity_item(segment_index: usize, segment: &JsonValue) -> Option<ParsedGeoItem> {
+    let activity = segment.get("activity")?;
+    let start = activity.get("start")?;
+    let (latitude, longitude) = coordinates_from_object(Some(start))?;
+    let end_coordinates = coordinates_from_object(activity.get("end"));
+    let start_time = segment.get("startTime").and_then(parse_json_timestamp)?;
+    let end_time = segment.get("endTime").and_then(parse_json_timestamp);
+    let top_candidate = activity.get("topCandidate");
+    let activity_type = top_candidate.and_then(|value| json_string(value.get("type")));
+    let content_hash = semantic_content_hash(
+        "timeline_activity",
+        vec![
+            Some(start_time.to_string()),
+            end_time.map(|value| value.to_string()),
+            fixed_coordinate(Some(latitude)),
+            fixed_coordinate(Some(longitude)),
+            fixed_coordinate(end_coordinates.map(|value| value.0)),
+            fixed_coordinate(end_coordinates.map(|value| value.1)),
+            activity_type.clone(),
+        ],
+    );
+    Some(ParsedGeoItem {
+        index: segment_index as i64 + 1,
+        kind: "timeline_activity".to_string(),
+        latitude: Some(latitude),
+        longitude: Some(longitude),
+        timestamp: Some(start_time),
+        end_timestamp: end_time,
+        source_dataset: Some("google_timeline".to_string()),
+        source_type: Some("activity".to_string()),
+        accuracy_meters: None,
+        altitude_meters: None,
+        vertical_accuracy_meters: None,
+        velocity_meters_per_second: None,
+        heading_degrees: None,
+        group_id: Some(timeline_segment_group_id(
+            segment_index,
+            Some(start_time),
+            end_time,
+        )),
+        sequence: None,
+        content_hash: Some(content_hash),
+        display_name: Some(format!("Activity {}", segment_index + 1)),
+        metadata: compact_json_object(vec![
+            (
+                "durationMs",
+                json_i64_value(duration_ms(Some(start_time), end_time)),
+            ),
+            (
+                "endLatitude",
+                json_number_value(end_coordinates.map(|value| value.0)),
+            ),
+            (
+                "endLongitude",
+                json_number_value(end_coordinates.map(|value| value.1)),
+            ),
+            (
+                "distanceMeters",
+                json_number_value(json_number(activity.get("distanceMeters"))),
+            ),
+            ("activityType", json_string_value(activity_type)),
+            (
+                "probability",
+                json_number_value(
+                    top_candidate
+                        .and_then(|value| json_number(value.get("probability")))
+                        .or_else(|| json_number(activity.get("probability"))),
+                ),
+            ),
+            ("parking", activity.get("parking").cloned()),
+        ]),
+    })
+}
+
+fn activity_sample_item(index: usize, signal: &JsonValue) -> Option<ParsedGeoItem> {
+    let record = signal.get("activityRecord")?;
+    let timestamp = record.get("timestamp").and_then(parse_json_timestamp)?;
+    let probable_activities = record
+        .get("probableActivities")
+        .cloned()
+        .unwrap_or_else(|| JsonValue::Array(Vec::new()));
+    Some(ParsedGeoItem {
+        index: index as i64,
+        kind: "activity_sample".to_string(),
+        latitude: None,
+        longitude: None,
+        timestamp: Some(timestamp),
+        end_timestamp: None,
+        source_dataset: Some("google_timeline_raw_signals".to_string()),
+        source_type: Some("activity_record".to_string()),
+        accuracy_meters: None,
+        altitude_meters: None,
+        vertical_accuracy_meters: None,
+        velocity_meters_per_second: None,
+        heading_degrees: None,
+        group_id: None,
+        sequence: None,
+        content_hash: Some(semantic_content_hash(
+            "activity_sample",
+            vec![
+                Some(timestamp.to_string()),
+                Some(stable_json(&probable_activities)),
+            ],
+        )),
+        display_name: Some(format!("Activity sample {index}")),
+        metadata: compact_json_object(vec![("probableActivities", Some(probable_activities))]),
+    })
+}
+
+fn frequent_place_item(index: usize, place: &JsonValue) -> Option<ParsedGeoItem> {
+    let place_location = place.get("placeLocation")?;
+    let (latitude, longitude) = coordinates_from_object(Some(place_location))?;
+    let place_id = json_string(place.get("placeId"));
+    let label = json_string(place.get("label"));
+    Some(ParsedGeoItem {
+        index: index as i64,
+        kind: "frequent_place".to_string(),
+        latitude: Some(latitude),
+        longitude: Some(longitude),
+        timestamp: None,
+        end_timestamp: None,
+        source_dataset: Some("google_timeline".to_string()),
+        source_type: Some("frequent_place".to_string()),
+        accuracy_meters: None,
+        altitude_meters: None,
+        vertical_accuracy_meters: None,
+        velocity_meters_per_second: None,
+        heading_degrees: None,
+        group_id: None,
+        sequence: None,
+        content_hash: Some(semantic_content_hash(
+            "frequent_place",
+            vec![
+                place_id.clone(),
+                label.clone(),
+                fixed_coordinate(Some(latitude)),
+                fixed_coordinate(Some(longitude)),
+            ],
+        )),
+        display_name: Some(
+            label
+                .as_ref()
+                .map(|label| format!("Frequent place: {label}"))
+                .unwrap_or_else(|| format!("Frequent place {index}")),
+        ),
+        metadata: compact_json_object(vec![
+            ("placeId", json_string_value(place_id)),
+            ("label", json_string_value(label)),
+        ]),
+    })
+}
+
+fn parse_google_timeline_location_items(json: &str) -> AppResult<(Vec<ParsedGeoItem>, i64)> {
+    let parsed: JsonValue = serde_json::from_str(json).map_err(|error| error.to_string())?;
+    let looks_like_timeline = parsed.get("semanticSegments").is_some()
+        || parsed.get("rawSignals").is_some()
+        || parsed.get("userLocationProfile").is_some();
+    if !looks_like_timeline {
+        return Err(
+            "The selected JSON file does not look like a Google Timeline export.".to_string(),
+        );
+    }
+
+    let mut items = Vec::<ParsedGeoItem>::new();
+    let mut skipped_points = 0_i64;
+
+    if let Some(raw_signals) = parsed.get("rawSignals").and_then(|value| value.as_array()) {
+        for (signal_index, signal) in raw_signals.iter().enumerate() {
+            if signal.get("wifiScan").is_some() {
+                continue;
+            }
+            if let Some(item) = raw_signal_position_item(signal_index + 1, signal) {
+                items.push(item);
+            } else if let Some(item) = activity_sample_item(signal_index + 1, signal) {
+                items.push(item);
+            } else {
+                skipped_points += 1;
+            }
+        }
+    }
+
+    if let Some(segments) = parsed
+        .get("semanticSegments")
+        .and_then(|value| value.as_array())
+    {
+        for (segment_index, segment) in segments.iter().enumerate() {
+            if let Some(path) = segment
+                .get("timelinePath")
+                .and_then(|value| value.as_array())
+            {
+                for (point_index, point) in path.iter().enumerate() {
+                    if let Some(item) =
+                        timeline_path_item(segment_index, point_index, segment, point)
+                    {
+                        items.push(item);
+                    } else {
+                        skipped_points += 1;
+                    }
+                }
+            }
+            if let Some(item) = timeline_visit_item(segment_index, segment) {
+                items.push(item);
+            }
+            if let Some(item) = timeline_activity_item(segment_index, segment) {
+                items.push(item);
+            }
+        }
+    }
+
+    if let Some(frequent_places) = parsed
+        .get("userLocationProfile")
+        .and_then(|value| value.get("frequentPlaces"))
+        .and_then(|value| value.as_array())
+    {
+        for (place_index, place) in frequent_places.iter().enumerate() {
+            if let Some(item) = frequent_place_item(place_index + 1, place) {
+                items.push(item);
+            } else {
+                skipped_points += 1;
+            }
+        }
+    }
+
+    Ok((items, skipped_points))
 }
 
 fn file_hash(path: &Path) -> AppResult<String> {
@@ -2926,6 +3691,12 @@ fn media_from_path(
         relative_path: Some(relative_path.clone()),
         absolute_path: None,
         point_index: None,
+        source_dataset: None,
+        source_type: None,
+        group_id: None,
+        sequence: None,
+        timestamp: None,
+        end_timestamp: None,
     };
     let size_bytes = path
         .metadata()
@@ -2942,9 +3713,20 @@ fn media_from_path(
         size_bytes,
         duration_ms: None,
         timestamp: modified_ms(path),
+        end_timestamp: None,
         latitude: None,
         longitude: None,
         thumbnail_key: None,
+        source_dataset: None,
+        source_type: None,
+        accuracy_meters: None,
+        altitude_meters: None,
+        vertical_accuracy_meters: None,
+        velocity_meters_per_second: None,
+        heading_degrees: None,
+        group_id: None,
+        sequence: None,
+        metadata: None,
         locations: vec![location],
     };
 
@@ -2993,6 +3775,102 @@ fn source_from_file(path: &Path) -> MediaSource {
     }
 }
 
+fn parsed_item_content_hash(item: &ParsedGeoItem) -> String {
+    if let Some(content_hash) = item.content_hash.as_ref() {
+        return content_hash.clone();
+    }
+    if item.kind == "geo_point" {
+        if let (Some(latitude), Some(longitude), Some(timestamp)) =
+            (item.latitude, item.longitude, item.timestamp)
+        {
+            return geo_point_content_hash(latitude, longitude, timestamp);
+        }
+    }
+    semantic_content_hash(
+        &item.kind,
+        vec![
+            item.timestamp.map(|value| value.to_string()),
+            item.end_timestamp.map(|value| value.to_string()),
+            item.latitude.map(|value| value.to_string()),
+            item.longitude.map(|value| value.to_string()),
+            item.source_dataset.clone(),
+            item.source_type.clone(),
+            item.group_id.clone(),
+            item.sequence.map(|value| value.to_string()),
+            item.metadata.as_ref().map(stable_json),
+        ],
+    )
+}
+
+fn media_item_from_parsed_geo_item(
+    source: &MediaSource,
+    mime_type: &str,
+    item: &ParsedGeoItem,
+) -> MediaItem {
+    let content_hash = parsed_item_content_hash(item);
+    let is_point = item.kind == "geo_point";
+    let location = MediaLocation {
+        id: if is_point {
+            geo_point_location_id(
+                &source.id,
+                &content_hash,
+                item.source_dataset.as_deref(),
+                item.source_type.as_deref(),
+                item.group_id.as_deref(),
+                item.sequence,
+            )
+        } else {
+            semantic_location_id(&source.id, &content_hash)
+        },
+        source_id: source.id.clone(),
+        source_label: source.label.clone(),
+        root_path: source.root_path.clone(),
+        relative_path: None,
+        absolute_path: None,
+        point_index: Some(item.index),
+        source_dataset: item.source_dataset.clone(),
+        source_type: item.source_type.clone(),
+        group_id: item.group_id.clone(),
+        sequence: item.sequence,
+        timestamp: item.timestamp,
+        end_timestamp: item.end_timestamp,
+    };
+    MediaItem {
+        id: content_hash.clone(),
+        content_hash,
+        source_id: source.id.clone(),
+        relative_path: source.label.clone(),
+        display_name: item
+            .display_name
+            .clone()
+            .unwrap_or_else(|| format!("{} #{}", source.label, item.index)),
+        kind: item.kind.clone(),
+        mime_type: mime_type.to_string(),
+        size_bytes: 0,
+        duration_ms: item
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("durationMs"))
+            .and_then(|value| value.as_i64()),
+        timestamp: item.timestamp,
+        end_timestamp: item.end_timestamp,
+        latitude: item.latitude,
+        longitude: item.longitude,
+        thumbnail_key: None,
+        source_dataset: item.source_dataset.clone(),
+        source_type: item.source_type.clone(),
+        accuracy_meters: item.accuracy_meters,
+        altitude_meters: item.altitude_meters,
+        vertical_accuracy_meters: item.vertical_accuracy_meters,
+        velocity_meters_per_second: item.velocity_meters_per_second,
+        heading_degrees: item.heading_degrees,
+        group_id: item.group_id.clone(),
+        sequence: item.sequence,
+        metadata: item.metadata.clone(),
+        locations: vec![location],
+    }
+}
+
 fn geo_point_item_from_parsed_point(
     source: &MediaSource,
     _absolute_path: &str,
@@ -3002,13 +3880,26 @@ fn geo_point_item_from_parsed_point(
     let content_hash = geo_point_content_hash(point.latitude, point.longitude, point.timestamp);
     let display_name = format!("{} #{}", source.label, point.index);
     let location = MediaLocation {
-        id: geo_point_location_id(&source.id, &content_hash),
+        id: geo_point_location_id(
+            &source.id,
+            &content_hash,
+            point.source_dataset.as_deref(),
+            point.source_type.as_deref(),
+            point.group_id.as_deref(),
+            point.sequence,
+        ),
         source_id: source.id.clone(),
         source_label: source.label.clone(),
         root_path: source.root_path.clone(),
         relative_path: None,
         absolute_path: None,
         point_index: Some(point.index as i64),
+        source_dataset: point.source_dataset.clone(),
+        source_type: point.source_type.clone(),
+        group_id: point.group_id.clone(),
+        sequence: point.sequence,
+        timestamp: Some(point.timestamp),
+        end_timestamp: point.end_timestamp,
     };
 
     MediaItem {
@@ -3022,16 +3913,27 @@ fn geo_point_item_from_parsed_point(
         size_bytes: 0,
         duration_ms: None,
         timestamp: Some(point.timestamp),
+        end_timestamp: point.end_timestamp,
         latitude: Some(point.latitude),
         longitude: Some(point.longitude),
         thumbnail_key: None,
+        source_dataset: point.source_dataset.clone(),
+        source_type: point.source_type.clone(),
+        accuracy_meters: point.accuracy_meters,
+        altitude_meters: point.altitude_meters,
+        vertical_accuracy_meters: point.vertical_accuracy_meters,
+        velocity_meters_per_second: point.velocity_meters_per_second,
+        heading_degrees: point.heading_degrees,
+        group_id: point.group_id.clone(),
+        sequence: point.sequence,
+        metadata: point.metadata.clone(),
         locations: vec![location],
     }
 }
 
 fn derived_absolute_path(kind: &str, location: &MediaLocation) -> Option<String> {
     let root_path = location.root_path.as_ref()?;
-    if kind == "geo_point" {
+    if !matches!(kind, "image" | "video") {
         return Some(root_path.clone());
     }
     let relative_path = location.relative_path.as_ref()?;
@@ -3055,7 +3957,7 @@ fn derived_display_name(
     content_hash: &str,
     location: Option<&MediaLocation>,
 ) -> String {
-    if kind == "geo_point" {
+    if !matches!(kind, "image" | "video") {
         let base = location
             .map(|location| location.source_label.clone())
             .or_else(|| location.and_then(|location| location.relative_path.clone()))
@@ -3099,6 +4001,70 @@ fn normalize_media_item(
     }
     item.locations = locations;
     item
+}
+
+fn merge_metadata(existing: &Option<JsonValue>, incoming: &Option<JsonValue>) -> Option<JsonValue> {
+    match (incoming, existing) {
+        (Some(JsonValue::Object(incoming)), Some(JsonValue::Object(existing))) => {
+            let mut object = incoming.clone();
+            for (key, value) in existing.iter() {
+                object.insert(key.clone(), value.clone());
+            }
+            Some(JsonValue::Object(object))
+        }
+        (Some(_), Some(existing)) => Some(existing.clone()),
+        (None, Some(existing)) => Some(existing.clone()),
+        (Some(incoming), None) => Some(incoming.clone()),
+        (None, None) => None,
+    }
+}
+
+fn merge_media_items(existing: &MediaItem, incoming: &MediaItem) -> MediaItem {
+    let mut locations = existing.locations.clone();
+    locations.extend(incoming.locations.clone());
+    MediaItem {
+        id: existing.id.clone(),
+        content_hash: existing.content_hash.clone(),
+        source_id: existing.source_id.clone(),
+        relative_path: existing.relative_path.clone(),
+        display_name: existing.display_name.clone(),
+        kind: existing.kind.clone(),
+        mime_type: existing.mime_type.clone(),
+        size_bytes: existing.size_bytes.max(incoming.size_bytes),
+        duration_ms: existing.duration_ms.or(incoming.duration_ms),
+        timestamp: existing.timestamp.or(incoming.timestamp),
+        end_timestamp: existing.end_timestamp.or(incoming.end_timestamp),
+        latitude: existing.latitude.or(incoming.latitude),
+        longitude: existing.longitude.or(incoming.longitude),
+        thumbnail_key: existing
+            .thumbnail_key
+            .clone()
+            .or_else(|| incoming.thumbnail_key.clone()),
+        source_dataset: existing
+            .source_dataset
+            .clone()
+            .or_else(|| incoming.source_dataset.clone()),
+        source_type: existing
+            .source_type
+            .clone()
+            .or_else(|| incoming.source_type.clone()),
+        accuracy_meters: existing.accuracy_meters.or(incoming.accuracy_meters),
+        altitude_meters: existing.altitude_meters.or(incoming.altitude_meters),
+        vertical_accuracy_meters: existing
+            .vertical_accuracy_meters
+            .or(incoming.vertical_accuracy_meters),
+        velocity_meters_per_second: existing
+            .velocity_meters_per_second
+            .or(incoming.velocity_meters_per_second),
+        heading_degrees: existing.heading_degrees.or(incoming.heading_degrees),
+        group_id: existing
+            .group_id
+            .clone()
+            .or_else(|| incoming.group_id.clone()),
+        sequence: existing.sequence.or(incoming.sequence),
+        metadata: merge_metadata(&existing.metadata, &incoming.metadata),
+        locations,
+    }
 }
 
 #[derive(Clone)]
@@ -3698,9 +4664,11 @@ fn materialize_file_catalog_with_progress(
                 continue;
             }
             let content_hash = occurrence.item.content_hash.clone();
-            assets
-                .entry(content_hash.clone())
-                .or_insert_with(|| occurrence.item.clone());
+            let merged = assets
+                .get(&content_hash)
+                .map(|existing| merge_media_items(existing, &occurrence.item))
+                .unwrap_or_else(|| occurrence.item.clone());
+            assets.insert(content_hash.clone(), merged);
             let location_map = locations.entry(content_hash).or_default();
             for location in occurrence.item.locations {
                 location_map.insert(location.id.clone(), location);
@@ -3755,13 +4723,29 @@ fn write_file_catalog_indexes(app: &AppHandle, manifest: &FileCatalogManifest) -
     let items = active_media_items(app)?;
     let mut time_records = Vec::<NativePackedIndexRecord>::new();
     for (asset_id, item) in items.iter().enumerate() {
-        if let Some(timestamp) = item.timestamp {
+        if item.timestamp.is_some() || (item.latitude.is_some() && item.longitude.is_some()) {
+            let (
+                source_code,
+                quality_flags,
+                accuracy_meters,
+                velocity_meters_per_second,
+                heading_degrees,
+                group_hash,
+                sequence,
+            ) = line_payload_from_item(item);
             let record = NativePackedIndexRecord {
-                timestamp_sec: timestamp_seconds(timestamp),
+                timestamp_sec: item.timestamp.map(timestamp_seconds).unwrap_or(0),
                 lat_e7: item.latitude.map(lat_e7).unwrap_or(0),
                 lon_e7: item.longitude.map(lon_e7).unwrap_or(0),
                 asset_id,
                 kind_flags: kind_flags(item),
+                source_code,
+                quality_flags,
+                accuracy_meters,
+                velocity_meters_per_second,
+                heading_degrees,
+                group_hash,
+                sequence,
             };
             time_records.push(record);
         }
@@ -3952,20 +4936,21 @@ fn item_matches_catalog_query(item: &MediaItem, query: &CatalogQuery) -> bool {
             return false;
         }
     }
+    let Some(item_start_time) = item.timestamp else {
+        return query.start_time.is_none() && query.end_time.is_none();
+    };
+    let item_end_time = item.end_timestamp.unwrap_or(item_start_time);
     if let Some(start_time) = query.start_time {
-        if item
-            .timestamp
-            .is_none_or(|timestamp| timestamp < start_time)
-        {
+        if item_end_time < start_time {
             return false;
         }
     }
     if let Some(end_time) = query.end_time {
-        if item.timestamp.is_none_or(|timestamp| timestamp > end_time) {
+        if item_start_time > end_time {
             return false;
         }
     }
-    item.timestamp.is_some()
+    true
 }
 
 fn filtered_locations(item: &MediaItem, query: &CatalogQuery) -> Vec<MediaLocation> {
@@ -4000,6 +4985,13 @@ struct NativePackedIndexRecord {
     lon_e7: i32,
     asset_id: usize,
     kind_flags: u8,
+    source_code: u8,
+    quality_flags: u16,
+    accuracy_meters: f32,
+    velocity_meters_per_second: f32,
+    heading_degrees: f32,
+    group_hash: u64,
+    sequence: i32,
 }
 
 struct NativePackedIndexHeader {
@@ -4009,6 +5001,14 @@ struct NativePackedIndexHeader {
 }
 
 fn write_u32_le(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_u16_le(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_f32_le(bytes: &mut [u8], offset: usize, value: f32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
@@ -4029,6 +5029,11 @@ fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes(slice.try_into().ok()?))
 }
 
+fn read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
+    let slice = bytes.get(offset..offset + 2)?;
+    Some(u16::from_le_bytes(slice.try_into().ok()?))
+}
+
 fn read_u64_le(bytes: &[u8], offset: usize) -> Option<u64> {
     let slice = bytes.get(offset..offset + 8)?;
     Some(u64::from_le_bytes(slice.try_into().ok()?))
@@ -4042,6 +5047,11 @@ fn read_i32_le(bytes: &[u8], offset: usize) -> Option<i32> {
 fn read_f64_le(bytes: &[u8], offset: usize) -> Option<f64> {
     let slice = bytes.get(offset..offset + 8)?;
     Some(f64::from_le_bytes(slice.try_into().ok()?))
+}
+
+fn read_f32_le(bytes: &[u8], offset: usize) -> Option<f32> {
+    let slice = bytes.get(offset..offset + 4)?;
+    Some(f32::from_le_bytes(slice.try_into().ok()?))
 }
 
 fn timestamp_seconds(value: i64) -> u32 {
@@ -4062,15 +5072,96 @@ fn coordinate_from_e7(value: i32) -> f64 {
 
 fn kind_flags(item: &MediaItem) -> u8 {
     let kind = match item.kind.as_str() {
-        "video" => KIND_FLAG_VIDEO,
-        "geo_point" => KIND_FLAG_GEO_POINT,
-        _ => KIND_FLAG_IMAGE,
+        "video" => KIND_CODE_VIDEO,
+        "geo_point" => KIND_CODE_GEO_POINT,
+        "timeline_visit" => KIND_CODE_TIMELINE_VISIT,
+        "timeline_activity" => KIND_CODE_TIMELINE_ACTIVITY,
+        "activity_sample" => KIND_CODE_ACTIVITY_SAMPLE,
+        "frequent_place" => KIND_CODE_FREQUENT_PLACE,
+        _ => KIND_CODE_IMAGE,
     };
     kind | if item.latitude.is_some() && item.longitude.is_some() {
         KIND_FLAG_HAS_GEO
     } else {
         0
     }
+}
+
+fn source_code_from_value(value: Option<&str>) -> u8 {
+    let Some(value) = value else {
+        return LINE_SOURCE_UNKNOWN;
+    };
+    match value.trim().to_ascii_uppercase().as_str() {
+        "GPS" => LINE_SOURCE_GPS,
+        "WIFI" | "WI_FI" => LINE_SOURCE_WIFI,
+        "CELL" | "CELLULAR" => LINE_SOURCE_CELL,
+        _ => LINE_SOURCE_UNKNOWN,
+    }
+}
+
+fn source_code_from_item(item: &MediaItem) -> u8 {
+    let source_type = source_code_from_value(item.source_type.as_deref());
+    if source_type != LINE_SOURCE_UNKNOWN {
+        return source_type;
+    }
+    item.metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("source"))
+        .and_then(|source| source.as_str())
+        .map(|source| source_code_from_value(Some(source)))
+        .unwrap_or(LINE_SOURCE_UNKNOWN)
+}
+
+fn line_source_from_code(code: u8) -> &'static str {
+    match code {
+        LINE_SOURCE_GPS => "GPS",
+        LINE_SOURCE_WIFI => "WIFI",
+        LINE_SOURCE_CELL => "CELL",
+        _ => "UNKNOWN",
+    }
+}
+
+fn hash_string_64(value: Option<&str>) -> u64 {
+    let Some(value) = value else {
+        return 0;
+    };
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in value.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn line_payload_from_item(item: &MediaItem) -> (u8, u16, f32, f32, f32, u64, i32) {
+    let mut quality_flags = 0_u16;
+    if item.accuracy_meters.is_some() {
+        quality_flags |= LINE_QUALITY_HAS_ACCURACY;
+    }
+    if item.velocity_meters_per_second.is_some() {
+        quality_flags |= LINE_QUALITY_HAS_VELOCITY;
+    }
+    if item.heading_degrees.is_some() {
+        quality_flags |= LINE_QUALITY_HAS_HEADING;
+    }
+    let group_hash = hash_string_64(item.group_id.as_deref());
+    if group_hash != 0 {
+        quality_flags |= LINE_QUALITY_HAS_GROUP;
+    }
+    if item.sequence.is_some() {
+        quality_flags |= LINE_QUALITY_HAS_SEQUENCE;
+    }
+    (
+        source_code_from_item(item),
+        quality_flags,
+        item.accuracy_meters.unwrap_or(f64::NAN) as f32,
+        item.velocity_meters_per_second.unwrap_or(f64::NAN) as f32,
+        item.heading_degrees.unwrap_or(f64::NAN) as f32,
+        group_hash,
+        item.sequence
+            .unwrap_or(-1)
+            .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+    )
 }
 
 fn kind_matches_flags(flags: u8, kind: Option<&str>) -> bool {
@@ -4080,23 +5171,46 @@ fn kind_matches_flags(flags: u8, kind: Option<&str>) -> bool {
     if kind == "all" {
         return true;
     }
-    let encoded = flags & 0b11;
+    let encoded = flags & KIND_CODE_MASK;
     match kind {
-        "media" => matches!(encoded, KIND_FLAG_IMAGE | KIND_FLAG_VIDEO),
-        "image" => encoded == KIND_FLAG_IMAGE,
-        "video" => encoded == KIND_FLAG_VIDEO,
-        "geo_point" => encoded == KIND_FLAG_GEO_POINT,
+        "media" => matches!(encoded, KIND_CODE_IMAGE | KIND_CODE_VIDEO),
+        "image" => encoded == KIND_CODE_IMAGE,
+        "video" => encoded == KIND_CODE_VIDEO,
+        "geo_point" => encoded == KIND_CODE_GEO_POINT,
+        "timeline_visit" => encoded == KIND_CODE_TIMELINE_VISIT,
+        "timeline_activity" => encoded == KIND_CODE_TIMELINE_ACTIVITY,
+        "activity_sample" => encoded == KIND_CODE_ACTIVITY_SAMPLE,
+        "frequent_place" => encoded == KIND_CODE_FREQUENT_PLACE,
         _ => false,
     }
 }
 
 fn kind_from_flags(flags: u8) -> String {
-    match flags & 0b11 {
-        KIND_FLAG_VIDEO => "video",
-        KIND_FLAG_GEO_POINT => "geo_point",
+    match flags & KIND_CODE_MASK {
+        KIND_CODE_VIDEO => "video",
+        KIND_CODE_GEO_POINT => "geo_point",
+        KIND_CODE_TIMELINE_VISIT => "timeline_visit",
+        KIND_CODE_TIMELINE_ACTIVITY => "timeline_activity",
+        KIND_CODE_ACTIVITY_SAMPLE => "activity_sample",
+        KIND_CODE_FREQUENT_PLACE => "frequent_place",
         _ => "image",
     }
     .to_string()
+}
+
+fn query_may_match_interval_kinds(kind: Option<&str>) -> bool {
+    matches!(
+        kind,
+        None | Some("all") | Some("timeline_visit") | Some("timeline_activity")
+    )
+}
+
+fn scan_min_timestamp_sec(query: &CatalogQuery) -> u32 {
+    match query.start_time {
+        None => 0,
+        Some(_) if query_may_match_interval_kinds(query.kind.as_deref()) => 0,
+        Some(value) => timestamp_seconds(value),
+    }
 }
 
 fn packed_record_matches_query(record: NativePackedIndexRecord, query: &CatalogQuery) -> bool {
@@ -4175,6 +5289,13 @@ fn packed_record_at(bytes: &[u8], index: usize) -> Option<NativePackedIndexRecor
         lon_e7: read_i32_le(bytes, offset + 8)?,
         asset_id: read_u32_le(bytes, offset + 12)? as usize,
         kind_flags: bytes.get(offset + 16).copied()?,
+        source_code: bytes.get(offset + 17).copied()?,
+        quality_flags: read_u16_le(bytes, offset + 18)?,
+        accuracy_meters: read_f32_le(bytes, offset + 20)?,
+        velocity_meters_per_second: read_f32_le(bytes, offset + 24)?,
+        heading_degrees: read_f32_le(bytes, offset + 28)?,
+        group_hash: read_u64_le(bytes, offset + 32)?,
+        sequence: read_i32_le(bytes, offset + 40)?,
     })
 }
 
@@ -4240,6 +5361,13 @@ fn write_packed_index_file(
         write_i32_le(&mut entry_bytes, 8, record.lon_e7);
         write_u32_le(&mut entry_bytes, 12, record.asset_id as u32);
         entry_bytes[16] = record.kind_flags;
+        entry_bytes[17] = record.source_code;
+        write_u16_le(&mut entry_bytes, 18, record.quality_flags);
+        write_f32_le(&mut entry_bytes, 20, record.accuracy_meters);
+        write_f32_le(&mut entry_bytes, 24, record.velocity_meters_per_second);
+        write_f32_le(&mut entry_bytes, 28, record.heading_degrees);
+        write_u64_le(&mut entry_bytes, 32, record.group_hash);
+        write_i32_le(&mut entry_bytes, 40, record.sequence);
         bytes.extend_from_slice(&entry_bytes);
     }
     fs::write(path, bytes).map_err(|error| error.to_string())
@@ -4266,7 +5394,7 @@ fn scan_packed_asset_ids(
     if limit == 0 {
         return Ok((Vec::new(), 0, header.index_size_bytes, 0, false));
     }
-    let min_time = query.start_time.map(timestamp_seconds).unwrap_or(0);
+    let min_time = scan_min_timestamp_sec(query);
     let max_time = query.end_time.map(timestamp_seconds).unwrap_or(u32::MAX);
     let start = packed_lower_bound(&bytes, header.entry_count, |timestamp| timestamp < min_time);
     let end = packed_lower_bound(&bytes, header.entry_count, |timestamp| {
@@ -4410,219 +5538,354 @@ fn world_pixel_to_lon_lat(x: f64, y: f64, world_size: f64) -> (f64, f64) {
     (lat.clamp(-90.0, 90.0), lon.clamp(-180.0, 180.0))
 }
 
-struct NativePolylineAccumulator {
-    lat: Vec<f64>,
-    lon: Vec<f64>,
-    x: Vec<f64>,
-    y: Vec<f64>,
-    min_lat: f64,
-    max_lat: f64,
-    min_lon: f64,
-    max_lon: f64,
+#[derive(Clone)]
+struct NativePolylineCandidate {
+    asset_id: usize,
+    kind: String,
+    lat: f64,
+    lon: f64,
+    timestamp_sec: u32,
+    source: &'static str,
+    accuracy_meters: Option<f64>,
+    group_key: Option<String>,
+    sequence: Option<i32>,
 }
 
-impl NativePolylineAccumulator {
-    fn new() -> Self {
-        Self {
-            lat: Vec::new(),
-            lon: Vec::new(),
-            x: Vec::new(),
-            y: Vec::new(),
-            min_lat: f64::INFINITY,
-            max_lat: f64::NEG_INFINITY,
-            min_lon: f64::INFINITY,
-            max_lon: f64::NEG_INFINITY,
+struct NativePolylineCleanup {
+    enabled: bool,
+    allowed_sources: HashSet<String>,
+    max_accuracy_meters: Option<f64>,
+    break_speed_kmh: Option<f64>,
+    max_segment_distance_km: Option<f64>,
+    remove_isolated_jumps: bool,
+    show_dots: bool,
+}
+
+struct NativeCandidateSegment {
+    group_key: Option<String>,
+    candidates: Vec<NativePolylineCandidate>,
+}
+
+fn normalize_polyline_cleanup(map_polyline: Option<&MapPolylineSpec>) -> NativePolylineCleanup {
+    let cleanup = map_polyline.and_then(|options| options.cleanup.as_ref());
+    let allowed_sources = cleanup
+        .filter(|options| !options.allowed_sources.is_empty())
+        .map(|options| options.allowed_sources.iter().cloned().collect())
+        .unwrap_or_else(|| {
+            ["GPS", "WIFI", "CELL", "UNKNOWN"]
+                .iter()
+                .map(|source| source.to_string())
+                .collect()
+        });
+    NativePolylineCleanup {
+        enabled: cleanup.is_some_and(|options| options.enabled),
+        allowed_sources,
+        max_accuracy_meters: cleanup.and_then(|options| {
+            options
+                .max_accuracy_meters
+                .filter(|value| value.is_finite())
+        }),
+        break_speed_kmh: cleanup
+            .and_then(|options| options.break_speed_kmh.filter(|value| value.is_finite())),
+        max_segment_distance_km: cleanup.and_then(|options| {
+            options
+                .max_segment_distance_km
+                .filter(|value| value.is_finite() && *value > 0.0)
+        }),
+        remove_isolated_jumps: cleanup.is_some_and(|options| options.remove_isolated_jumps),
+        show_dots: cleanup.and_then(|options| options.show_dots).unwrap_or(true),
+    }
+}
+
+fn record_accuracy_meters(record: NativePackedIndexRecord) -> Option<f64> {
+    if record.quality_flags & LINE_QUALITY_HAS_ACCURACY == 0 {
+        return None;
+    }
+    record
+        .accuracy_meters
+        .is_finite()
+        .then_some(record.accuracy_meters as f64)
+}
+
+fn record_sequence(record: NativePackedIndexRecord) -> Option<i32> {
+    (record.quality_flags & LINE_QUALITY_HAS_SEQUENCE != 0 && record.sequence >= 0)
+        .then_some(record.sequence)
+}
+
+fn polyline_candidate_from_record(record: NativePackedIndexRecord) -> NativePolylineCandidate {
+    NativePolylineCandidate {
+        asset_id: record.asset_id,
+        kind: kind_from_flags(record.kind_flags),
+        lat: coordinate_from_e7(record.lat_e7),
+        lon: coordinate_from_e7(record.lon_e7),
+        timestamp_sec: record.timestamp_sec,
+        source: line_source_from_code(record.source_code),
+        accuracy_meters: record_accuracy_meters(record),
+        group_key: (record.quality_flags & LINE_QUALITY_HAS_GROUP != 0 && record.group_hash != 0)
+            .then_some(format!("{:016x}", record.group_hash)),
+        sequence: record_sequence(record),
+    }
+}
+
+fn candidate_passes_quality_filter(
+    candidate: &NativePolylineCandidate,
+    cleanup: &NativePolylineCleanup,
+) -> bool {
+    if !cleanup.enabled {
+        return true;
+    }
+    if !cleanup.allowed_sources.contains(candidate.source) {
+        return false;
+    }
+    if let (Some(max_accuracy), Some(accuracy)) =
+        (cleanup.max_accuracy_meters, candidate.accuracy_meters)
+    {
+        if accuracy > max_accuracy {
+            return false;
         }
     }
+    true
+}
 
-    fn push(&mut self, lat: f64, lon: f64, world_size: f64) {
-        let (x, y) = lon_lat_to_world_pixel(lon, lat, world_size);
-        self.lat.push(lat);
-        self.lon.push(lon);
-        self.x.push(x);
-        self.y.push(y);
-        self.min_lat = self.min_lat.min(lat);
-        self.max_lat = self.max_lat.max(lat);
-        self.min_lon = self.min_lon.min(lon);
-        self.max_lon = self.max_lon.max(lon);
-    }
-
-    fn len(&self) -> usize {
-        self.lat.len()
+fn map_point_from_candidate(candidate: &NativePolylineCandidate) -> MapPoint {
+    MapPoint {
+        media_id: None,
+        asset_id: Some(candidate.asset_id),
+        cell_id: None,
+        kind: Some(candidate.kind.clone()),
+        lat: candidate.lat,
+        lon: candidate.lon,
+        timestamp: Some(candidate.timestamp_sec as i64 * 1000),
+        count: Some(1),
+        bounds: None,
     }
 }
 
-fn radial_distance_simplify(
-    accumulator: &NativePolylineAccumulator,
-    tolerance_px: f64,
-) -> Vec<usize> {
-    let count = accumulator.len();
-    if count <= 2 || tolerance_px <= 0.0 {
-        return (0..count).collect();
+fn candidate_speed_kmh(left: &NativePolylineCandidate, right: &NativePolylineCandidate) -> f64 {
+    let seconds = right.timestamp_sec.saturating_sub(left.timestamp_sec);
+    if seconds == 0 {
+        return 0.0;
     }
-
-    let tolerance_sq = tolerance_px * tolerance_px;
-    let mut kept = vec![0_usize];
-    let mut previous = 0_usize;
-    for index in 1..count - 1 {
-        let dx = accumulator.x[index] - accumulator.x[previous];
-        let dy = accumulator.y[index] - accumulator.y[previous];
-        if dx * dx + dy * dy >= tolerance_sq {
-            kept.push(index);
-            previous = index;
-        }
-    }
-    kept.push(count - 1);
-    kept
+    distance_between_coords(left.lat, left.lon, right.lat, right.lon) / seconds as f64 * 3.6
 }
 
-fn perpendicular_distance_sq(
-    px: f64,
-    py: f64,
-    ax: f64,
-    ay: f64,
-    bx: f64,
-    by: f64,
-) -> f64 {
-    let dx = bx - ax;
-    let dy = by - ay;
-    if dx == 0.0 && dy == 0.0 {
-        let point_dx = px - ax;
-        let point_dy = py - ay;
-        return point_dx * point_dx + point_dy * point_dy;
+fn remove_isolated_jump_candidates(
+    candidates: &[NativePolylineCandidate],
+    break_speed_kmh: Option<f64>,
+) -> (Vec<NativePolylineCandidate>, usize) {
+    let Some(break_speed_kmh) = break_speed_kmh else {
+        return (candidates.to_vec(), 0);
+    };
+    if candidates.len() < 3 {
+        return (candidates.to_vec(), 0);
     }
-    let t = (((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
-    let closest_x = ax + t * dx;
-    let closest_y = ay + t * dy;
-    let point_dx = px - closest_x;
-    let point_dy = py - closest_y;
-    point_dx * point_dx + point_dy * point_dy
-}
-
-fn douglas_peucker_simplify(
-    accumulator: &NativePolylineAccumulator,
-    candidate_indices: &[usize],
-    tolerance_px: f64,
-) -> Vec<usize> {
-    if candidate_indices.len() <= 2 || tolerance_px <= 0.0 {
-        return candidate_indices.to_vec();
-    }
-
-    let tolerance_sq = tolerance_px * tolerance_px;
-    let mut keep = vec![false; candidate_indices.len()];
-    keep[0] = true;
-    keep[candidate_indices.len() - 1] = true;
-    let mut stack = vec![(0_usize, candidate_indices.len() - 1)];
-
-    while let Some((start, end)) = stack.pop() {
-        if end <= start + 1 {
+    let mut kept = Vec::<NativePolylineCandidate>::with_capacity(candidates.len());
+    kept.push(candidates[0].clone());
+    let mut removed = 0_usize;
+    for index in 1..candidates.len() - 1 {
+        let previous = &candidates[index - 1];
+        let current = &candidates[index];
+        let next = &candidates[index + 1];
+        if candidate_speed_kmh(previous, current) > break_speed_kmh
+            && candidate_speed_kmh(current, next) > break_speed_kmh
+            && candidate_speed_kmh(previous, next) <= break_speed_kmh
+        {
+            removed += 1;
             continue;
         }
-
-        let start_index = candidate_indices[start];
-        let end_index = candidate_indices[end];
-        let ax = accumulator.x[start_index];
-        let ay = accumulator.y[start_index];
-        let bx = accumulator.x[end_index];
-        let by = accumulator.y[end_index];
-        let mut max_distance_sq = -1.0_f64;
-        let mut max_index = None;
-
-        for index in start + 1..end {
-            let point_index = candidate_indices[index];
-            let distance_sq = perpendicular_distance_sq(
-                accumulator.x[point_index],
-                accumulator.y[point_index],
-                ax,
-                ay,
-                bx,
-                by,
-            );
-            if distance_sq > max_distance_sq {
-                max_distance_sq = distance_sq;
-                max_index = Some(index);
-            }
-        }
-
-        if max_distance_sq > tolerance_sq {
-            if let Some(index) = max_index {
-                keep[index] = true;
-                stack.push((start, index));
-                stack.push((index, end));
-            }
-        }
+        kept.push(current.clone());
     }
-
-    candidate_indices
-        .iter()
-        .enumerate()
-        .filter_map(|(index, value)| keep[index].then_some(*value))
-        .collect()
+    kept.push(candidates[candidates.len() - 1].clone());
+    (kept, removed)
 }
 
-fn simplify_polyline(
-    accumulator: &NativePolylineAccumulator,
-    requested_tolerance_px: f64,
-    max_points: usize,
-) -> (Vec<usize>, f64) {
-    let count = accumulator.len();
-    if count <= 2 {
-        return ((0..count).collect(), requested_tolerance_px.max(0.0));
+fn split_candidates_by_speed(
+    candidates: &[NativePolylineCandidate],
+    break_speed_kmh: Option<f64>,
+) -> (Vec<Vec<NativePolylineCandidate>>, usize) {
+    let Some(break_speed_kmh) = break_speed_kmh else {
+        return (vec![candidates.to_vec()], 0);
+    };
+    if candidates.is_empty() {
+        return (Vec::new(), 0);
     }
-
-    let safe_max_points = max_points.max(2);
-    let mut tolerance_px = requested_tolerance_px.max(0.0);
-    let mut indices = Vec::<usize>::new();
-    for _ in 0..16 {
-        let radial = radial_distance_simplify(accumulator, tolerance_px);
-        indices = douglas_peucker_simplify(accumulator, &radial, tolerance_px);
-        if indices.len() <= safe_max_points {
-            return (indices, tolerance_px);
+    let mut segments = Vec::<Vec<NativePolylineCandidate>>::new();
+    let mut current = vec![candidates[0].clone()];
+    let mut breaks = 0_usize;
+    for index in 1..candidates.len() {
+        let candidate = candidates[index].clone();
+        if candidate_speed_kmh(&candidates[index - 1], &candidate) > break_speed_kmh {
+            segments.push(current);
+            current = vec![candidate];
+            breaks += 1;
+        } else {
+            current.push(candidate);
         }
-        tolerance_px = (tolerance_px + 0.5)
-            .max(tolerance_px * ((indices.len() as f64 / safe_max_points as f64).sqrt()) * 1.25);
     }
-
-    if indices.len() <= safe_max_points {
-        return (indices, tolerance_px);
+    if !current.is_empty() {
+        segments.push(current);
     }
-
-    let last = count - 1;
-    let mut sampled = Vec::<usize>::with_capacity(safe_max_points);
-    sampled.push(0);
-    for index in 1..safe_max_points - 1 {
-        sampled.push(((index as f64 / (safe_max_points - 1) as f64) * last as f64).round() as usize);
-    }
-    sampled.push(last);
-    sampled.sort_unstable();
-    sampled.dedup();
-    (sampled, tolerance_px)
+    (segments, breaks)
 }
 
-fn polyline_from_accumulator(
-    accumulator: &NativePolylineAccumulator,
+fn split_candidates_by_max_segment_distance(
+    candidates: &[NativePolylineCandidate],
+    max_segment_distance_km: Option<f64>,
+) -> (Vec<Vec<NativePolylineCandidate>>, usize) {
+    let Some(max_segment_distance_km) = max_segment_distance_km else {
+        return (vec![candidates.to_vec()], 0);
+    };
+    if candidates.is_empty() {
+        return (Vec::new(), 0);
+    }
+    if candidates.len() < 2 {
+        return (vec![candidates.to_vec()], 0);
+    }
+    let max_segment_distance_meters = max_segment_distance_km * 1000.0;
+    let mut segments = Vec::<Vec<NativePolylineCandidate>>::new();
+    let mut current = vec![candidates[0].clone()];
+    let mut breaks = 0_usize;
+    for index in 1..candidates.len() {
+        let candidate = candidates[index].clone();
+        let previous = &candidates[index - 1];
+        if distance_between_coords(previous.lat, previous.lon, candidate.lat, candidate.lon)
+            > max_segment_distance_meters
+        {
+            segments.push(current);
+            current = vec![candidate];
+            breaks += 1;
+        } else {
+            current.push(candidate);
+        }
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    (segments, breaks)
+}
+
+fn flush_sequence_run(
+    group_key: &str,
+    run: Vec<NativePolylineCandidate>,
+    line_segments: &mut Vec<NativeCandidateSegment>,
+    dot_points: &mut Vec<MapPoint>,
+) {
+    if run.len() >= 2 {
+        line_segments.push(NativeCandidateSegment {
+            group_key: Some(group_key.to_string()),
+            candidates: run,
+        });
+    } else if let Some(candidate) = run.first() {
+        dot_points.push(map_point_from_candidate(candidate));
+    }
+}
+
+fn split_group_by_consecutive_sequence(
+    group_key: &str,
+    mut candidates: Vec<NativePolylineCandidate>,
+) -> (Vec<NativeCandidateSegment>, Vec<MapPoint>) {
+    candidates.sort_by(|left, right| {
+        left.sequence
+            .unwrap_or(i32::MAX)
+            .cmp(&right.sequence.unwrap_or(i32::MAX))
+            .then_with(|| left.timestamp_sec.cmp(&right.timestamp_sec))
+            .then_with(|| left.asset_id.cmp(&right.asset_id))
+    });
+    let mut line_segments = Vec::<NativeCandidateSegment>::new();
+    let mut dot_points = Vec::<MapPoint>::new();
+    let mut current_run = Vec::<NativePolylineCandidate>::new();
+
+    for candidate in candidates {
+        let Some(sequence) = candidate.sequence else {
+            flush_sequence_run(group_key, current_run, &mut line_segments, &mut dot_points);
+            current_run = Vec::new();
+            dot_points.push(map_point_from_candidate(&candidate));
+            continue;
+        };
+
+        if current_run
+            .last()
+            .and_then(|previous| previous.sequence)
+            .is_some_and(|previous_sequence| sequence != previous_sequence + 1)
+        {
+            flush_sequence_run(group_key, current_run, &mut line_segments, &mut dot_points);
+            current_run = Vec::new();
+        }
+        current_run.push(candidate);
+    }
+
+    flush_sequence_run(group_key, current_run, &mut line_segments, &mut dot_points);
+    (line_segments, dot_points)
+}
+
+fn polyline_from_candidate_segments(
+    candidate_segments: &[NativeCandidateSegment],
     requested_tolerance_px: f64,
-    max_points: usize,
+    _max_points: usize,
 ) -> MapPolyline {
-    let (indices, tolerance_px) =
-        simplify_polyline(accumulator, requested_tolerance_px, max_points);
-    MapPolyline {
-        points: indices
+    let source_point_count = candidate_segments
+        .iter()
+        .map(|segment| segment.candidates.len())
+        .sum::<usize>();
+    let non_empty_segments = candidate_segments
+        .iter()
+        .filter(|segment| segment.candidates.len() >= 2)
+        .collect::<Vec<_>>();
+    if non_empty_segments.is_empty() {
+        return MapPolyline {
+            points: Vec::new(),
+            segments: Some(Vec::new()),
+            bounds: None,
+            source_point_count,
+            simplified_point_count: 0,
+            tolerance_px: requested_tolerance_px.max(0.0),
+        };
+    }
+
+    let mut rendered_segments = Vec::<MapPolylineSegment>::new();
+    let mut flattened = Vec::<MapPolylinePoint>::new();
+    for segment in &non_empty_segments {
+        let points = segment
+            .candidates
             .iter()
-            .map(|index| MapPolylinePoint {
-                lat: accumulator.lat[*index],
-                lon: accumulator.lon[*index],
+            .map(|candidate| MapPolylinePoint {
+                lat: candidate.lat,
+                lon: candidate.lon,
             })
-            .collect(),
-        bounds: (accumulator.len() > 0).then_some(GeoBounds {
-            min_lat: accumulator.min_lat,
-            max_lat: accumulator.max_lat,
-            min_lon: accumulator.min_lon,
-            max_lon: accumulator.max_lon,
-        }),
-        source_point_count: accumulator.len(),
-        simplified_point_count: indices.len(),
-        tolerance_px,
+            .collect::<Vec<_>>();
+        if points.len() >= 2 {
+            flattened.extend(points.iter().cloned());
+            rendered_segments.push(MapPolylineSegment {
+                points,
+                group_key: segment.group_key.clone(),
+            });
+        }
+    }
+
+    let bounds = (!flattened.is_empty()).then(|| {
+        flattened.iter().fold(
+            GeoBounds {
+                min_lat: f64::INFINITY,
+                max_lat: f64::NEG_INFINITY,
+                min_lon: f64::INFINITY,
+                max_lon: f64::NEG_INFINITY,
+            },
+            |bounds, point| GeoBounds {
+                min_lat: bounds.min_lat.min(point.lat),
+                max_lat: bounds.max_lat.max(point.lat),
+                min_lon: bounds.min_lon.min(point.lon),
+                max_lon: bounds.max_lon.max(point.lon),
+            },
+        )
+    });
+
+    MapPolyline {
+        points: flattened.clone(),
+        segments: Some(rendered_segments),
+        bounds,
+        source_point_count,
+        simplified_point_count: flattened.len(),
+        tolerance_px: requested_tolerance_px.max(0.0),
     }
 }
 
@@ -4630,8 +5893,7 @@ fn map_point_bucket(
     aggregation: &NativeMapPointAggregation,
     point: &MapPoint,
 ) -> (String, f64, f64) {
-    let (pixel_x, pixel_y) =
-        lon_lat_to_world_pixel(point.lon, point.lat, aggregation.world_size);
+    let (pixel_x, pixel_y) = lon_lat_to_world_pixel(point.lon, point.lat, aggregation.world_size);
     let cells_per_row = (aggregation.world_size / aggregation.cell_size_px)
         .ceil()
         .max(1.0) as usize;
@@ -4754,13 +6016,23 @@ fn scan_packed_map_points(
     map_aggregation: Option<&MapAggregationSpec>,
     limit: usize,
     _offset: usize,
-) -> AppResult<(MapPointPage, usize, usize, usize, usize, usize, usize, usize, f64)> {
+) -> AppResult<(
+    MapPointPage,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    f64,
+)> {
     let indexes_dir = catalog_indexes_dir(app)?;
     let (header, bytes) = read_packed_index_bytes(
         &indexes_dir.join(FILE_CATALOG_TIME_GEO_INDEX),
         INDEX_KIND_TIME_GEO,
     )?;
-    let min_time = query.start_time.map(timestamp_seconds).unwrap_or(0);
+    let min_time = scan_min_timestamp_sec(query);
     let max_time = query.end_time.map(timestamp_seconds).unwrap_or(u32::MAX);
     let start = packed_lower_bound(&bytes, header.entry_count, |timestamp| timestamp < min_time);
     let end = packed_lower_bound(&bytes, header.entry_count, |timestamp| {
@@ -4817,9 +6089,7 @@ fn scan_packed_map_points(
     let mut points = aggregated_map_points(aggregation);
     let limit_reached = points.len() > limit;
     if limit_reached {
-        points.sort_by(|left, right| {
-            (right.count.unwrap_or(1)).cmp(&left.count.unwrap_or(1))
-        });
+        points.sort_by(|left, right| (right.count.unwrap_or(1)).cmp(&left.count.unwrap_or(1)));
         points.truncate(limit);
     }
     let rendered_bubbles = points.len();
@@ -4845,35 +6115,70 @@ fn scan_packed_map_points(
 fn scan_packed_map_polyline(
     app: &AppHandle,
     query: &CatalogQuery,
-    map_aggregation: Option<&MapAggregationSpec>,
+    _map_aggregation: Option<&MapAggregationSpec>,
     map_polyline: Option<&MapPolylineSpec>,
-) -> AppResult<(MapPointPage, usize, usize, usize, usize, usize, usize, f64)> {
+) -> AppResult<(
+    MapPointPage,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    f64,
+)> {
     let indexes_dir = catalog_indexes_dir(app)?;
     let (header, bytes) = read_packed_index_bytes(
         &indexes_dir.join(FILE_CATALOG_TIME_GEO_INDEX),
         INDEX_KIND_TIME_GEO,
     )?;
-    let min_time = query.start_time.map(timestamp_seconds).unwrap_or(0);
+    let min_time = scan_min_timestamp_sec(query);
     let max_time = query.end_time.map(timestamp_seconds).unwrap_or(u32::MAX);
     let start = packed_lower_bound(&bytes, header.entry_count, |timestamp| timestamp < min_time);
     let end = packed_lower_bound(&bytes, header.entry_count, |timestamp| {
         timestamp <= max_time
     });
-    let zoom = map_aggregation
-        .map(|options| options.zoom.floor().clamp(0.0, 24.0) as i32)
-        .unwrap_or(0);
-    let world_size = WEB_MERCATOR_TILE_SIZE * 2_f64.powi(zoom);
-    let requested_tolerance_px = map_polyline
-        .map(|options| options.tolerance_px.max(0.0))
-        .unwrap_or(2.0);
     let max_points = map_polyline
         .map(|options| options.max_points)
         .unwrap_or(10_000)
         .clamp(2, 100_000);
-    let mut accumulator = NativePolylineAccumulator::new();
+    let requested_tolerance_px = map_polyline
+        .map(|options| options.tolerance_px.max(0.0))
+        .unwrap_or(2.0);
+    let cleanup = normalize_polyline_cleanup(map_polyline);
+    let mut grouped_line_candidates = HashMap::<String, Vec<NativePolylineCandidate>>::new();
+    let mut dot_points = Vec::<MapPoint>::new();
+    let mut matched_records = 0_usize;
+    let mut filtered_quality_points = 0_usize;
     let mut pages_read = 0_usize;
     let mut candidates_inspected = 0_usize;
     let disk_read_bytes = bytes.len();
+
+    let mut accept_record = |record: NativePackedIndexRecord| {
+        matched_records += 1;
+        let candidate = polyline_candidate_from_record(record);
+        if !candidate_passes_quality_filter(&candidate, &cleanup) {
+            filtered_quality_points += 1;
+            return;
+        }
+        if let Some(group_key) = candidate.group_key.clone() {
+            grouped_line_candidates
+                .entry(group_key)
+                .or_default()
+                .push(candidate);
+        } else if cleanup.show_dots {
+            dot_points.push(map_point_from_candidate(&candidate));
+            return;
+        }
+    };
 
     if query.sort != "timestamp_asc" {
         let mut chunk_end = end;
@@ -4889,11 +6194,7 @@ fn scan_packed_map_polyline(
                 if !packed_record_matches_query(record, query) {
                     continue;
                 }
-                accumulator.push(
-                    coordinate_from_e7(record.lat_e7),
-                    coordinate_from_e7(record.lon_e7),
-                    world_size,
-                );
+                accept_record(record);
             }
             chunk_end = chunk_start;
         }
@@ -4910,34 +6211,109 @@ fn scan_packed_map_polyline(
                 if !packed_record_matches_query(record, query) {
                     continue;
                 }
-                accumulator.push(
-                    coordinate_from_e7(record.lat_e7),
-                    coordinate_from_e7(record.lon_e7),
-                    world_size,
-                );
+                accept_record(record);
             }
             chunk_start = chunk_end;
         }
     }
+    drop(accept_record);
 
-    let polyline = polyline_from_accumulator(&accumulator, requested_tolerance_px, max_points);
-    let source_line_points = polyline.source_point_count;
+    let mut candidate_segments = Vec::<NativeCandidateSegment>::new();
+    let mut sequence_dot_points = Vec::<MapPoint>::new();
+    for (group_key, candidates) in grouped_line_candidates {
+        let (mut line_segments, mut dot_segments) =
+            split_group_by_consecutive_sequence(&group_key, candidates);
+        candidate_segments.append(&mut line_segments);
+        if cleanup.show_dots {
+            sequence_dot_points.append(&mut dot_segments);
+        }
+    }
+
+    let accepted_line_points = candidate_segments
+        .iter()
+        .map(|segment| segment.candidates.len())
+        .sum::<usize>();
+    let mut processed_segments = Vec::<NativeCandidateSegment>::new();
+    let mut segment_dot_points = Vec::<MapPoint>::new();
+    let mut filtered_jump_points = 0_usize;
+    let mut line_speed_breaks = 0_usize;
+    let mut line_distance_breaks = 0_usize;
+    for segment in candidate_segments {
+        let group_key = segment.group_key;
+        let (jump_filtered, removed) = if cleanup.enabled && cleanup.remove_isolated_jumps {
+            remove_isolated_jump_candidates(&segment.candidates, cleanup.break_speed_kmh)
+        } else {
+            (segment.candidates, 0)
+        };
+        filtered_jump_points += removed;
+        let (distance_segments, distance_breaks) = split_candidates_by_max_segment_distance(
+            &jump_filtered,
+            cleanup.max_segment_distance_km,
+        );
+        line_distance_breaks += distance_breaks;
+        for distance_segment in distance_segments {
+            let (split_segments, breaks) =
+                split_candidates_by_speed(&distance_segment, cleanup.break_speed_kmh);
+            line_speed_breaks += breaks;
+            for candidates in split_segments {
+                if candidates.len() >= 2 {
+                    processed_segments.push(NativeCandidateSegment {
+                        group_key: group_key.clone(),
+                        candidates,
+                    });
+                } else if cleanup.show_dots {
+                    if let Some(candidate) = candidates.first() {
+                        segment_dot_points.push(map_point_from_candidate(candidate));
+                    }
+                }
+            }
+        }
+    }
+
+    let polyline =
+        polyline_from_candidate_segments(&processed_segments, requested_tolerance_px, max_points);
+    let source_line_points = matched_records;
+    let filtered_jump_points_total = filtered_jump_points;
+    let filtered_line_points = filtered_quality_points + filtered_jump_points_total;
+    let line_segments = polyline
+        .segments
+        .as_ref()
+        .map(|segments| segments.len())
+        .unwrap_or(0);
     let rendered_line_points = polyline.simplified_point_count;
-    let simplification_tolerance_px = polyline.tolerance_px;
+    if cleanup.show_dots {
+        dot_points.extend(sequence_dot_points);
+        dot_points.extend(segment_dot_points);
+    } else {
+        dot_points.clear();
+    }
+    let limit_reached_by_dots = dot_points.len() > max_points;
+    if limit_reached_by_dots {
+        dot_points.truncate(max_points);
+    }
+    let rendered_line_dots = dot_points.len();
     Ok((
         MapPointPage {
-            points: Vec::new(),
+            points: dot_points,
             polyline: Some(polyline),
-            limit_reached: Some(false),
+            limit_reached: Some(limit_reached_by_dots),
             result_metrics: None,
         },
         pages_read,
         disk_read_bytes,
         candidates_inspected,
-        accumulator.len(),
+        matched_records,
         source_line_points,
+        accepted_line_points,
+        filtered_line_points,
+        filtered_quality_points,
+        filtered_jump_points_total,
+        line_speed_breaks,
+        line_distance_breaks,
+        line_segments,
         rendered_line_points,
-        simplification_tolerance_px,
+        rendered_line_dots,
+        requested_tolerance_px,
     ))
 }
 
@@ -5135,10 +6511,7 @@ fn search_map_points(app: AppHandle, spec: SearchSpec) -> AppResult<MapPointPage
     let started_at = Instant::now();
     let (engine_id, engine_label) = file_search_engine(&spec)?;
     let mut index_stats = require_search_index_current(&app, engine_id, engine_label)?;
-    let limit = spec
-        .limit
-        .unwrap_or(500)
-        .clamp(1, MAX_RENDERED_MAP_BUBBLES) as usize;
+    let limit = spec.limit.unwrap_or(500).clamp(1, MAX_RENDERED_MAP_BUBBLES) as usize;
     let offset = spec.offset.unwrap_or(0).max(0) as usize;
     let query = search_spec_to_catalog_query(&spec, limit.saturating_add(1) as i64);
     if spec.map_mode.as_deref() == Some("polyline") {
@@ -5149,7 +6522,15 @@ fn search_map_points(app: AppHandle, spec: SearchSpec) -> AppResult<MapPointPage
             candidates_inspected,
             matched_records,
             source_line_points,
+            accepted_line_points,
+            filtered_line_points,
+            filtered_quality_points,
+            filtered_jump_points,
+            line_speed_breaks,
+            line_distance_breaks,
+            line_segments,
             rendered_line_points,
+            rendered_line_dots,
             simplification_tolerance_px,
         ) = scan_packed_map_polyline(
             &app,
@@ -5160,22 +6541,31 @@ fn search_map_points(app: AppHandle, spec: SearchSpec) -> AppResult<MapPointPage
         index_stats.pages_read = pages_read as i64;
         index_stats.disk_read_bytes = Some(disk_read_bytes);
         index_stats.candidates_inspected = candidates_inspected as i64;
+        let map_limit_reached = page.limit_reached.unwrap_or(false);
         let mut result_metrics = with_query_metrics(
             index_stats,
             &spec,
             "native",
             started_at.elapsed().as_secs_f64() * 1000.0,
-            rendered_line_points,
+            rendered_line_points + rendered_line_dots,
             spec.map_polyline
                 .as_ref()
                 .map(|options| options.max_points as i64)
                 .unwrap_or(limit as i64),
             offset as i64,
-            false,
+            map_limit_reached,
         );
         result_metrics.matched_records = Some(matched_records);
         result_metrics.source_line_points = Some(source_line_points);
+        result_metrics.accepted_line_points = Some(accepted_line_points);
+        result_metrics.filtered_line_points = Some(filtered_line_points);
+        result_metrics.filtered_quality_points = Some(filtered_quality_points);
+        result_metrics.filtered_jump_points = Some(filtered_jump_points);
+        result_metrics.line_speed_breaks = Some(line_speed_breaks);
+        result_metrics.line_distance_breaks = Some(line_distance_breaks);
+        result_metrics.line_segments = Some(line_segments);
         result_metrics.rendered_line_points = Some(rendered_line_points);
+        result_metrics.rendered_line_dots = Some(rendered_line_dots);
         result_metrics.simplification_tolerance_px = Some(simplification_tolerance_px);
         page.result_metrics = Some(result_metrics);
         return Ok(page);
@@ -6203,6 +7593,67 @@ fn import_google_takeout_streaming(
     Ok((accepted_media, parser.skipped_points, cancelled))
 }
 
+fn import_google_timeline_json(
+    app: &AppHandle,
+    path: &Path,
+    source: &MediaSource,
+    session: &NativeImportSession,
+    total_bytes: i64,
+    window: &Window,
+) -> AppResult<(i64, i64, bool)> {
+    let source_label = source.label.clone();
+    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let (items, skipped_points) = parse_google_timeline_location_items(&text)?;
+    let mut batch = Vec::<MediaItem>::new();
+    let mut accepted_media = 0_i64;
+    let mut cancelled = false;
+
+    for item in items.iter() {
+        if import_cancelled() {
+            cancelled = true;
+            break;
+        }
+        batch.push(media_item_from_parsed_geo_item(
+            source,
+            "application/json",
+            item,
+        ));
+        accepted_media += 1;
+        if batch.len() >= IMPORT_BATCH_SIZE {
+            emit_progress(
+                window,
+                import_progress_bytes(
+                    "scanning",
+                    &source_label,
+                    accepted_media,
+                    skipped_points,
+                    Some(source_label.clone()),
+                    total_bytes,
+                    total_bytes,
+                ),
+            );
+            flush_media_batch(app, session, &mut batch)?;
+            flush_and_commit_geo_import_if_requested(app, session, &mut batch)?;
+        }
+    }
+
+    emit_progress(
+        window,
+        import_progress_bytes(
+            "storing",
+            &source_label,
+            accepted_media,
+            skipped_points,
+            Some(source_label.clone()),
+            total_bytes,
+            total_bytes,
+        ),
+    );
+    flush_media_batch(app, session, &mut batch)?;
+    flush_and_commit_geo_import_if_requested(app, session, &mut batch)?;
+    Ok((accepted_media, skipped_points, cancelled))
+}
+
 fn import_gpx_streaming(
     app: &AppHandle,
     path: &Path,
@@ -6534,9 +7985,10 @@ fn rescan_folders(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
             break;
         }
         if !root.exists() {
-            summary
-                .errors
-                .push(format!("{}: folder is not available", root.to_string_lossy()));
+            summary.errors.push(format!(
+                "{}: folder is not available",
+                root.to_string_lossy()
+            ));
             continue;
         }
         match import_folder_from_root(app.clone(), window.clone(), root.clone()) {
@@ -6614,6 +8066,9 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
                 total_bytes,
                 &window,
             ),
+            GeoFileFormat::GoogleTimelineJson => {
+                import_google_timeline_json(&app, &path, &source, &session, total_bytes, &window)
+            }
             GeoFileFormat::Gpx => import_gpx_streaming(
                 &app,
                 &path,
@@ -6716,9 +8171,20 @@ mod tests {
             size_bytes: 12,
             duration_ms: None,
             timestamp: Some(1_700_000_000_000),
+            end_timestamp: None,
             latitude: Some(47.0),
             longitude: Some(8.0),
             thumbnail_key: Some(format!("thumbs/{content_hash}.webp")),
+            source_dataset: None,
+            source_type: None,
+            accuracy_meters: None,
+            altitude_meters: None,
+            vertical_accuracy_meters: None,
+            velocity_meters_per_second: None,
+            heading_degrees: None,
+            group_id: None,
+            sequence: None,
+            metadata: None,
             locations: vec![MediaLocation {
                 id: location_id,
                 source_id: source_id.to_string(),
@@ -6727,6 +8193,12 @@ mod tests {
                 relative_path: Some(path.to_string()),
                 absolute_path: None,
                 point_index: None,
+                source_dataset: None,
+                source_type: None,
+                group_id: None,
+                sequence: None,
+                timestamp: None,
+                end_timestamp: None,
             }],
         }
     }
@@ -6861,7 +8333,14 @@ mod tests {
                 lat_e7: lat_e7(-80.0 + (index % 16_000) as f64 / 100.0),
                 lon_e7: lon_e7(-170.0 + (index % 34_000) as f64 / 100.0),
                 asset_id: index,
-                kind_flags: KIND_FLAG_GEO_POINT | KIND_FLAG_HAS_GEO,
+                kind_flags: KIND_CODE_GEO_POINT | KIND_FLAG_HAS_GEO,
+                source_code: LINE_SOURCE_UNKNOWN,
+                quality_flags: 0,
+                accuracy_meters: f32::NAN,
+                velocity_meters_per_second: f32::NAN,
+                heading_degrees: f32::NAN,
+                group_hash: 0,
+                sequence: -1,
             })
             .collect::<Vec<_>>();
 
@@ -7160,6 +8639,13 @@ mod tests {
         assert_eq!(parsed.points[0].index, 1);
         assert_eq!(parsed.points[0].latitude, 48.1370673);
         assert_eq!(parsed.points[0].longitude, 11.5775995);
+        assert_eq!(parsed.points[0].kind, "geo_point");
+        assert_eq!(
+            parsed.points[0].source_dataset.as_deref(),
+            Some("google_records")
+        );
+        assert_eq!(parsed.points[0].source_type.as_deref(), Some("CELL"));
+        assert_eq!(parsed.points[0].accuracy_meters, Some(540.0));
         assert_eq!(
             parsed.points[0].timestamp,
             DateTime::parse_from_rfc3339("2012-10-28T14:21:22.010Z")
@@ -7170,6 +8656,95 @@ mod tests {
         assert_eq!(parsed.points[2].timestamp, 1_351_434_205_077);
         assert_eq!(parsed.points[3].index, 5);
         assert_eq!(parsed.points[3].timestamp, 1_351_434_206_077);
+    }
+
+    #[test]
+    fn parses_google_timeline_semantic_json_items() {
+        let (items, skipped_points) = parse_google_timeline_location_items(
+            r#"
+            {
+              "semanticSegments": [{
+                "startTime": "2026-06-01T10:00:00.000+02:00",
+                "endTime": "2026-06-01T11:00:00.000+02:00",
+                "timelinePath": [{
+                  "point": "48.1370673°, 11.5775995°",
+                  "time": "2026-06-01T10:10:00.000+02:00"
+                }],
+                "visit": {
+                  "hierarchyLevel": 0,
+                  "probability": 0.9,
+                  "topCandidate": {
+                    "placeId": "place-1",
+                    "semanticType": "UNKNOWN",
+                    "probability": 0.8,
+                    "placeLocation": { "latLng": "48.1370673°, 11.5775995°" }
+                  }
+                },
+                "activity": {
+                  "distanceMeters": 1234,
+                  "start": { "latLng": "48.1370673°, 11.5775995°" },
+                  "end": { "latLng": "48.2°, 11.6°" },
+                  "topCandidate": { "type": "WALKING", "probability": 0.75 }
+                }
+              }],
+              "rawSignals": [{
+                "position": {
+                  "latitudeE7": 482000000,
+                  "longitudeE7": 116000000,
+                  "accuracy": 12,
+                  "altitude": 366,
+                  "verticalAccuracy": 2,
+                  "velocity": 3.5,
+                  "heading": 80,
+                  "source": "GPS",
+                  "timestamp": "2026-06-01T12:00:00.000+02:00"
+                }
+              }, {
+                "activityRecord": {
+                  "timestamp": "2026-06-01T12:05:00.000+02:00",
+                  "probableActivities": [{ "type": "STILL", "probability": 0.9 }]
+                }
+              }, {
+                "wifiScan": { "devicesRecords": [{ "mac": 1 }] }
+              }],
+              "userLocationProfile": {
+                "frequentPlaces": [{
+                  "placeId": "home",
+                  "label": "HOME",
+                  "placeLocation": { "latLng": "48.3°, 11.7°" }
+                }]
+              }
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(skipped_points, 0);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "geo_point",
+                "activity_sample",
+                "geo_point",
+                "timeline_visit",
+                "timeline_activity",
+                "frequent_place"
+            ]
+        );
+        assert_eq!(items[0].source_type.as_deref(), Some("GPS"));
+        assert_eq!(items[0].accuracy_meters, Some(12.0));
+        assert_eq!(items[0].altitude_meters, Some(366.0));
+        assert_eq!(items[0].vertical_accuracy_meters, Some(2.0));
+        assert_eq!(items[0].velocity_meters_per_second, Some(3.5));
+        assert_eq!(items[0].heading_degrees, Some(80.0));
+        assert_eq!(items[2].source_type.as_deref(), Some("timeline_path"));
+        assert_eq!(items[2].sequence, Some(0));
+        assert_eq!(items[3].source_type.as_deref(), Some("visit"));
+        assert_eq!(items[4].source_type.as_deref(), Some("activity"));
+        assert_eq!(items[5].source_type.as_deref(), Some("frequent_place"));
     }
 
     #[test]
@@ -7185,6 +8760,15 @@ mod tests {
             )
             .unwrap(),
             GeoFileFormat::Gpx
+        );
+
+        assert_eq!(
+            detect_geo_file_format(
+                Path::new("timeline.json"),
+                r#"{ "semanticSegments": [], "rawSignals": [] }"#
+            )
+            .unwrap(),
+            GeoFileFormat::GoogleTimelineJson
         );
 
         assert_eq!(

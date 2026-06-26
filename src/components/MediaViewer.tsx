@@ -8,6 +8,10 @@ import {
 import { useEffect, useMemo, useState } from 'react'
 import type { TranslationKey, TranslationValues } from '../i18n'
 import { formatDistance } from '../lib/distance'
+import {
+  importedMediaFacts,
+  locationTimelineFacts,
+} from '../lib/mediaMetadata'
 import { formatDateTime } from '../lib/time'
 import type { PlatformBackend } from '../platform/types'
 import type { EnrichedSearchResult, MediaItem, MediaLocation } from '../types'
@@ -56,6 +60,10 @@ function primaryLocation(item: MediaItem): MediaLocation | undefined {
       relativePath: item.relativePath,
     }
   )
+}
+
+function isCatalogOnlyItem(item: MediaItem): boolean {
+  return item.kind !== 'image' && item.kind !== 'video'
 }
 
 function locationPath(
@@ -137,7 +145,7 @@ export function MediaViewer({
       setActionError(undefined)
       setMediaUrl({ loading: true, source: 'none' })
 
-      if (item.kind === 'geo_point') {
+      if (isCatalogOnlyItem(item)) {
         setMediaUrl({ loading: false, source: 'none' })
         return
       }
@@ -204,6 +212,8 @@ export function MediaViewer({
   const dimensions = formatDimensions(item)
   const geo = formatGeo(item)
   const path = locationPath(location, item)
+  const importedFacts = importedMediaFacts(item, locale, t)
+  const locationFacts = locationTimelineFacts(location, locale, t)
 
   return (
     <div className="media-viewer" role="dialog" aria-modal="true">
@@ -254,13 +264,13 @@ export function MediaViewer({
             {!mediaUrl.loading && mediaUrl.url && item.kind === 'video' && (
               <video src={mediaUrl.url} controls />
             )}
-            {!mediaUrl.loading && item.kind === 'geo_point' && (
+            {!mediaUrl.loading && isCatalogOnlyItem(item) && (
               <div className="media-viewer-placeholder">
                 <MapPin size={34} />
-                <span>{t('geo_point')}</span>
+                <span>{t(item.kind)}</span>
               </div>
             )}
-            {!mediaUrl.loading && !mediaUrl.url && item.kind !== 'geo_point' && (
+            {!mediaUrl.loading && !mediaUrl.url && !isCatalogOnlyItem(item) && (
               <div className="media-viewer-placeholder">
                 {item.kind === 'video' ? 'VID' : 'IMG'}
               </div>
@@ -294,6 +304,12 @@ export function MediaViewer({
                   {formatDateTime(item.timestamp, locale, t('noTimestamp'))}
                 </dd>
               </div>
+              {typeof item.endTimestamp === 'number' && (
+                <div>
+                  <dt>{t('ended')}</dt>
+                  <dd>{formatDateTime(item.endTimestamp, locale)}</dd>
+                </div>
+              )}
               <div>
                 <dt>{t('kind')}</dt>
                 <dd>{t(item.kind)}</dd>
@@ -325,6 +341,27 @@ export function MediaViewer({
                 <dt>{t('path')}</dt>
                 <dd>{path}</dd>
               </div>
+              {importedFacts.map((fact) => (
+                <div key={`${fact.label}:${fact.value}`}>
+                  <dt>{fact.label}</dt>
+                  <dd>{fact.value}</dd>
+                </div>
+              ))}
+              {locationFacts
+                .filter(
+                  (fact) =>
+                    !importedFacts.some(
+                      (itemFact) =>
+                        itemFact.label === fact.label &&
+                        itemFact.value === fact.value,
+                    ),
+                )
+                .map((fact) => (
+                  <div key={`location:${fact.label}:${fact.value}`}>
+                    <dt>{fact.label}</dt>
+                    <dd>{fact.value}</dd>
+                  </div>
+                ))}
             </dl>
             {actionError && <p className="media-viewer-error">{actionError}</p>}
           </aside>
