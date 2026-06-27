@@ -588,6 +588,27 @@ describe('App pagination', () => {
     ).toBe(false)
   })
 
+  it('declines optional cookie choices', async () => {
+    const { default: App } = await import('./App')
+
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Decline all' }))
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('dialog', { name: 'Cookie settings' }),
+      ).toBeNull()
+      const stored = JSON.parse(
+        window.localStorage.getItem('geo-media-index-lab:cookie-consent') ??
+          '{}',
+      ) as { necessary?: boolean; analytics?: boolean; marketing?: boolean }
+      expect(stored.necessary).toBe(true)
+      expect(stored.analytics).toBe(false)
+      expect(stored.marketing).toBe(false)
+    })
+  })
+
   it('loads and renders the next catalog page when pagination changes', async () => {
     const { default: App } = await import('./App')
 

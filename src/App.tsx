@@ -787,6 +787,7 @@ type CookieConsentDialogProps = {
   preferences: CookieConsentPreferences
   t: (key: TranslationKey, values?: TranslationValues) => string
   onAcceptAll(): void
+  onDeclineAll(): void
   onPreferenceChange(
     category: OptionalCookieConsentCategory,
     enabled: boolean,
@@ -799,6 +800,7 @@ function CookieConsentDialog({
   preferences,
   t,
   onAcceptAll,
+  onDeclineAll,
   onPreferenceChange,
   onSave,
   onClose,
@@ -866,6 +868,9 @@ function CookieConsentDialog({
         <div className="cookie-consent-actions">
           <button type="button" onClick={onClose}>
             {t('notNow')}
+          </button>
+          <button type="button" onClick={onDeclineAll}>
+            {t('declineCookies')}
           </button>
           <button type="button" onClick={onSave}>
             {t('saveCookieSettings')}
@@ -1841,6 +1846,9 @@ function App() {
       marketing: true,
     })
   }, [saveCookieConsent])
+  const declineAllCookieConsent = useCallback(() => {
+    saveCookieConsent(DEFAULT_COOKIE_CONSENT_PREFERENCES)
+  }, [saveCookieConsent])
 
   useEffect(() => {
     traceStartup('[startup]', 'App mounted', {
@@ -2305,6 +2313,7 @@ function App() {
       t={t}
       onAcceptAll={acceptAllCookieConsent}
       onClose={closeCookieConsentDialog}
+      onDeclineAll={declineAllCookieConsent}
       onPreferenceChange={updateCookieConsentPreference}
       onSave={saveSelectedCookieConsent}
     />
@@ -2867,45 +2876,6 @@ function App() {
                   {combinedIndexButtonLabel(combinedIndexesStatus, t)}
                 </button>
               </div>
-              {geoIndexProgress && (
-                <div className="index-progress">
-                  <div className="index-progress-copy">
-                    <span>{geoIndexProgressLabel(geoIndexProgress, t)}</span>
-                    <strong>
-                      {geoIndexProgressDetail(geoIndexProgress, t, locale)}
-                    </strong>
-                  </div>
-                  <div
-                    className={`progress-track ${
-                      geoIndexProgress.phase === 'loading' ? 'indeterminate' : ''
-                    }`}
-                    role="progressbar"
-                    aria-label={geoIndexProgressLabel(geoIndexProgress, t)}
-                    aria-valuemax={100}
-                    aria-valuemin={0}
-                    aria-valuenow={
-                      geoIndexProgress.phase === 'loading'
-                        ? undefined
-                        : geoIndexProgressPercent(geoIndexProgress)
-                    }
-                    aria-valuetext={geoIndexProgressDetail(
-                      geoIndexProgress,
-                      t,
-                      locale,
-                    )}
-                  >
-                    <div
-                      className="progress-fill"
-                      style={{
-                        width:
-                          geoIndexProgressPercent(geoIndexProgress) === undefined
-                            ? undefined
-                            : `${geoIndexProgressPercent(geoIndexProgress)}%`,
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
               <dl className="index-status-grid">
                 <div data-index-id="file-time-geo">
                   <dt>{t('timeFirstIndex')}</dt>

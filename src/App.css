@@ -967,37 +967,6 @@
   color: #9c2f24;
 }
 
-.index-progress {
-  min-width: 0;
-  display: grid;
-  gap: 6px;
-}
-
-.index-progress-copy {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-
-.index-progress-copy span,
-.index-progress-copy strong {
-  min-width: 0;
-  font-size: 12px;
-  line-height: 1.25;
-  overflow-wrap: break-word;
-  word-break: normal;
-}
-
-.index-progress-copy span {
-  color: #17221e;
-  font-weight: 680;
-}
-
-.index-progress-copy strong {
-  color: #0d6f5d;
-  font-weight: 760;
-}
-
 .index-status-grid {
   margin: 0;
   display: grid;
