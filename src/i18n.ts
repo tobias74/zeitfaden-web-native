@@ -39,13 +39,16 @@ const en = {
   clearCatalogConfirm:
     'Clear the catalog? This removes indexed items and generated thumbnails from this app. Original files stay on disk.',
   clearSearch: 'Clear search',
-  acceptCookies: 'Accept',
+  acceptCookies: 'Accept all',
+  analyticsCookies: 'Analytics cookies',
+  analyticsCookiesDescription:
+    'Allow usage measurement that helps understand and improve the app.',
   closeViewer: 'Close viewer',
   closeCookieSettings: 'Close cookie settings',
   cookieConsentDescription:
-    'Zeitfaden stores necessary local preferences on this device, such as language, layout, and catalog options.',
+    'We use necessary cookies to keep the app working and remember local preferences.',
   cookieConsentDetail:
-    'No analytics or advertising cookies are set. You can reopen this dialog from the app bar at any time.',
+    'You can choose optional cookie categories below and change these settings from the app bar at any time.',
   cookieConsentTitle: 'Cookie settings',
   cookies: 'Cookies',
   countingFilesIn: 'Preparing import from {sourceLabel}',
@@ -174,6 +177,9 @@ const en = {
   medium: 'Medium',
   mediaSourceOriginal: 'original',
   mediaSourceThumbnail: 'thumbnail',
+  marketingCookies: 'Marketing cookies',
+  marketingCookiesDescription:
+    'Allow cookies for campaign attribution or personalized outreach.',
   metadataNoGps: 'no GPS',
   metadataCatalog: 'catalog',
   placeId: 'Place id',
@@ -223,6 +229,7 @@ const en = {
   rescanFolders: 'Rescan folders',
   savingMediaFiles: 'Saving {count} items',
   scanningSource: 'Scanning {sourceLabel}',
+  saveCookieSettings: 'Save settings',
   searchMap: 'Search map',
   settings: 'Settings',
   showDebugData: 'Show debug data',
@@ -286,12 +293,15 @@ const de: Record<TranslationKey, string> = {
     'Katalog leeren? Dadurch werden indizierte Elemente, Quellen und generierte Vorschaubilder aus dieser App entfent. Originaldateien bleiben auf der Festplatte.',
   clearSearch: 'Suche löschen',
   closeViewer: 'Viewer schließen',
-  acceptCookies: 'Akzeptieren',
+  acceptCookies: 'Alle akzeptieren',
+  analyticsCookies: 'Analyse-Cookies',
+  analyticsCookiesDescription:
+    'Erlaubt Nutzungsmessung, um die App zu verstehen und zu verbessern.',
   closeCookieSettings: 'Cookie-Einstellungen schliessen',
   cookieConsentDescription:
-    'Zeitfaden speichert notwendige lokale Einstellungen auf diesem Geraet, zum Beispiel Sprache, Layout und Katalogoptionen.',
+    'Wir verwenden notwendige Cookies, damit die App funktioniert und lokale Einstellungen gespeichert bleiben.',
   cookieConsentDetail:
-    'Es werden keine Analyse- oder Werbe-Cookies gesetzt. Du kannst diese Einstellung jederzeit ueber die App-Leiste erneut oeffnen.',
+    'Optionale Cookie-Kategorien kannst du unten auswaehlen und jederzeit ueber die App-Leiste aendern.',
   cookieConsentTitle: 'Cookie-Einstellungen',
   cookies: 'Cookies',
   countingFilesIn: 'Import aus {sourceLabel} wird vorbereitet',
@@ -417,6 +427,9 @@ const de: Record<TranslationKey, string> = {
   medium: 'Mittel',
   mediaSourceOriginal: 'Original',
   mediaSourceThumbnail: 'Vorschaubild',
+  marketingCookies: 'Marketing-Cookies',
+  marketingCookiesDescription:
+    'Erlaubt Cookies fuer Kampagnenzuordnung oder personalisierte Ansprache.',
   metadataNoGps: 'kein GPS',
   metadataCatalog: 'Katalog',
   placeId: 'Place-ID',
@@ -466,6 +479,7 @@ const de: Record<TranslationKey, string> = {
   roundTrip: 'Roundtrip',
   savingMediaFiles: '{count} Elemente werden gespeichert',
   scanningSource: '{sourceLabel} wird gescannt',
+  saveCookieSettings: 'Einstellungen speichern',
   searchMap: 'Suchkarte',
   settings: 'Einstellungen',
   showDebugData: 'Debug-Daten anzeigen',

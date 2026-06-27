@@ -115,6 +115,15 @@ type LineBreakState = {
   breakSpeedKmh?: number
   maxSegmentDistanceKm?: number
 }
+type CookieConsentPreferences = {
+  necessary: true
+  analytics: boolean
+  marketing: boolean
+}
+type OptionalCookieConsentCategory = Exclude<
+  keyof CookieConsentPreferences,
+  'necessary'
+>
 const LEFT_WIDTH_KEY = 'geo-media-index-lab:left-width'
 const MAP_HEIGHT_KEY = 'geo-media-index-lab:map-height'
 const RESULT_DISPLAY_MODE_KEY = 'geo-media-index-lab:result-display-mode'
@@ -173,6 +182,11 @@ const MAX_LEFT_WIDTH = 760
 const MIN_RESULTS_WIDTH = 480
 const MIN_MAP_HEIGHT = 240
 const MIN_CONTROL_HEIGHT = 260
+const DEFAULT_COOKIE_CONSENT_PREFERENCES: CookieConsentPreferences = {
+  necessary: true,
+  analytics: false,
+  marketing: false,
+}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
@@ -343,6 +357,38 @@ function storedBoolean(key: string, fallback: boolean): boolean {
 function storedLanguage(): Language {
   const stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY)
   return isLanguage(stored) ? stored : 'en'
+}
+
+function storedCookieConsentPreferences():
+  | CookieConsentPreferences
+  | undefined {
+  const stored = window.localStorage.getItem(COOKIE_CONSENT_STORAGE_KEY)
+  if (stored === null) return undefined
+  if (stored === 'accepted') {
+    return DEFAULT_COOKIE_CONSENT_PREFERENCES
+  }
+
+  try {
+    const parsed = JSON.parse(stored) as Partial<CookieConsentPreferences>
+    return {
+      necessary: true,
+      analytics: parsed.analytics === true,
+      marketing: parsed.marketing === true,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function serializeCookieConsentPreferences(
+  preferences: CookieConsentPreferences,
+): string {
+  return JSON.stringify({
+    version: 1,
+    necessary: true,
+    analytics: preferences.analytics,
+    marketing: preferences.marketing,
+  })
 }
 
 function filterValueToKind(value: string): KindFilter {
@@ -664,14 +710,23 @@ function ResultSkeletons({
 }
 
 type CookieConsentDialogProps = {
+  preferences: CookieConsentPreferences
   t: (key: TranslationKey, values?: TranslationValues) => string
-  onAccept(): void
+  onAcceptAll(): void
+  onPreferenceChange(
+    category: OptionalCookieConsentCategory,
+    enabled: boolean,
+  ): void
+  onSave(): void
   onClose(): void
 }
 
 function CookieConsentDialog({
+  preferences,
   t,
-  onAccept,
+  onAcceptAll,
+  onPreferenceChange,
+  onSave,
   onClose,
 }: CookieConsentDialogProps) {
   return (
@@ -706,15 +761,46 @@ function CookieConsentDialog({
           </p>
           <p id="cookie-consent-detail">{t('cookieConsentDetail')}</p>
         </div>
+        <div className="cookie-consent-options">
+          <label className="cookie-consent-option">
+            <input
+              type="checkbox"
+              checked={preferences.analytics}
+              onChange={(event) =>
+                onPreferenceChange('analytics', event.target.checked)
+              }
+            />
+            <span className="cookie-consent-option-copy">
+              <strong>{t('analyticsCookies')}</strong>
+              <span>{t('analyticsCookiesDescription')}</span>
+            </span>
+          </label>
+          <label className="cookie-consent-option">
+            <input
+              type="checkbox"
+              checked={preferences.marketing}
+              onChange={(event) =>
+                onPreferenceChange('marketing', event.target.checked)
+              }
+            />
+            <span className="cookie-consent-option-copy">
+              <strong>{t('marketingCookies')}</strong>
+              <span>{t('marketingCookiesDescription')}</span>
+            </span>
+          </label>
+        </div>
         <div className="cookie-consent-actions">
           <button type="button" onClick={onClose}>
             {t('notNow')}
+          </button>
+          <button type="button" onClick={onSave}>
+            {t('saveCookieSettings')}
           </button>
           <button
             type="button"
             className="cookie-consent-primary"
             autoFocus
-            onClick={onAccept}
+            onClick={onAcceptAll}
           >
             {t('acceptCookies')}
           </button>
@@ -982,8 +1068,14 @@ function App() {
   const catalog = platform.catalog
   const [language, setLanguage] = useState<Language>(() => storedLanguage())
   const [activePage, setActivePage] = useState<ActivePage>('app')
+  const [cookieConsentPreferences, setCookieConsentPreferences] =
+    useState<CookieConsentPreferences>(
+      () =>
+        storedCookieConsentPreferences() ??
+        DEFAULT_COOKIE_CONSENT_PREFERENCES,
+    )
   const [cookieConsentDialogOpen, setCookieConsentDialogOpen] = useState(
-    () => window.localStorage.getItem(COOKIE_CONSENT_STORAGE_KEY) !== 'accepted',
+    () => storedCookieConsentPreferences() === undefined,
   )
   const locale = languageLocale(language)
   const t = useCallback(
@@ -1642,10 +1734,39 @@ function App() {
   const closeCookieConsentDialog = useCallback(() => {
     setCookieConsentDialogOpen(false)
   }, [])
-  const acceptCookieConsent = useCallback(() => {
-    window.localStorage.setItem(COOKIE_CONSENT_STORAGE_KEY, 'accepted')
+  const updateCookieConsentPreference = useCallback((
+    category: OptionalCookieConsentCategory,
+    enabled: boolean,
+  ) => {
+    setCookieConsentPreferences((current) => ({
+      ...current,
+      [category]: enabled,
+    }))
+  }, [])
+  const saveCookieConsent = useCallback((
+    preferences: CookieConsentPreferences,
+  ) => {
+    const nextPreferences = {
+      ...preferences,
+      necessary: true,
+    } satisfies CookieConsentPreferences
+    setCookieConsentPreferences(nextPreferences)
+    window.localStorage.setItem(
+      COOKIE_CONSENT_STORAGE_KEY,
+      serializeCookieConsentPreferences(nextPreferences),
+    )
     setCookieConsentDialogOpen(false)
   }, [])
+  const saveSelectedCookieConsent = useCallback(() => {
+    saveCookieConsent(cookieConsentPreferences)
+  }, [cookieConsentPreferences, saveCookieConsent])
+  const acceptAllCookieConsent = useCallback(() => {
+    saveCookieConsent({
+      necessary: true,
+      analytics: true,
+      marketing: true,
+    })
+  }, [saveCookieConsent])
 
   useEffect(() => {
     traceStartup('[startup]', 'App mounted', {
@@ -2106,9 +2227,12 @@ function App() {
   const privacyHtml = language === 'de' ? privacyDeHtml : privacyEnHtml
   const cookieConsentDialog = cookieConsentDialogOpen ? (
     <CookieConsentDialog
+      preferences={cookieConsentPreferences}
       t={t}
-      onAccept={acceptCookieConsent}
+      onAcceptAll={acceptAllCookieConsent}
       onClose={closeCookieConsentDialog}
+      onPreferenceChange={updateCookieConsentPreference}
+      onSave={saveSelectedCookieConsent}
     />
   ) : null
 

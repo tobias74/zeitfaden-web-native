@@ -515,7 +515,7 @@ describe('App pagination', () => {
     vi.restoreAllMocks()
   })
 
-  it('stores cookie consent and reopens the dialog from the top bar', async () => {
+  it('stores cookie consent preferences and reopens the dialog from the top bar', async () => {
     const { default: App } = await import('./App')
 
     render(<App />)
@@ -523,15 +523,30 @@ describe('App pagination', () => {
     expect(
       screen.getByRole('dialog', { name: 'Cookie settings' }),
     ).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+    const analyticsCookies = screen.getByRole('checkbox', {
+      name: /Analytics cookies/,
+    }) as HTMLInputElement
+    const marketingCookies = screen.getByRole('checkbox', {
+      name: /Marketing cookies/,
+    }) as HTMLInputElement
+    expect(screen.getByText(/We use necessary cookies/)).toBeTruthy()
+    expect(analyticsCookies.checked).toBe(false)
+    expect(marketingCookies.checked).toBe(false)
+
+    fireEvent.click(analyticsCookies)
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
 
     await waitFor(() => {
       expect(
         screen.queryByRole('dialog', { name: 'Cookie settings' }),
       ).toBeNull()
-      expect(
-        window.localStorage.getItem('geo-media-index-lab:cookie-consent'),
-      ).toBe('accepted')
+      const stored = JSON.parse(
+        window.localStorage.getItem('geo-media-index-lab:cookie-consent') ??
+          '{}',
+      ) as { necessary?: boolean; analytics?: boolean; marketing?: boolean }
+      expect(stored.necessary).toBe(true)
+      expect(stored.analytics).toBe(true)
+      expect(stored.marketing).toBe(false)
     })
 
     fireEvent.click(screen.getByRole('button', { name: 'Cookies' }))
@@ -539,6 +554,38 @@ describe('App pagination', () => {
     expect(
       screen.getByRole('dialog', { name: 'Cookie settings' }),
     ).toBeTruthy()
+    expect(
+      (
+        screen.getByRole('checkbox', {
+          name: /Analytics cookies/,
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(true)
+  })
+
+  it('does not prefill optional cookie choices for legacy consent', async () => {
+    window.localStorage.setItem('geo-media-index-lab:cookie-consent', 'accepted')
+    const { default: App } = await import('./App')
+
+    render(<App />)
+
+    expect(screen.queryByRole('dialog', { name: 'Cookie settings' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Cookies' }))
+
+    expect(
+      (
+        screen.getByRole('checkbox', {
+          name: /Analytics cookies/,
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(false)
+    expect(
+      (
+        screen.getByRole('checkbox', {
+          name: /Marketing cookies/,
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(false)
   })
 
   it('loads and renders the next catalog page when pagination changes', async () => {
