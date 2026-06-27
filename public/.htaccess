@@ -1,6 +1,10 @@
 RewriteEngine On
 RewriteBase /
 
+# Redirect HTTP requests to HTTPS
+RewriteCond %{HTTPS} !=on
+RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
 # If the requested file or directory does not exist, serve index.html
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
