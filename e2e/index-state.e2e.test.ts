@@ -257,6 +257,7 @@ describeE2E('index state and query result e2e', () => {
     })
     await context.addInitScript(() => {
       window.localStorage.setItem('geo-media-index-lab:language', 'en')
+      window.localStorage.setItem('geo-media-index-lab:cookie-consent', 'accepted')
       window.localStorage.setItem('geo-media-index-lab:result-page-size', '100')
       window.localStorage.setItem('geo-media-index-lab:result-display-mode', 'cards')
     })

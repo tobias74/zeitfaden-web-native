@@ -39,7 +39,15 @@ const en = {
   clearCatalogConfirm:
     'Clear the catalog? This removes indexed items and generated thumbnails from this app. Original files stay on disk.',
   clearSearch: 'Clear search',
+  acceptCookies: 'Accept',
   closeViewer: 'Close viewer',
+  closeCookieSettings: 'Close cookie settings',
+  cookieConsentDescription:
+    'Zeitfaden stores necessary local preferences on this device, such as language, layout, and catalog options.',
+  cookieConsentDetail:
+    'No analytics or advertising cookies are set. You can reopen this dialog from the app bar at any time.',
+  cookieConsentTitle: 'Cookie settings',
+  cookies: 'Cookies',
   countingFilesIn: 'Preparing import from {sourceLabel}',
   captured: 'Captured',
   display: 'Display',
@@ -182,6 +190,7 @@ const en = {
   nodes: 'Nodes',
   none: 'None',
   noTimestamp: 'No timestamp',
+  notNow: 'Not now',
   oldestFirst: 'Oldest first',
   page: 'Page',
   path: 'Path',
@@ -277,6 +286,14 @@ const de: Record<TranslationKey, string> = {
     'Katalog leeren? Dadurch werden indizierte Elemente, Quellen und generierte Vorschaubilder aus dieser App entfent. Originaldateien bleiben auf der Festplatte.',
   clearSearch: 'Suche löschen',
   closeViewer: 'Viewer schließen',
+  acceptCookies: 'Akzeptieren',
+  closeCookieSettings: 'Cookie-Einstellungen schliessen',
+  cookieConsentDescription:
+    'Zeitfaden speichert notwendige lokale Einstellungen auf diesem Geraet, zum Beispiel Sprache, Layout und Katalogoptionen.',
+  cookieConsentDetail:
+    'Es werden keine Analyse- oder Werbe-Cookies gesetzt. Du kannst diese Einstellung jederzeit ueber die App-Leiste erneut oeffnen.',
+  cookieConsentTitle: 'Cookie-Einstellungen',
+  cookies: 'Cookies',
   countingFilesIn: 'Import aus {sourceLabel} wird vorbereitet',
   captured: 'Aufgenommen',
   display: 'Ansicht',
@@ -416,6 +433,7 @@ const de: Record<TranslationKey, string> = {
   nodes: 'Knoten',
   none: 'Keine',
   noTimestamp: 'Kein Zeitstempel',
+  notNow: 'Nicht jetzt',
   oldestFirst: 'Älteste zuerst',
   page: 'Seite',
   path: 'Pfad',

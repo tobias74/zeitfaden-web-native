@@ -121,6 +121,7 @@ const RESULT_DISPLAY_MODE_KEY = 'geo-media-index-lab:result-display-mode'
 const RESULT_THUMBNAIL_SIZE_KEY = 'geo-media-index-lab:result-thumbnail-size'
 const RESULT_METADATA_KEY = 'geo-media-index-lab:result-metadata'
 const DEBUG_DATA_KEY = 'geo-media-index-lab:debug-data'
+const COOKIE_CONSENT_STORAGE_KEY = 'geo-media-index-lab:cookie-consent'
 const RESULT_PAGE_SIZE_KEY = 'geo-media-index-lab:result-page-size'
 const MAP_DISPLAY_MODE_KEY = 'geo-media-index-lab:map-display-mode'
 const MAP_BUBBLE_CELL_SIZE_KEY = 'geo-media-index-lab:map-bubble-cell-size'
@@ -662,6 +663,67 @@ function ResultSkeletons({
   ))
 }
 
+type CookieConsentDialogProps = {
+  t: (key: TranslationKey, values?: TranslationValues) => string
+  onAccept(): void
+  onClose(): void
+}
+
+function CookieConsentDialog({
+  t,
+  onAccept,
+  onClose,
+}: CookieConsentDialogProps) {
+  return (
+    <div className="cookie-consent">
+      <div
+        aria-hidden="true"
+        className="cookie-consent-backdrop"
+        onClick={onClose}
+      />
+      <section
+        aria-describedby="cookie-consent-description cookie-consent-detail"
+        aria-labelledby="cookie-consent-title"
+        aria-modal="true"
+        className="cookie-consent-panel"
+        role="dialog"
+      >
+        <header className="cookie-consent-header">
+          <h2 id="cookie-consent-title">{t('cookieConsentTitle')}</h2>
+          <button
+            type="button"
+            className="cookie-consent-close"
+            aria-label={t('closeCookieSettings')}
+            title={t('closeCookieSettings')}
+            onClick={onClose}
+          >
+            <X size={17} />
+          </button>
+        </header>
+        <div className="cookie-consent-copy">
+          <p id="cookie-consent-description">
+            {t('cookieConsentDescription')}
+          </p>
+          <p id="cookie-consent-detail">{t('cookieConsentDetail')}</p>
+        </div>
+        <div className="cookie-consent-actions">
+          <button type="button" onClick={onClose}>
+            {t('notNow')}
+          </button>
+          <button
+            type="button"
+            className="cookie-consent-primary"
+            autoFocus
+            onClick={onAccept}
+          >
+            {t('acceptCookies')}
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 type LineBreakControlsProps = {
   breakSpeedKmh?: number
   maxSegmentDistanceKm?: number
@@ -920,6 +982,9 @@ function App() {
   const catalog = platform.catalog
   const [language, setLanguage] = useState<Language>(() => storedLanguage())
   const [activePage, setActivePage] = useState<ActivePage>('app')
+  const [cookieConsentDialogOpen, setCookieConsentDialogOpen] = useState(
+    () => window.localStorage.getItem(COOKIE_CONSENT_STORAGE_KEY) !== 'accepted',
+  )
   const locale = languageLocale(language)
   const t = useCallback(
     (key: TranslationKey, values?: TranslationValues) =>
@@ -1571,6 +1636,16 @@ function App() {
     setLanguage(value)
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, value)
   }, [])
+  const openCookieConsentDialog = useCallback(() => {
+    setCookieConsentDialogOpen(true)
+  }, [])
+  const closeCookieConsentDialog = useCallback(() => {
+    setCookieConsentDialogOpen(false)
+  }, [])
+  const acceptCookieConsent = useCallback(() => {
+    window.localStorage.setItem(COOKIE_CONSENT_STORAGE_KEY, 'accepted')
+    setCookieConsentDialogOpen(false)
+  }, [])
 
   useEffect(() => {
     traceStartup('[startup]', 'App mounted', {
@@ -1595,6 +1670,20 @@ function App() {
     window.addEventListener('keydown', closeMenusOnEscape)
     return () => window.removeEventListener('keydown', closeMenusOnEscape)
   }, [])
+
+  useEffect(() => {
+    if (!cookieConsentDialogOpen) return
+
+    function closeCookieConsentOnEscape(event: globalThis.KeyboardEvent) {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      closeCookieConsentDialog()
+    }
+
+    window.addEventListener('keydown', closeCookieConsentOnEscape)
+    return () =>
+      window.removeEventListener('keydown', closeCookieConsentOnEscape)
+  }, [closeCookieConsentDialog, cookieConsentDialogOpen])
 
   useEffect(() => {
     function closeMenusOnOutsidePointer(event: globalThis.PointerEvent) {
@@ -2015,6 +2104,13 @@ function App() {
   )
 
   const privacyHtml = language === 'de' ? privacyDeHtml : privacyEnHtml
+  const cookieConsentDialog = cookieConsentDialogOpen ? (
+    <CookieConsentDialog
+      t={t}
+      onAccept={acceptCookieConsent}
+      onClose={closeCookieConsentDialog}
+    />
+  ) : null
 
   if (activePage !== 'app') {
     return (
@@ -2051,6 +2147,13 @@ function App() {
                 onClick={() => setActivePage('privacy')}
               >
                 {t('privacy')}
+              </button>
+              <button
+                type="button"
+                className="topbar-link"
+                onClick={openCookieConsentDialog}
+              >
+                {t('cookies')}
               </button>
             </nav>
             <div className="topbar-actions">
@@ -2096,6 +2199,7 @@ function App() {
             />
           )}
         </section>
+        {cookieConsentDialog}
       </main>
     )
   }
@@ -2132,6 +2236,13 @@ function App() {
               onClick={() => setActivePage('privacy')}
             >
               {t('privacy')}
+            </button>
+            <button
+              type="button"
+              className="topbar-link"
+              onClick={openCookieConsentDialog}
+            >
+              {t('cookies')}
             </button>
           </nav>
           <div className="topbar-actions">
@@ -3352,6 +3463,7 @@ function App() {
         />
       )}
       </section>
+      {cookieConsentDialog}
     </main>
   )
 }

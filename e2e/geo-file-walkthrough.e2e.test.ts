@@ -83,6 +83,7 @@ async function expectNoUiError(page: Page): Promise<void> {
 function installSampleGeoFile(pageContext: BrowserContext): Promise<void> {
   return pageContext.addInitScript(() => {
     window.localStorage.setItem('geo-media-index-lab:language', 'en')
+    window.localStorage.setItem('geo-media-index-lab:cookie-consent', 'accepted')
     window.localStorage.setItem('geo-media-index-lab:result-page-size', '50')
     window.localStorage.setItem('geo-media-index-lab:result-display-mode', 'cards')
     window.__ZEITFADEN_E2E_GEO_FILE__ = () =>

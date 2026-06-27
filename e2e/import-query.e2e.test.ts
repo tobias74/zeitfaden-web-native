@@ -222,6 +222,7 @@ function installGeneratedGeoFile(pageContext: BrowserContext): Promise<void> {
   return pageContext.addInitScript(
     ({ pointCount }) => {
       window.localStorage.setItem('geo-media-index-lab:language', 'en')
+      window.localStorage.setItem('geo-media-index-lab:cookie-consent', 'accepted')
       window.localStorage.setItem('geo-media-index-lab:result-page-size', '100')
       window.localStorage.setItem('geo-media-index-lab:result-display-mode', 'cards')
       window.__ZEITFADEN_E2E_GEO_FILE__ = () => {

@@ -515,6 +515,32 @@ describe('App pagination', () => {
     vi.restoreAllMocks()
   })
 
+  it('stores cookie consent and reopens the dialog from the top bar', async () => {
+    const { default: App } = await import('./App')
+
+    render(<App />)
+
+    expect(
+      screen.getByRole('dialog', { name: 'Cookie settings' }),
+    ).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('dialog', { name: 'Cookie settings' }),
+      ).toBeNull()
+      expect(
+        window.localStorage.getItem('geo-media-index-lab:cookie-consent'),
+      ).toBe('accepted')
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cookies' }))
+
+    expect(
+      screen.getByRole('dialog', { name: 'Cookie settings' }),
+    ).toBeTruthy()
+  })
+
   it('loads and renders the next catalog page when pagination changes', async () => {
     const { default: App } = await import('./App')
 
