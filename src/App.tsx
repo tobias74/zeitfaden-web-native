@@ -1582,6 +1582,177 @@ function App() {
     lineMaxSegmentDistanceFromOptionIndex(
       lineBreakSliderIndices.maxSegmentDistanceIndex,
     )
+  const mapSettingsControls = (
+    <div className="map-settings-grid">
+      <div className="display-section">
+        <label className="settings-select-row">
+          {t('mapBubbleDensity')}
+          <select
+            value={mapBubbleCellSize}
+            onChange={(event) =>
+              setMapBubbleCellSize(Number(event.target.value))
+            }
+          >
+            {MAP_BUBBLE_CELL_SIZE_OPTIONS.map((cellSize) => (
+              <option key={cellSize} value={cellSize}>
+                {cellSize === 48
+                  ? t('mapBubbleDensityCompact')
+                  : cellSize === 64
+                    ? t('mapBubbleDensityBalanced')
+                    : t('mapBubbleDensitySpacious')}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="settings-hint">{t('mapBubbleDensityHint')}</p>
+      </div>
+      <div className="display-section">
+        <label className="settings-select-row">
+          {t('mapBubbleSize')}
+          <select
+            value={mapBubbleScale}
+            onChange={(event) =>
+              setMapBubbleScale(Number(event.target.value))
+            }
+          >
+            {MAP_BUBBLE_SCALE_OPTIONS.map((scale) => (
+              <option key={scale} value={scale}>
+                {scale === 0.75
+                  ? t('small')
+                  : scale === 1
+                    ? t('medium')
+                    : t('large')}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="settings-hint">{t('mapBubbleSizeHint')}</p>
+      </div>
+      <div className="display-section">
+        <label className="settings-select-row">
+          {t('mapMaxBubbles')}
+          <select
+            value={mapMaxBubbles}
+            onChange={(event) =>
+              setMapMaxBubbles(Number(event.target.value))
+            }
+          >
+            {MAP_MAX_BUBBLES_OPTIONS.map((value) => (
+              <option key={value} value={value}>
+                {value.toLocaleString(locale)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="settings-hint">{t('mapMaxBubblesHint')}</p>
+      </div>
+      <div className="display-section">
+        <label className="settings-select-row">
+          {t('mapRenderBatchSize')}
+          <select
+            value={mapRenderBatchSize}
+            onChange={(event) =>
+              setMapRenderBatchSize(Number(event.target.value))
+            }
+          >
+            {MAP_RENDER_BATCH_SIZE_OPTIONS.map((batchSize) => (
+              <option key={batchSize} value={batchSize}>
+                {batchSize.toLocaleString(locale)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="settings-hint">
+          {t('mapRenderBatchSizeHint')}
+        </p>
+      </div>
+      <div className="display-section map-line-break-section">
+        <span>{t('linePathBreaks')}</span>
+        <label className="settings-slider-row">
+          <span>
+            {t('lineBreakSpeed')}
+            <strong>
+              {draftLineBreakSpeed === undefined
+                ? t('off')
+                : `${draftLineBreakSpeed.toLocaleString(locale)} km/h`}
+            </strong>
+          </span>
+          <input
+            aria-label={t('lineBreakSpeed')}
+            aria-valuetext={
+              draftLineBreakSpeed === undefined
+                ? t('off')
+                : `${draftLineBreakSpeed.toLocaleString(locale)} km/h`
+            }
+            type="range"
+            min={0}
+            max={LINE_BREAK_SPEED_OPTIONS.length - 1}
+            step={1}
+            value={lineBreakSliderIndices.breakSpeedIndex}
+            onChange={(event) =>
+              setLineBreakSpeedDraft(Number(event.target.value))
+            }
+            onPointerUp={(event) =>
+              commitLineBreakSpeed(Number(event.currentTarget.value))
+            }
+            onKeyUp={(event) =>
+              commitLineBreakSpeed(Number(event.currentTarget.value))
+            }
+            onBlur={(event) =>
+              commitLineBreakSpeed(Number(event.currentTarget.value))
+            }
+          />
+        </label>
+        <label className="settings-slider-row">
+          <span>
+            {t('lineMaxSegmentDistance')}
+            <strong>
+              {draftLineMaxSegmentDistance === undefined
+                ? t('off')
+                : formatDistanceThresholdKm(
+                    draftLineMaxSegmentDistance,
+                    locale,
+                  )}
+            </strong>
+          </span>
+          <input
+            aria-label={t('lineMaxSegmentDistance')}
+            aria-valuetext={
+              draftLineMaxSegmentDistance === undefined
+                ? t('off')
+                : formatDistanceThresholdKm(
+                    draftLineMaxSegmentDistance,
+                    locale,
+                  )
+            }
+            type="range"
+            min={0}
+            max={LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1}
+            step={1}
+            value={lineBreakSliderIndices.maxSegmentDistanceIndex}
+            onChange={(event) =>
+              setLineMaxSegmentDistanceDraft(Number(event.target.value))
+            }
+            onPointerUp={(event) =>
+              commitLineMaxSegmentDistance(
+                Number(event.currentTarget.value),
+              )
+            }
+            onKeyUp={(event) =>
+              commitLineMaxSegmentDistance(
+                Number(event.currentTarget.value),
+              )
+            }
+            onBlur={(event) =>
+              commitLineMaxSegmentDistance(
+                Number(event.currentTarget.value),
+              )
+            }
+          />
+        </label>
+      </div>
+    </div>
+  )
 
   const resizeStyle = {
     '--left-width': `${leftWidth}px`,
@@ -1876,173 +2047,6 @@ function App() {
               </summary>
               <div className="display-popover settings-popover">
                 <div className="display-section">
-                  <label className="settings-select-row">
-                    {t('mapBubbleDensity')}
-                    <select
-                      value={mapBubbleCellSize}
-                      onChange={(event) =>
-                        setMapBubbleCellSize(Number(event.target.value))
-                      }
-                    >
-                      {MAP_BUBBLE_CELL_SIZE_OPTIONS.map((cellSize) => (
-                        <option key={cellSize} value={cellSize}>
-                          {cellSize === 48
-                            ? t('mapBubbleDensityCompact')
-                            : cellSize === 64
-                              ? t('mapBubbleDensityBalanced')
-                              : t('mapBubbleDensitySpacious')}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <p className="settings-hint">{t('mapBubbleDensityHint')}</p>
-                </div>
-                <div className="display-section">
-                  <label className="settings-select-row">
-                    {t('mapBubbleSize')}
-                    <select
-                      value={mapBubbleScale}
-                      onChange={(event) =>
-                        setMapBubbleScale(Number(event.target.value))
-                      }
-                    >
-                      {MAP_BUBBLE_SCALE_OPTIONS.map((scale) => (
-                        <option key={scale} value={scale}>
-                          {scale === 0.75
-                            ? t('small')
-                            : scale === 1
-                              ? t('medium')
-                              : t('large')}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <p className="settings-hint">{t('mapBubbleSizeHint')}</p>
-                </div>
-                <div className="display-section">
-                  <label className="settings-select-row">
-                    {t('mapMaxBubbles')}
-                    <select
-                      value={mapMaxBubbles}
-                      onChange={(event) =>
-                        setMapMaxBubbles(Number(event.target.value))
-                      }
-                    >
-                      {MAP_MAX_BUBBLES_OPTIONS.map((value) => (
-                        <option key={value} value={value}>
-                          {value.toLocaleString(locale)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <p className="settings-hint">{t('mapMaxBubblesHint')}</p>
-                </div>
-                <div className="display-section">
-                  <label className="settings-select-row">
-                    {t('mapRenderBatchSize')}
-                    <select
-                      value={mapRenderBatchSize}
-                      onChange={(event) =>
-                        setMapRenderBatchSize(Number(event.target.value))
-                      }
-                    >
-                      {MAP_RENDER_BATCH_SIZE_OPTIONS.map((batchSize) => (
-                        <option key={batchSize} value={batchSize}>
-                          {batchSize.toLocaleString(locale)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <p className="settings-hint">
-                    {t('mapRenderBatchSizeHint')}
-                  </p>
-                </div>
-                <div className="display-section">
-                  <span>{t('linePathBreaks')}</span>
-                  <label className="settings-slider-row">
-                    <span>
-                      {t('lineBreakSpeed')}
-                      <strong>
-                        {draftLineBreakSpeed === undefined
-                          ? t('off')
-                          : `${draftLineBreakSpeed.toLocaleString(locale)} km/h`}
-                      </strong>
-                    </span>
-                    <input
-                      aria-label={t('lineBreakSpeed')}
-                      aria-valuetext={
-                        draftLineBreakSpeed === undefined
-                          ? t('off')
-                          : `${draftLineBreakSpeed.toLocaleString(locale)} km/h`
-                      }
-                      type="range"
-                      min={0}
-                      max={LINE_BREAK_SPEED_OPTIONS.length - 1}
-                      step={1}
-                      value={lineBreakSliderIndices.breakSpeedIndex}
-                      onChange={(event) =>
-                        setLineBreakSpeedDraft(Number(event.target.value))
-                      }
-                      onPointerUp={(event) =>
-                        commitLineBreakSpeed(Number(event.currentTarget.value))
-                      }
-                      onKeyUp={(event) =>
-                        commitLineBreakSpeed(Number(event.currentTarget.value))
-                      }
-                      onBlur={(event) =>
-                        commitLineBreakSpeed(Number(event.currentTarget.value))
-                      }
-                    />
-                  </label>
-                  <label className="settings-slider-row">
-                    <span>
-                      {t('lineMaxSegmentDistance')}
-                      <strong>
-                        {draftLineMaxSegmentDistance === undefined
-                          ? t('off')
-                          : formatDistanceThresholdKm(
-                              draftLineMaxSegmentDistance,
-                              locale,
-                            )}
-                      </strong>
-                    </span>
-                    <input
-                      aria-label={t('lineMaxSegmentDistance')}
-                      aria-valuetext={
-                        draftLineMaxSegmentDistance === undefined
-                          ? t('off')
-                          : formatDistanceThresholdKm(
-                              draftLineMaxSegmentDistance,
-                              locale,
-                            )
-                      }
-                      type="range"
-                      min={0}
-                      max={LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1}
-                      step={1}
-                      value={lineBreakSliderIndices.maxSegmentDistanceIndex}
-                      onChange={(event) =>
-                        setLineMaxSegmentDistanceDraft(Number(event.target.value))
-                      }
-                      onPointerUp={(event) =>
-                        commitLineMaxSegmentDistance(
-                          Number(event.currentTarget.value),
-                        )
-                      }
-                      onKeyUp={(event) =>
-                        commitLineMaxSegmentDistance(
-                          Number(event.currentTarget.value),
-                        )
-                      }
-                      onBlur={(event) =>
-                        commitLineMaxSegmentDistance(
-                          Number(event.currentTarget.value),
-                        )
-                      }
-                    />
-                  </label>
-                </div>
-                <div className="display-section">
                   <label className="toggle-row">
                     <input
                       type="checkbox"
@@ -2271,6 +2275,14 @@ function App() {
               </div>
             )}
           </div>
+
+          <details className="map-settings-accordion">
+            <summary>
+              <Settings2 size={16} />
+              {t('mapSettings')}
+            </summary>
+            {mapSettingsControls}
+          </details>
 
           <div
             aria-label={t('resizeMapAndQueryPanels')}

@@ -142,6 +142,7 @@ const en = {
   mapRenderBatchSizeHint:
     'Lower values keep the app more responsive while map bubbles are drawn.',
   mapQuery: 'Map query',
+  mapSettings: 'Map settings',
   linePathBreaks: 'Line breaks',
   lineBreakSpeed: 'Speed break',
   lineMaxSegmentDistance: 'Max segment length',
@@ -374,6 +375,7 @@ const de: Record<TranslationKey, string> = {
   mapRenderBatchSizeHint:
     'Niedrigere Werte halten die App beim Zeichnen der Kartenpunkte reaktionsfähiger.',
   mapQuery: 'Kartenabfrage',
+  mapSettings: 'Karteneinstellungen',
   linePathBreaks: 'Linienbrüche',
   lineBreakSpeed: 'Geschwindigkeitsbruch',
   lineMaxSegmentDistance: 'Max. Segmentlänge',

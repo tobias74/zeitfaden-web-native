@@ -627,6 +627,7 @@ describe('App pagination', () => {
     render(<App />)
 
     expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
+    fireEvent.click(screen.getByText('Map settings'))
 
     fireEvent.change(screen.getByLabelText('Map bubble density'), {
       target: { value: '48' },
@@ -712,6 +713,7 @@ describe('App pagination', () => {
 
     expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
     fireEvent.click(screen.getByRole('button', { name: 'Line' }))
+    fireEvent.click(screen.getByText('Map settings'))
 
     expect(screen.queryByText('Line cleanup')).toBeNull()
     expect(screen.queryByLabelText('Allowed sources')).toBeNull()
