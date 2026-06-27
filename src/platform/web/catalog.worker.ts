@@ -3773,8 +3773,12 @@ class FileCatalogStore implements CatalogStore {
       }
     }
     const results = timelineGroupResults(groups)
+    const offset = Math.max(0, spec.offset ?? 0)
+    const limit = Math.max(0, spec.limit ?? results.length)
+    const pagedResults =
+      limit === 0 ? [] : results.slice(offset, offset + limit)
     return {
-      groups: results,
+      groups: pagedResults,
       totalGroups: results.length,
       resultMetrics: withQueryMetrics(
         {
@@ -3784,10 +3788,10 @@ class FileCatalogStore implements CatalogStore {
         },
         spec,
         performance.now() - startedAt,
-        results.length,
-        results.length,
-        0,
-        false,
+        pagedResults.length,
+        limit,
+        offset,
+        offset + pagedResults.length < results.length,
       ),
     }
   }

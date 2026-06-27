@@ -311,7 +311,13 @@ function createPlatform(): PlatformBackend {
     },
     searchTimelineGroups: async (spec) => {
       searchTimelineGroupCalls.push(spec)
-      return timelineGroupsOverride ?? createTimelineGroupPage(12)
+      const page = timelineGroupsOverride ?? createTimelineGroupPage(12)
+      const offset = spec.offset ?? 0
+      const limit = spec.limit ?? page.groups.length
+      return {
+        ...page,
+        groups: limit === 0 ? [] : page.groups.slice(offset, offset + limit),
+      }
     },
     prepareLineTileSource: async (spec, options) => {
       lineTileSourceCalls.push(spec)
@@ -568,8 +574,8 @@ describe('App pagination', () => {
     expect(screen.getAllByText(/Segment 7/).length).toBeGreaterThan(0)
   })
 
-  it('shows all matching groups in a separate trips tab instead of only visible result groups', async () => {
-    timelineGroupsOverride = createTimelineGroupPage(12)
+  it('paginates matching groups in a separate trips tab', async () => {
+    timelineGroupsOverride = createTimelineGroupPage(75)
     const { default: App } = await import('./App')
 
     render(<App />)
@@ -578,11 +584,35 @@ describe('App pagination', () => {
     fireEvent.click(screen.getByRole('tab', { name: /Tours \/ groups/ }))
 
     await waitFor(() => {
-      expect(screen.getByText('12 groups')).toBeTruthy()
-      expect(screen.getByText(/Segment 12/)).toBeTruthy()
-      expect(searchTimelineGroupCalls.some((query) => query.purpose === 'groups')).toBe(true)
+      expect(screen.getByText('1-50 of 75 groups')).toBeTruthy()
+      expect(screen.getByText(/Segment 50/)).toBeTruthy()
+      expect(screen.queryByText(/Segment 51/)).toBeNull()
+      expect(
+        searchTimelineGroupCalls.some(
+          (query) =>
+            query.purpose === 'groups' &&
+            query.limit === 50 &&
+            query.offset === 0,
+        ),
+      ).toBe(true)
     })
     expect(screen.queryByText('item-0.jpg')).toBeNull()
+
+    fireEvent.click(screen.getByTitle('Next page'))
+
+    await waitFor(() => {
+      expect(screen.getByText('51-75 of 75 groups')).toBeTruthy()
+      expect(screen.getByText(/Segment 75/)).toBeTruthy()
+      expect(screen.queryByText(/Segment 50/)).toBeNull()
+      expect(
+        searchTimelineGroupCalls.some(
+          (query) =>
+            query.purpose === 'groups' &&
+            query.limit === 50 &&
+            query.offset === 50,
+        ),
+      ).toBe(true)
+    })
   })
 
   it('shows a map loading strip while map events are loading', async () => {

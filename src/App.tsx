@@ -134,6 +134,7 @@ const MAP_BUBBLE_CELL_SIZE_OPTIONS = [48, 64, 80] as const
 const MAP_RENDER_BATCH_SIZE_OPTIONS = [100, 250, 500, 1_000, 2_500] as const
 const MAP_BUBBLE_SCALE_OPTIONS = [0.75, 1, 1.35] as const
 const MAP_MAX_BUBBLES_OPTIONS = [2_000, 5_000, 10_000] as const
+const DEFAULT_TIMELINE_GROUP_PAGE_SIZE = 50
 const MAP_POLYLINE_ALLOWED_SOURCES: MapPolylineCleanupSource[] = [
   'GPS',
   'WIFI',
@@ -863,6 +864,10 @@ function App() {
       ]),
     )
   const [resultTab, setResultTab] = useState<ResultTab>('catalog')
+  const [timelineGroupPage, setTimelineGroupPage] = useState(0)
+  const [timelineGroupPageSize, setTimelineGroupPageSize] = useState(
+    DEFAULT_TIMELINE_GROUP_PAGE_SIZE,
+  )
   const [resultThumbnailSize, setResultThumbnailSize] =
     useState<ResultThumbnailSize>(() =>
       storedString(RESULT_THUMBNAIL_SIZE_KEY, 'medium', [
@@ -969,6 +974,7 @@ function App() {
     queryPoint,
     selectedIndexId,
   ])
+  const timelineGroupOffset = timelineGroupPage * timelineGroupPageSize
   const resultSearchSpec = useMemo<SearchSpec>(
     () => ({
       ...timeRange,
@@ -998,11 +1004,17 @@ function App() {
         sort: 'timestamp_asc',
         engineId: CATALOG_QUERY_INDEX_ID,
       },
-      limit: 0,
-      offset: 0,
+      limit: timelineGroupPageSize,
+      offset: timelineGroupOffset,
       purpose: 'groups',
     }),
-    [geoBounds, kindFilter, timeRange],
+    [
+      geoBounds,
+      kindFilter,
+      timeRange,
+      timelineGroupOffset,
+      timelineGroupPageSize,
+    ],
   )
   const visibleBubbleMapViewport =
     mapDisplayMode === 'bubbles' ? visibleMapViewport : undefined
@@ -1222,6 +1234,7 @@ function App() {
   }
   const handleImported = useCallback(() => {
     setResultPage(0)
+    setTimelineGroupPage(0)
     markCatalogChanged()
   }, [markCatalogChanged, setResultPage])
   const {
@@ -1278,11 +1291,21 @@ function App() {
   const catalogResultsMeta = `${visibleRange} ${t('visible')}`
   const timelineGroupsMeta = timelineGroupsLoading
     ? t('loadingGroups')
-    : t('timelineGroupsTotal', {
-        count: timelineGroupTotal.toLocaleString(locale),
-      })
+    : timelineGroupTotal === 0 || timelineGroupResults.length === 0
+      ? t('timelineGroupsTotal', {
+          count: timelineGroupTotal.toLocaleString(locale),
+        })
+      : t('timelineGroupsRange', {
+          start: (timelineGroupOffset + 1).toLocaleString(locale),
+          end: (timelineGroupOffset + timelineGroupResults.length)
+            .toLocaleString(locale),
+          total: timelineGroupTotal.toLocaleString(locale),
+        })
   const canPageBackward = resultPage > 0
   const canPageForward = pageLimitReached
+  const canPageGroupsBackward = timelineGroupPage > 0
+  const canPageGroupsForward =
+    timelineGroupOffset + timelineGroupResults.length < timelineGroupTotal
   const loadViewerWindow = useCallback(
     async (windowOffset: number, signal?: AbortSignal) => {
       return (await loadWindow(windowOffset, signal)).items
@@ -1368,6 +1391,7 @@ function App() {
     try {
       await catalog.clear()
       setResultPage(0)
+      setTimelineGroupPage(0)
       clearGeoBounds()
       setSearchResults([])
       clearMap()
@@ -1403,7 +1427,18 @@ function App() {
 
   const setFilterKind = useCallback((kind: KindFilter) => {
     setKindFilter(kind)
+    setTimelineGroupPage(0)
   }, [setKindFilter])
+
+  const setFilterStartDate = useCallback((value: string) => {
+    setStartDate(value)
+    setTimelineGroupPage(0)
+  }, [setStartDate])
+
+  const setFilterEndDate = useCallback((value: string) => {
+    setEndDate(value)
+    setTimelineGroupPage(0)
+  }, [setEndDate])
 
   const setSortMode = useCallback((nextSort: SearchSortMode) => {
     setSort(nextSort)
@@ -1420,6 +1455,7 @@ function App() {
 
   const setMapGeoBounds = useCallback((bounds: GeoBounds) => {
     setGeoBounds(bounds)
+    setTimelineGroupPage(0)
   }, [setGeoBounds])
 
   const setVisibleMapViewportState = useCallback((viewport: MapViewport) => {
@@ -1430,10 +1466,12 @@ function App() {
 
   const clearMapGeoBounds = useCallback(() => {
     clearGeoBounds()
+    setTimelineGroupPage(0)
   }, [clearGeoBounds])
 
   const clearSearch = useCallback(() => {
     clearSearchState()
+    setTimelineGroupPage(0)
     setSearchResults([])
     setSearchValidation(undefined)
     setIndexStatsOverride(undefined)
@@ -2321,7 +2359,9 @@ function App() {
                   <input
                     type="datetime-local"
                     value={startDate}
-                    onChange={(event) => setStartDate(event.target.value)}
+                    onChange={(event) =>
+                      setFilterStartDate(event.target.value)
+                    }
                   />
                 </label>
                 <label>
@@ -2329,7 +2369,9 @@ function App() {
                   <input
                     type="datetime-local"
                     value={endDate}
-                    onChange={(event) => setEndDate(event.target.value)}
+                    onChange={(event) =>
+                      setFilterEndDate(event.target.value)
+                    }
                   />
                 </label>
               </div>
@@ -3058,6 +3100,46 @@ function App() {
                       </label>
                     </div>
                   </details>
+                </>
+              )}
+              {resultTab === 'groups' && (
+                <>
+                  <label className="pagination-size">
+                    {t('page')}
+                    <select
+                      value={timelineGroupPageSize}
+                      onChange={(event) => {
+                        setTimelineGroupPageSize(Number(event.target.value))
+                        setTimelineGroupPage(0)
+                      }}
+                    >
+                      {RESULT_PAGE_SIZE_OPTIONS.map((size) => (
+                        <option key={size} value={size}>
+                          {size}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="pagination-buttons" aria-label={t('resultPages')}>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setTimelineGroupPage((page) => Math.max(0, page - 1))
+                      }
+                      disabled={!canPageGroupsBackward}
+                      title={t('previousPage')}
+                    >
+                      <ChevronLeft size={17} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTimelineGroupPage((page) => page + 1)}
+                      disabled={!canPageGroupsForward}
+                      title={t('nextPage')}
+                    >
+                      <ChevronRight size={17} />
+                    </button>
+                  </div>
                 </>
               )}
               <button type="button" onClick={clearSearch} disabled={busy}>

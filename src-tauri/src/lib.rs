@@ -7118,6 +7118,18 @@ fn search_timeline_groups(app: AppHandle, spec: SearchSpec) -> AppResult<Timelin
         }
     }
     let results = timeline_group_results(groups);
+    let total_groups = results.len();
+    let offset = spec.offset.unwrap_or(0).max(0) as usize;
+    let limit = spec.limit.unwrap_or(total_groups as i64).max(0) as usize;
+    let paged_results = if limit == 0 {
+        Vec::new()
+    } else {
+        results
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>()
+    };
     let mut index_stats = empty_search_index_stats("catalog-groups", "Catalog groups");
     index_stats.point_count = total_items;
     index_stats.candidates_inspected = inspected as i64;
@@ -7126,15 +7138,15 @@ fn search_timeline_groups(app: AppHandle, spec: SearchSpec) -> AppResult<Timelin
         &spec,
         "native",
         started_at.elapsed().as_secs_f64() * 1000.0,
-        results.len(),
-        results.len() as i64,
-        0,
-        false,
+        paged_results.len(),
+        limit as i64,
+        offset as i64,
+        offset + paged_results.len() < total_groups,
     );
 
     Ok(TimelineGroupPage {
-        total_groups: results.len(),
-        groups: results,
+        total_groups,
+        groups: paged_results,
         result_metrics: Some(result_metrics),
     })
 }
