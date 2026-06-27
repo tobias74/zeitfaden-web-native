@@ -654,6 +654,9 @@ describe('App pagination', () => {
       expect(screen.getByText(/Segment 50/)).toBeTruthy()
       expect(screen.queryByText(/Segment 51/)).toBeNull()
       expect(
+        screen.getByRole('tab', { name: /Catalog results/ }).textContent,
+      ).not.toContain('1-50')
+      expect(
         searchTimelineGroupCalls.some(
           (query) =>
             query.purpose === 'groups' &&

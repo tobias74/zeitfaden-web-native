@@ -467,7 +467,7 @@ function importProgressDetail(
     return `${formatBytes(progress.scannedBytes, locale)} / ${formatBytes(
       progress.totalBytes,
       locale,
-    )} Â· ${t('importItemsAcceptedSkipped', {
+    )} - ${t('importItemsAcceptedSkipped', {
       accepted: progress.acceptedMedia.toLocaleString(locale),
       skipped: progress.skippedFiles.toLocaleString(locale),
     })}`
@@ -1509,7 +1509,7 @@ function App() {
   const catalogResultsTitle = visibleResults
     ? t('nearestResults')
     : t('catalogResults')
-  const catalogResultsMeta = visibleRange
+  const catalogResultsMeta = resultTab === 'catalog' ? visibleRange : ''
   const timelineGroupsMeta =
     resultTab !== 'groups'
       ? ''
@@ -2081,10 +2081,10 @@ function App() {
                 <h2>{t('imprint')}</h2>
               </div>
               <address className="imprint-address">
-                <strong>tobiga UG (haftungsbeschrÃ¤nkt)</strong>
+                <strong>tobiga UG (haftungsbeschr&auml;nkt)</strong>
                 <span>Tobias Gassmann</span>
                 <span>Bodenseestr. 4a</span>
-                <span>81241 MÃ¼nchen</span>
+                <span>81241 M&uuml;nchen</span>
                 <span>HRB 219431</span>
                 <span>USt-IdNr. DE 301206623</span>
               </address>
