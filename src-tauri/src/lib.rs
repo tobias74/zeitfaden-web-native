@@ -234,6 +234,27 @@ struct MapPointPage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TimelineGroupResult {
+    id: String,
+    count: usize,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    source_types: Vec<String>,
+    kinds: Vec<String>,
+    bounds: Option<GeoBounds>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelineGroupPage {
+    groups: Vec<TimelineGroupResult>,
+    total_groups: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_metrics: Option<SearchIndexStats>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LineTileSourceSummary {
     source_key: String,
     catalog_revision: i64,
@@ -5025,6 +5046,119 @@ fn item_matches_catalog_query(item: &MediaItem, query: &CatalogQuery) -> bool {
     true
 }
 
+struct NativeTimelineGroupAccumulator {
+    id: String,
+    count: usize,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    source_types: HashSet<String>,
+    kinds: HashSet<String>,
+    bounds: Option<GeoBounds>,
+}
+
+fn media_item_group_id(item: &MediaItem) -> Option<&str> {
+    item.group_id.as_deref().or_else(|| {
+        item.locations
+            .iter()
+            .find_map(|location| location.group_id.as_deref())
+    })
+}
+
+fn add_item_to_timeline_group(
+    groups: &mut HashMap<String, NativeTimelineGroupAccumulator>,
+    item: &MediaItem,
+) {
+    let Some(group_id) = media_item_group_id(item) else {
+        return;
+    };
+    let group =
+        groups
+            .entry(group_id.to_string())
+            .or_insert_with(|| NativeTimelineGroupAccumulator {
+                id: group_id.to_string(),
+                count: 0,
+                start_time: None,
+                end_time: None,
+                source_types: HashSet::new(),
+                kinds: HashSet::new(),
+                bounds: None,
+            });
+    group.count += 1;
+    group.kinds.insert(item.kind.clone());
+    if let Some(source_type) = item.source_type.as_ref() {
+        group.source_types.insert(source_type.clone());
+    }
+    for location in &item.locations {
+        if let Some(source_type) = location.source_type.as_ref() {
+            group.source_types.insert(source_type.clone());
+        }
+    }
+    if let Some(timestamp) = item.timestamp {
+        group.start_time = Some(
+            group
+                .start_time
+                .map_or(timestamp, |current| current.min(timestamp)),
+        );
+        group.end_time = Some(
+            group
+                .end_time
+                .map_or(timestamp, |current| current.max(timestamp)),
+        );
+    }
+    if let Some(end_timestamp) = item.end_timestamp {
+        group.end_time = Some(
+            group
+                .end_time
+                .map_or(end_timestamp, |current| current.max(end_timestamp)),
+        );
+    }
+    if let (Some(lat), Some(lon)) = (item.latitude, item.longitude) {
+        if let Some(bounds) = group.bounds.as_mut() {
+            bounds.min_lat = bounds.min_lat.min(lat);
+            bounds.max_lat = bounds.max_lat.max(lat);
+            bounds.min_lon = bounds.min_lon.min(lon);
+            bounds.max_lon = bounds.max_lon.max(lon);
+        } else {
+            group.bounds = Some(GeoBounds {
+                min_lat: lat,
+                max_lat: lat,
+                min_lon: lon,
+                max_lon: lon,
+            });
+        }
+    }
+}
+
+fn timeline_group_results(
+    groups: HashMap<String, NativeTimelineGroupAccumulator>,
+) -> Vec<TimelineGroupResult> {
+    let mut results = groups
+        .into_values()
+        .map(|group| {
+            let mut source_types = group.source_types.into_iter().collect::<Vec<_>>();
+            source_types.sort();
+            let mut kinds = group.kinds.into_iter().collect::<Vec<_>>();
+            kinds.sort();
+            TimelineGroupResult {
+                id: group.id,
+                count: group.count,
+                start_time: group.start_time,
+                end_time: group.end_time,
+                source_types,
+                kinds,
+                bounds: group.bounds,
+            }
+        })
+        .collect::<Vec<_>>();
+    results.sort_by(|left, right| {
+        left.start_time
+            .unwrap_or(i64::MAX)
+            .cmp(&right.start_time.unwrap_or(i64::MAX))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    results
+}
+
 fn filtered_locations(item: &MediaItem, query: &CatalogQuery) -> Vec<MediaLocation> {
     if let Some(source_id) = query.source_id.as_ref() {
         let locations = item
@@ -5683,9 +5817,8 @@ struct TileRenderStats {
     rendered_line_points: usize,
 }
 
-static NATIVE_LINE_TILE_SOURCES: OnceLock<
-    Mutex<HashMap<String, NativeLineTileSource>>,
-> = OnceLock::new();
+static NATIVE_LINE_TILE_SOURCES: OnceLock<Mutex<HashMap<String, NativeLineTileSource>>> =
+    OnceLock::new();
 
 fn native_line_tile_sources() -> &'static Mutex<HashMap<String, NativeLineTileSource>> {
     NATIVE_LINE_TILE_SOURCES.get_or_init(|| Mutex::new(HashMap::new()))
@@ -5966,7 +6099,8 @@ fn line_tile_source_segment_from_candidates(
 }
 
 fn line_tile_time_key(value: Option<i64>, fallback: &str) -> String {
-    value.map(|value| value.to_string())
+    value
+        .map(|value| value.to_string())
         .unwrap_or_else(|| fallback.to_string())
 }
 
@@ -5993,9 +6127,7 @@ fn normalize_line_tile_request(request: LineTileRequest) -> NormalizedLineTileRe
         start_time: request.start_time,
         end_time: request.end_time,
         break_speed_kmh: request.break_speed_kmh.filter(|value| *value > 0.0),
-        max_segment_distance_km: request
-            .max_segment_distance_km
-            .filter(|value| *value > 0.0),
+        max_segment_distance_km: request.max_segment_distance_km.filter(|value| *value > 0.0),
         z,
         x: request.x.min(max_coord),
         y: request.y.min(max_coord),
@@ -6963,6 +7095,42 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
         engine_id: engine_id.to_string(),
         engine_label: engine_label.to_string(),
         limit_reached: Some(limit_reached),
+    })
+}
+
+#[tauri::command]
+fn search_timeline_groups(app: AppHandle, spec: SearchSpec) -> AppResult<TimelineGroupPage> {
+    let started_at = Instant::now();
+    let query = search_spec_to_catalog_query(&spec, i64::MAX);
+    let items = active_media_items(&app)?;
+    let total_items = items.len();
+    let mut groups = HashMap::<String, NativeTimelineGroupAccumulator>::new();
+    let mut inspected = 0usize;
+    for item in &items {
+        inspected += 1;
+        if item_matches_catalog_query(item, &query) {
+            add_item_to_timeline_group(&mut groups, item);
+        }
+    }
+    let results = timeline_group_results(groups);
+    let mut index_stats = empty_search_index_stats("catalog-groups", "Catalog groups");
+    index_stats.point_count = total_items;
+    index_stats.candidates_inspected = inspected as i64;
+    let result_metrics = with_query_metrics(
+        index_stats,
+        &spec,
+        "native",
+        started_at.elapsed().as_secs_f64() * 1000.0,
+        results.len(),
+        results.len() as i64,
+        0,
+        false,
+    );
+
+    Ok(TimelineGroupPage {
+        total_groups: results.len(),
+        groups: results,
+        result_metrics: Some(result_metrics),
     })
 }
 
@@ -8774,6 +8942,7 @@ pub fn run() {
             upsert_media,
             list_media,
             search_media,
+            search_timeline_groups,
             search_map_points,
             prepare_line_tile_source,
             get_line_tile,

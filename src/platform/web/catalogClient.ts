@@ -13,6 +13,7 @@ import type {
   SearchIndexStats,
   SearchPage,
   SearchSpec,
+  TimelineGroupPage,
   TimeRange,
   ValidationReport,
 } from '../../types'
@@ -120,6 +121,13 @@ export class CatalogClient {
     options: CatalogSearchOptions = {},
   ): Promise<MapPointPage> {
     return this.request('searchMapPoints', spec, undefined, options.signal)
+  }
+
+  searchTimelineGroups(
+    spec: SearchSpec,
+    options: CatalogSearchOptions = {},
+  ): Promise<TimelineGroupPage> {
+    return this.request('searchTimelineGroups', spec, undefined, options.signal)
   }
 
   prepareLineTileSource(

@@ -16,6 +16,9 @@ src-tauri/target
 # Generated test fixtures
 tmp/geo-fixtures/
 
+# Generated smoke logs
+tmp/smoke-logs/
+
 # Local reference exports
 reference_resources/
 

@@ -679,7 +679,7 @@
 .library-strip {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   padding: 12px;
   overflow: hidden;
   min-width: 0;
@@ -693,11 +693,45 @@
   gap: 12px;
 }
 
+.library-heading {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
 .library-actions {
   position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.result-tabs {
+  width: fit-content;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid #d4dcd8;
+  border-radius: 7px;
+  background: #f7f9f8;
+}
+
+.result-tabs button {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #52605a;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.result-tabs button.active {
+  background: #ffffff;
+  color: #113c34;
+  box-shadow: 0 1px 3px rgba(18, 30, 25, 0.14);
 }
 
 .pagination-size {
@@ -1053,7 +1087,7 @@
 }
 
 .media-grid {
-  grid-row: 3;
+  grid-row: 2;
   min-height: 0;
   margin-top: 12px;
   display: grid;
@@ -1062,41 +1096,16 @@
   padding-right: 2px;
 }
 
-.timeline-group-overview {
+.timeline-group-results {
   grid-row: 2;
   display: grid;
-  gap: 8px;
-  margin-top: 10px;
-  padding: 10px;
-  border: 1px solid #dce2df;
-  border-radius: 8px;
-  background: #fbfcfb;
-}
-
-.timeline-group-overview-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.timeline-group-overview-header h3 {
-  color: #111816;
-  font-size: 13px;
-  font-weight: 720;
-}
-
-.timeline-group-overview-header span,
-.timeline-group-card span {
-  color: #68746f;
-  font-size: 12px;
-  line-height: 1.3;
-}
-
-.timeline-group-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  align-content: start;
+  gap: 10px;
+  min-height: 0;
+  margin-top: 12px;
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .timeline-group-card {
@@ -1117,10 +1126,28 @@
   white-space: nowrap;
 }
 
+.timeline-group-card span {
+  color: #68746f;
+  font-size: 12px;
+  line-height: 1.3;
+}
+
 .timeline-group-card strong {
   color: #27332f;
   font-size: 12px;
   font-weight: 720;
+}
+
+.library-empty {
+  grid-column: 1 / -1;
+  margin: 0;
+  align-self: start;
+  padding: 14px;
+  border: 1px dashed #d6ded9;
+  border-radius: 8px;
+  color: #66736d;
+  background: #fbfcfb;
+  font-size: 13px;
 }
 
 .media-grid-cards {

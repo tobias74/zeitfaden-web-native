@@ -42,6 +42,8 @@ import type {
   SearchIndexStats,
   SearchPage,
   SearchSpec,
+  TimelineGroupPage,
+  TimelineGroupResult,
   TimeRange,
 } from '../../types'
 import type {
@@ -170,6 +172,10 @@ type CatalogStore = {
     spec: SearchSpec,
     isCancelled?: CancellationSignal,
   ): Promise<MapPointPage>
+  searchTimelineGroups(
+    spec: SearchSpec,
+    isCancelled?: CancellationSignal,
+  ): Promise<TimelineGroupPage>
   prepareLineTileSource(
     spec: SearchSpec,
     isCancelled?: CancellationSignal,
@@ -883,6 +889,87 @@ function itemMatchesQuery(item: MediaItem, query: CatalogQuery): boolean {
   if (query.startTime !== undefined && itemEndTime < query.startTime) return false
   if (query.endTime !== undefined && item.timestamp > query.endTime) return false
   return true
+}
+
+type TimelineGroupAccumulator = TimelineGroupResult & {
+  sourceTypeSet: Set<string>
+  kindSet: Set<MediaKind>
+}
+
+function itemTimelineGroupId(item: MediaItem): string | undefined {
+  return item.groupId ?? item.locations.find((location) => location.groupId)?.groupId
+}
+
+function addItemToTimelineGroup(
+  groups: Map<string, TimelineGroupAccumulator>,
+  item: MediaItem,
+) {
+  const groupId = itemTimelineGroupId(item)
+  if (!groupId) return
+  const group = groups.get(groupId) ?? {
+    id: groupId,
+    count: 0,
+    startTime: undefined,
+    endTime: undefined,
+    sourceTypes: [],
+    sourceTypeSet: new Set<string>(),
+    kinds: [],
+    kindSet: new Set<MediaKind>(),
+    bounds: undefined,
+  }
+  group.count += 1
+  if (typeof item.timestamp === 'number') {
+    group.startTime = Math.min(group.startTime ?? item.timestamp, item.timestamp)
+    group.endTime = Math.max(group.endTime ?? item.timestamp, item.timestamp)
+  }
+  if (typeof item.endTimestamp === 'number') {
+    group.endTime = Math.max(group.endTime ?? item.endTimestamp, item.endTimestamp)
+  }
+  if (item.sourceType) group.sourceTypeSet.add(item.sourceType)
+  for (const location of item.locations) {
+    if (location.sourceType) group.sourceTypeSet.add(location.sourceType)
+  }
+  group.kindSet.add(item.kind)
+  if (typeof item.latitude === 'number' && typeof item.longitude === 'number') {
+    group.bounds = group.bounds
+      ? {
+          minLat: Math.min(group.bounds.minLat, item.latitude),
+          maxLat: Math.max(group.bounds.maxLat, item.latitude),
+          minLon: Math.min(group.bounds.minLon, item.longitude),
+          maxLon: Math.max(group.bounds.maxLon, item.longitude),
+        }
+      : {
+          minLat: item.latitude,
+          maxLat: item.latitude,
+          minLon: item.longitude,
+          maxLon: item.longitude,
+        }
+  }
+  groups.set(groupId, group)
+}
+
+function timelineGroupResults(
+  groups: Map<string, TimelineGroupAccumulator>,
+): TimelineGroupResult[] {
+  return Array.from(groups.values())
+    .map((group) => ({
+      id: group.id,
+      count: group.count,
+      startTime: group.startTime,
+      endTime: group.endTime,
+      sourceTypes: Array.from(group.sourceTypeSet).sort((left, right) =>
+        left.localeCompare(right),
+      ),
+      kinds: Array.from(group.kindSet).sort((left, right) =>
+        left.localeCompare(right),
+      ),
+      bounds: group.bounds,
+    }))
+    .sort((left, right) => {
+      const leftTime = left.startTime ?? Number.MAX_SAFE_INTEGER
+      const rightTime = right.startTime ?? Number.MAX_SAFE_INTEGER
+      return leftTime - rightTime || left.id.localeCompare(right.id)
+    })
 }
 
 function defaultSearchStats(engineId: string, engineLabel: string): SearchIndexStats {
@@ -3664,6 +3751,47 @@ class FileCatalogStore implements CatalogStore {
     }
   }
 
+  async searchTimelineGroups(
+    spec: SearchSpec,
+    isCancelled: CancellationSignal = neverCancelled,
+  ): Promise<TimelineGroupPage> {
+    throwIfCancelled(isCancelled)
+    const startedAt = performance.now()
+    const query = searchSpecToCatalogQuery(spec, Number.MAX_SAFE_INTEGER)
+    const catalog = await this.ensureMaterialized()
+    throwIfCancelled(isCancelled)
+    const groups = new Map<string, TimelineGroupAccumulator>()
+    let inspected = 0
+    for (const item of catalog.assets) {
+      inspected += 1
+      if (inspected % 8192 === 0) {
+        throwIfCancelled(isCancelled)
+        await yieldToEventLoop()
+      }
+      if (itemMatchesQuery(item, query)) {
+        addItemToTimelineGroup(groups, item)
+      }
+    }
+    const results = timelineGroupResults(groups)
+    return {
+      groups: results,
+      totalGroups: results.length,
+      resultMetrics: withQueryMetrics(
+        {
+          ...defaultSearchStats('catalog-groups', 'Catalog groups'),
+          candidatesInspected: inspected,
+          pointCount: catalog.assets.length,
+        },
+        spec,
+        performance.now() - startedAt,
+        results.length,
+        results.length,
+        0,
+        false,
+      ),
+    }
+  }
+
   async prepareLineTileSource(
     spec: SearchSpec,
     isCancelled: CancellationSignal = neverCancelled,
@@ -5983,6 +6111,11 @@ async function handleRequest(
       )
     case 'searchMapPoints':
       return store.searchMapPoints(
+        request.payload as SearchSpec,
+        () => cancelledRequests.has(request.id),
+      )
+    case 'searchTimelineGroups':
+      return store.searchTimelineGroups(
         request.payload as SearchSpec,
         () => cancelledRequests.has(request.id),
       )

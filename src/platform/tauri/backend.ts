@@ -16,6 +16,7 @@ import type {
   SearchIndexStats,
   SearchPage,
   SearchSpec,
+  TimelineGroupPage,
   TimeRange,
   ValidationReport,
 } from '../../types'
@@ -94,6 +95,13 @@ class TauriCatalogBackend implements CatalogBackend {
     options: CatalogSearchOptions = {},
   ): Promise<MapPointPage> {
     return invokeWithAbort('search_map_points', { spec }, options.signal)
+  }
+
+  searchTimelineGroups(
+    spec: SearchSpec,
+    options: CatalogSearchOptions = {},
+  ): Promise<TimelineGroupPage> {
+    return invokeWithAbort('search_timeline_groups', { spec }, options.signal)
   }
 
   prepareLineTileSource(

@@ -10,6 +10,7 @@ import type {
   MediaItem,
   SearchPage,
   SearchSpec,
+  TimelineGroupPage,
 } from './types'
 
 vi.mock('./components/MapView', async () => {
@@ -130,6 +131,7 @@ vi.mock('./components/MediaViewer', () => ({
 
 let searchMediaCalls: SearchSpec[]
 let searchMapPointCalls: SearchSpec[]
+let searchTimelineGroupCalls: SearchSpec[]
 let lineTileSourceCalls: SearchSpec[]
 let lineTileRequests: LineTileRequest[]
 let resultSearchDelay: Promise<void> | undefined
@@ -139,6 +141,7 @@ let mapSearchDelay: Promise<void> | undefined
 let mapSearchSignals: AbortSignal[]
 let lineTileSourceSignals: AbortSignal[]
 let resultItemsOverride: MediaItem[] | undefined
+let timelineGroupsOverride: TimelineGroupPage | undefined
 
 function abortError(): Error {
   const error = new Error('Catalog request aborted')
@@ -209,9 +212,25 @@ function createMapPoints(offset: number, limit: number) {
   }))
 }
 
+function createTimelineGroupPage(count: number): TimelineGroupPage {
+  return {
+    groups: Array.from({ length: count }, (_, index) => ({
+      id: `google_timeline_segment:v1:${index + 1}:1780308000000:1780311600000`,
+      count: index + 2,
+      startTime: 1_780_308_000_000 + index * 60_000,
+      endTime: 1_780_311_600_000 + index * 60_000,
+      sourceTypes: index % 2 === 0 ? ['timeline_path'] : ['visit'],
+      kinds: index % 2 === 0 ? ['geo_point'] : ['timeline_visit'],
+      bounds: { minLat: 47, maxLat: 48, minLon: 8, maxLon: 9 },
+    })),
+    totalGroups: count,
+  }
+}
+
 function createPlatform(): PlatformBackend {
   searchMediaCalls = []
   searchMapPointCalls = []
+  searchTimelineGroupCalls = []
   lineTileSourceCalls = []
   lineTileRequests = []
   const catalog: CatalogBackend = {
@@ -289,6 +308,10 @@ function createPlatform(): PlatformBackend {
         points: createMapPoints(spec.offset ?? 0, spec.limit ?? 100),
         limitReached: false,
       }
+    },
+    searchTimelineGroups: async (spec) => {
+      searchTimelineGroupCalls.push(spec)
+      return timelineGroupsOverride ?? createTimelineGroupPage(12)
     },
     prepareLineTileSource: async (spec, options) => {
       lineTileSourceCalls.push(spec)
@@ -429,6 +452,7 @@ describe('App pagination', () => {
     resultSearchSignals = []
     resultSearchError = undefined
     resultItemsOverride = undefined
+    timelineGroupsOverride = undefined
     mapSearchDelay = undefined
     mapSearchSignals = []
     lineTileSourceSignals = []
@@ -518,16 +542,46 @@ describe('App pagination', () => {
         ],
       },
     ]
+    timelineGroupsOverride = {
+      groups: [
+        {
+          id: 'google_timeline_segment:v1:7:1780308000000:1780311600000',
+          count: 1,
+          startTime: Date.parse('2026-06-01T10:10:00.000Z'),
+          endTime: Date.parse('2026-06-01T10:10:00.000Z'),
+          sourceTypes: ['timeline_path'],
+          kinds: ['geo_point'],
+        },
+      ],
+      totalGroups: 1,
+    }
     const { default: App } = await import('./App')
 
     render(<App />)
 
     expect((await screen.findAllByText('Timeline path point')).length).toBeGreaterThan(0)
-    expect(screen.getByText('Tours / groups')).toBeTruthy()
-    expect(screen.getAllByText(/Segment 7/).length).toBeGreaterThan(0)
     expect(screen.getByText(/Dataset: google_timeline/)).toBeTruthy()
     expect(screen.getByText(/Source type: timeline_path/)).toBeTruthy()
     expect(screen.getByText(/Accuracy: 12 m/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('tab', { name: 'Trips' }))
+    expect(screen.getAllByText(/Segment 7/).length).toBeGreaterThan(0)
+  })
+
+  it('shows all matching groups in a separate trips tab instead of only visible result groups', async () => {
+    timelineGroupsOverride = createTimelineGroupPage(12)
+    const { default: App } = await import('./App')
+
+    render(<App />)
+
+    expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
+    fireEvent.click(screen.getByRole('tab', { name: 'Trips' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('12 groups')).toBeTruthy()
+      expect(screen.getByText(/Segment 12/)).toBeTruthy()
+      expect(searchTimelineGroupCalls.some((query) => query.purpose === 'groups')).toBe(true)
+    })
+    expect(screen.queryByText('item-0.jpg')).toBeNull()
   })
 
   it('shows a map loading strip while map events are loading', async () => {

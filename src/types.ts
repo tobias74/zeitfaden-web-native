@@ -141,6 +141,22 @@ export type MapPointPage = {
   resultMetrics?: SearchResultMetrics
 }
 
+export type TimelineGroupResult = {
+  id: string
+  count: number
+  startTime?: number
+  endTime?: number
+  sourceTypes: string[]
+  kinds: MediaKind[]
+  bounds?: GeoBounds
+}
+
+export type TimelineGroupPage = {
+  groups: TimelineGroupResult[]
+  totalGroups: number
+  resultMetrics?: SearchResultMetrics
+}
+
 export type LineTileSourceSummary = {
   sourceKey: string
   catalogRevision: number
@@ -195,7 +211,7 @@ export type GeoSearchResult = {
   distanceMeters: number
 }
 
-export type SearchPurpose = 'results' | 'map' | 'viewer'
+export type SearchPurpose = 'results' | 'map' | 'viewer' | 'groups'
 
 export type SearchOrder =
   | {

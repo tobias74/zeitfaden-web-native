@@ -301,6 +301,21 @@ describeE2E('index state and query result e2e', () => {
     await waitForResultCardCount(page, 3)
   }, TEST_TIMEOUT_MS)
 
+  it('shows the catalog index headline as current when only the distance index is missing', async () => {
+    if (!page) throw new Error('Page was not initialized.')
+
+    await importGeoFile(page, 'catalog-index-current-distance-missing.json', pointsNearZurich(3))
+    await waitForIndexStatus(page, 'file-time-geo', 'current')
+    await waitForIndexStatus(page, 'segmented-ball-tree', 'missing')
+    await waitForCombinedIndexStatus(page, 'current')
+    expect(
+      await indexesPanel(page)
+        .locator('.index-status-row .index-status-badge.missing')
+        .count(),
+    ).toBe(0)
+    await expectNoUiError(page)
+  }, TEST_TIMEOUT_MS)
+
   it('clears distance results when the selected distance index is missing, stale, and restores them after rebuild', async () => {
     if (!page) throw new Error('Page was not initialized.')
 

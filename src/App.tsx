@@ -51,7 +51,6 @@ import { formatDistance } from './lib/distance'
 import {
   formatTimelineGroupId,
   importedMediaFacts,
-  itemGroupId,
 } from './lib/mediaMetadata'
 import {
   LANGUAGES,
@@ -81,9 +80,11 @@ import type {
   MediaItem,
   SearchIndexStats,
   SearchSpec,
+  TimelineGroupResult,
 } from './types'
 
 type ActivePage = 'app' | 'imprint' | 'privacy'
+type ResultTab = 'catalog' | 'groups'
 type ResultDisplayMode = 'images' | 'cards' | 'list'
 type ResultThumbnailSize = 'small' | 'medium' | 'large'
 type MapViewport = {
@@ -105,6 +106,7 @@ type TimelineGroupSummary = {
   startTime?: number
   endTime?: number
   sourceTypes: string[]
+  kinds: TimelineGroupResult['kinds']
 }
 type LineBreakState = {
   breakSpeedKmh?: number
@@ -346,6 +348,10 @@ function errorToMessage(error: unknown): string {
   }
 }
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError'
+}
+
 function formatBytes(value: number, locale: string): string {
   const units = ['B', 'KB', 'MB', 'GB'] as const
   let size = value
@@ -568,55 +574,6 @@ function mediaKindIcon(kind: MediaItem['kind']) {
   if (kind === 'timeline_activity') return <Route size={15} />
   if (kind === 'activity_sample') return <Activity size={15} />
   return <ImageIcon size={15} />
-}
-
-function summarizeTimelineGroups(
-  results: EnrichedSearchResult[],
-  locale: string,
-  t: (key: TranslationKey, values?: TranslationValues) => string,
-): TimelineGroupSummary[] {
-  const groups = new Map<string, TimelineGroupSummary & { sourceTypeSet: Set<string> }>()
-  for (const result of results) {
-    const { item } = result
-    const groupId = itemGroupId(item)
-    if (!groupId) continue
-    const existing = groups.get(groupId) ?? {
-      id: groupId,
-      label: formatTimelineGroupId(groupId, t),
-      count: 0,
-      startTime: undefined,
-      endTime: undefined,
-      sourceTypes: [],
-      sourceTypeSet: new Set<string>(),
-    }
-    existing.count += 1
-    if (typeof item.timestamp === 'number') {
-      existing.startTime = Math.min(existing.startTime ?? item.timestamp, item.timestamp)
-      existing.endTime = Math.max(existing.endTime ?? item.timestamp, item.timestamp)
-    }
-    if (typeof item.endTimestamp === 'number') {
-      existing.endTime = Math.max(existing.endTime ?? item.endTimestamp, item.endTimestamp)
-    }
-    if (item.sourceType) existing.sourceTypeSet.add(item.sourceType)
-    groups.set(groupId, existing)
-  }
-
-  return Array.from(groups.values())
-    .map((group) => ({
-      id: group.id,
-      label: group.label,
-      count: group.count,
-      startTime: group.startTime,
-      endTime: group.endTime,
-      sourceTypes: Array.from(group.sourceTypeSet).sort((a, b) =>
-        a.localeCompare(b, locale),
-      ),
-    }))
-    .sort((a, b) => {
-      const left = a.startTime ?? Number.MAX_SAFE_INTEGER
-      const right = b.startTime ?? Number.MAX_SAFE_INTEGER
-      return left - right || a.id.localeCompare(b.id, locale)
-    })
 }
 
 function resultSkeletonCount(
@@ -904,6 +861,7 @@ function App() {
         'list',
       ]),
     )
+  const [resultTab, setResultTab] = useState<ResultTab>('catalog')
   const [resultThumbnailSize, setResultThumbnailSize] =
     useState<ResultThumbnailSize>(() =>
       storedString(RESULT_THUMBNAIL_SIZE_KEY, 'medium', [
@@ -1029,6 +987,22 @@ function App() {
       timeRange,
     ],
   )
+  const groupSearchSpec = useMemo<SearchSpec>(
+    () => ({
+      ...timeRange,
+      kind: kindFilter,
+      geoBounds,
+      order: {
+        kind: 'timestamp',
+        sort: 'timestamp_asc',
+        engineId: CATALOG_QUERY_INDEX_ID,
+      },
+      limit: 0,
+      offset: 0,
+      purpose: 'groups',
+    }),
+    [geoBounds, kindFilter, timeRange],
+  )
   const visibleBubbleMapViewport =
     mapDisplayMode === 'bubbles' ? visibleMapViewport : undefined
   const mapSearchSpec = useMemo<SearchSpec | undefined>(
@@ -1125,6 +1099,11 @@ function App() {
     onError: reportError,
     onStats: setIndexStatsOverride,
   })
+  const [timelineGroupResults, setTimelineGroupResults] = useState<
+    TimelineGroupResult[]
+  >([])
+  const [timelineGroupTotal, setTimelineGroupTotal] = useState(0)
+  const [timelineGroupsLoading, setTimelineGroupsLoading] = useState(false)
   const requestLineTile = useCallback(
     (request: Omit<
       LineTileRequest,
@@ -1155,6 +1134,45 @@ function App() {
     },
     [catalog, lineBreaks, lineTileSource, recordLineTileResult],
   )
+  useEffect(() => {
+    if (!catalogReady) {
+      return
+    }
+
+    const controller = new AbortController()
+    void Promise.resolve()
+      .then(() => {
+        setTimelineGroupsLoading(true)
+        setTimelineGroupResults([])
+        setTimelineGroupTotal(0)
+        return catalog.searchTimelineGroups(groupSearchSpec, {
+          signal: controller.signal,
+        })
+      })
+      .then((page) => {
+        setTimelineGroupResults(page.groups)
+        setTimelineGroupTotal(page.totalGroups)
+      })
+      .catch((caught: unknown) => {
+        if (isAbortError(caught)) return
+        setTimelineGroupResults([])
+        setTimelineGroupTotal(0)
+        reportError(caught)
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setTimelineGroupsLoading(false)
+        }
+      })
+
+    return () => controller.abort()
+  }, [
+    catalog,
+    catalogReady,
+    catalogRevision,
+    groupSearchSpec,
+    reportError,
+  ])
   const effectiveIndexStats =
     indexStatsOverride ?? resultMetrics ?? indexStats
   const hoveredResultPoint = useMemo<QueryPoint | undefined>(() => {
@@ -1240,7 +1258,32 @@ function App() {
     : resultItems.length === 0
       ? '0'
       : `${visibleStart.toLocaleString(locale)}-${visibleEnd.toLocaleString(locale)}`
-  const timelineGroups = summarizeTimelineGroups(resultItems, locale, t).slice(0, 8)
+  const timelineGroups: TimelineGroupSummary[] = timelineGroupResults.map(
+    (group) => ({
+      ...group,
+      label: formatTimelineGroupId(group.id, t),
+      sourceTypes: [...group.sourceTypes].sort((left, right) =>
+        left.localeCompare(right, locale),
+      ),
+      kinds: [...group.kinds].sort((left, right) =>
+        t(left as TranslationKey).localeCompare(t(right as TranslationKey), locale),
+      ),
+    }),
+  )
+  const libraryTitle =
+    resultTab === 'groups'
+      ? t('timelineGroups')
+      : visibleResults
+        ? t('nearestResults')
+        : t('catalogResults')
+  const librarySubtitle =
+    resultTab === 'groups'
+      ? timelineGroupsLoading
+        ? t('loadingGroups')
+        : t('timelineGroupsTotal', {
+            count: timelineGroupTotal.toLocaleString(locale),
+          })
+      : `${visibleRange} ${t('visible')}`
   const canPageBackward = resultPage > 0
   const canPageForward = pageLimitReached
   const loadViewerWindow = useCallback(
@@ -2326,8 +2369,8 @@ function App() {
                 <h2>{t('indexes')}</h2>
               </div>
               <div className="index-status-row">
-                <span className={`index-status-badge ${combinedIndexesStatus}`}>
-                  {indexStatusLabel(combinedIndexesStatus, t)}
+                <span className={`index-status-badge ${regularIndexStatus}`}>
+                  {indexStatusLabel(regularIndexStatus, t)}
                 </span>
                 <button
                   type="button"
@@ -2871,168 +2914,205 @@ function App() {
 
         <section className="library-strip">
           <div className="library-header">
-            <div>
-              <h2>
-                {visibleResults ? t('nearestResults') : t('catalogResults')}
-              </h2>
+            <div className="library-heading">
+              <h2>{libraryTitle}</h2>
               <p className="subtle">
-                {visibleRange} {t('visible')}
+                {librarySubtitle}
               </p>
-            </div>
-            <div className="library-actions">
-              <label className="pagination-size">
-                {t('page')}
-                <select
-                  value={resultPageSize}
-                  onChange={(event) => setPageSize(Number(event.target.value))}
-                >
-                  {RESULT_PAGE_SIZE_OPTIONS.map((size) => (
-                    <option key={size} value={size}>
-                      {size}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="pagination-buttons" aria-label={t('resultPages')}>
+              <div
+                className="result-tabs"
+                role="tablist"
+                aria-label={t('resultViews')}
+              >
                 <button
                   type="button"
-                  onClick={() => setResultPage((page) => Math.max(0, page - 1))}
-                  disabled={!canPageBackward}
-                  title={t('previousPage')}
+                  role="tab"
+                  className={resultTab === 'catalog' ? 'active' : undefined}
+                  aria-selected={resultTab === 'catalog'}
+                  onClick={() => setResultTab('catalog')}
                 >
-                  <ChevronLeft size={17} />
+                  {t('catalog')}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setResultPage((page) => page + 1)}
-                  disabled={!canPageForward}
-                  title={t('nextPage')}
+                  role="tab"
+                  className={resultTab === 'groups' ? 'active' : undefined}
+                  aria-selected={resultTab === 'groups'}
+                  onClick={() => setResultTab('groups')}
                 >
-                  <ChevronRight size={17} />
+                  {t('trips')}
                 </button>
               </div>
-              <details ref={displayMenuRef} className="display-menu">
-                <summary>
-                  <Settings2 size={17} />
-                  {t('display')}
-                </summary>
-                <div className="display-popover">
-                  <div className="display-section">
-                    <span>{t('mode')}</span>
-                    <div className="segmented-control" role="group" aria-label={t('resultDisplayMode')}>
-                      <button
-                        type="button"
-                        className={resultDisplayMode === 'images' ? 'active' : ''}
-                        onClick={() => setDisplayMode('images')}
-                      >
-                        <Images size={16} />
-                        {t('images')}
-                      </button>
-                      <button
-                        type="button"
-                        className={resultDisplayMode === 'cards' ? 'active' : ''}
-                        onClick={() => setDisplayMode('cards')}
-                      >
-                        <ImageIcon size={16} />
-                        {t('cards')}
-                      </button>
-                      <button
-                        type="button"
-                        className={resultDisplayMode === 'list' ? 'active' : ''}
-                        onClick={() => setDisplayMode('list')}
-                      >
-                        <List size={16} />
-                        {t('list')}
-                      </button>
-                    </div>
-                  </div>
-                  <div className="display-section">
-                    <span>{t('thumbnailSize')}</span>
-                    <div className="segmented-control compact" role="group" aria-label={t('thumbnailSize')}>
-                      {(['small', 'medium', 'large'] as const).map((size) => (
-                        <button
-                          key={size}
-                          type="button"
-                          className={resultThumbnailSize === size ? 'active' : ''}
-                          onClick={() => setThumbnailSize(size)}
-                        >
-                          {t(size)}
-                        </button>
+            </div>
+            <div className="library-actions">
+              {resultTab === 'catalog' && (
+                <>
+                  <label className="pagination-size">
+                    {t('page')}
+                    <select
+                      value={resultPageSize}
+                      onChange={(event) =>
+                        setPageSize(Number(event.target.value))
+                      }
+                    >
+                      {RESULT_PAGE_SIZE_OPTIONS.map((size) => (
+                        <option key={size} value={size}>
+                          {size}
+                        </option>
                       ))}
-                    </div>
-                  </div>
-                  <label className="toggle-row">
-                    <input
-                      type="checkbox"
-                      checked={showResultMetadata}
-                      onChange={(event) => toggleMetadata(event.target.checked)}
-                    />
-                    {t('showMetadata')}
+                    </select>
                   </label>
-                </div>
-              </details>
+                  <div className="pagination-buttons" aria-label={t('resultPages')}>
+                    <button
+                      type="button"
+                      onClick={() => setResultPage((page) => Math.max(0, page - 1))}
+                      disabled={!canPageBackward}
+                      title={t('previousPage')}
+                    >
+                      <ChevronLeft size={17} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setResultPage((page) => page + 1)}
+                      disabled={!canPageForward}
+                      title={t('nextPage')}
+                    >
+                      <ChevronRight size={17} />
+                    </button>
+                  </div>
+                  <details ref={displayMenuRef} className="display-menu">
+                    <summary>
+                      <Settings2 size={17} />
+                      {t('display')}
+                    </summary>
+                    <div className="display-popover">
+                      <div className="display-section">
+                        <span>{t('mode')}</span>
+                        <div className="segmented-control" role="group" aria-label={t('resultDisplayMode')}>
+                          <button
+                            type="button"
+                            className={resultDisplayMode === 'images' ? 'active' : ''}
+                            onClick={() => setDisplayMode('images')}
+                          >
+                            <Images size={16} />
+                            {t('images')}
+                          </button>
+                          <button
+                            type="button"
+                            className={resultDisplayMode === 'cards' ? 'active' : ''}
+                            onClick={() => setDisplayMode('cards')}
+                          >
+                            <ImageIcon size={16} />
+                            {t('cards')}
+                          </button>
+                          <button
+                            type="button"
+                            className={resultDisplayMode === 'list' ? 'active' : ''}
+                            onClick={() => setDisplayMode('list')}
+                          >
+                            <List size={16} />
+                            {t('list')}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="display-section">
+                        <span>{t('thumbnailSize')}</span>
+                        <div className="segmented-control compact" role="group" aria-label={t('thumbnailSize')}>
+                          {(['small', 'medium', 'large'] as const).map((size) => (
+                            <button
+                              key={size}
+                              type="button"
+                              className={resultThumbnailSize === size ? 'active' : ''}
+                              onClick={() => setThumbnailSize(size)}
+                            >
+                              {t(size)}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <label className="toggle-row">
+                        <input
+                          type="checkbox"
+                          checked={showResultMetadata}
+                          onChange={(event) => toggleMetadata(event.target.checked)}
+                        />
+                        {t('showMetadata')}
+                      </label>
+                    </div>
+                  </details>
+                </>
+              )}
               <button type="button" onClick={clearSearch} disabled={busy}>
                 <Trash2 size={17} />
                 {t('clearSearch')}
               </button>
             </div>
           </div>
-          {timelineGroups.length > 0 && (
-            <section className="timeline-group-overview" aria-label={t('timelineGroups')}>
-              <div className="timeline-group-overview-header">
-                <h3>{t('timelineGroups')}</h3>
-                <span>
-                  {t('timelineGroupsOnPage', {
-                    count: timelineGroups.length.toLocaleString(locale),
-                  })}
-                </span>
-              </div>
-              <div className="timeline-group-list">
-                {timelineGroups.map((group) => (
-                  <article key={group.id} className="timeline-group-card">
-                    <strong>{group.label}</strong>
-                    <span>
-                      {group.count.toLocaleString(locale)} {t('visible')}
-                      {group.sourceTypes.length > 0
-                        ? ` · ${group.sourceTypes.join(', ')}`
-                        : ''}
-                    </span>
-                    <span>
-                      {formatDateTime(group.startTime, locale, t('noTimestamp'))}
-                      {group.endTime !== undefined &&
-                      group.endTime !== group.startTime
-                        ? ` - ${formatDateTime(group.endTime, locale, t('noTimestamp'))}`
-                        : ''}
-                    </span>
-                  </article>
-                ))}
-              </div>
-            </section>
+          {resultTab === 'groups' ? (
+            <div
+              className="timeline-group-results"
+              role="tabpanel"
+              aria-label={t('timelineGroups')}
+              aria-busy={timelineGroupsLoading}
+            >
+              {timelineGroupsLoading ? (
+                <p className="library-empty">{t('loadingGroups')}</p>
+              ) : timelineGroups.length === 0 ? (
+                <p className="library-empty">{t('noTimelineGroups')}</p>
+              ) : timelineGroups.map((group) => (
+                <article key={group.id} className="timeline-group-card">
+                  <strong>{group.label}</strong>
+                  <span>
+                    {t('timelineGroupItems', {
+                      count: group.count.toLocaleString(locale),
+                    })}
+                    {group.kinds.length > 0
+                      ? ` · ${group.kinds
+                          .map((kind) => t(kind as TranslationKey))
+                          .join(', ')}`
+                      : ''}
+                  </span>
+                  {group.sourceTypes.length > 0 && (
+                    <span>{group.sourceTypes.join(', ')}</span>
+                  )}
+                  <span>
+                    {formatDateTime(group.startTime, locale, t('noTimestamp'))}
+                    {group.endTime !== undefined &&
+                    group.endTime !== group.startTime
+                      ? ` - ${formatDateTime(group.endTime, locale, t('noTimestamp'))}`
+                      : ''}
+                  </span>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div
+              className={`media-grid media-grid-${resultDisplayMode} media-thumb-${resultThumbnailSize}`}
+              role="tabpanel"
+              aria-label={t('catalogResults')}
+              aria-busy={resultItemsLoading}
+            >
+              {resultItemsLoading ? (
+                <ResultSkeletons
+                  count={skeletonCount}
+                  displayMode={resultDisplayMode}
+                />
+              ) : resultItems.map((result, index) => (
+                <ResultCard
+                  key={result.item.id}
+                  result={result}
+                  index={index}
+                  displayMode={resultDisplayMode}
+                  showMetadata={showResultMetadata}
+                  thumbnails={platform.thumbnails}
+                  locale={locale}
+                  t={t}
+                  onOpen={openViewer}
+                  onHoverResultChange={setHoveredResultId}
+                />
+              ))}
+            </div>
           )}
-        <div
-          className={`media-grid media-grid-${resultDisplayMode} media-thumb-${resultThumbnailSize}`}
-          aria-busy={resultItemsLoading}
-        >
-          {resultItemsLoading ? (
-            <ResultSkeletons
-              count={skeletonCount}
-              displayMode={resultDisplayMode}
-            />
-          ) : resultItems.map((result, index) => (
-            <ResultCard
-              key={result.item.id}
-              result={result}
-              index={index}
-              displayMode={resultDisplayMode}
-              showMetadata={showResultMetadata}
-              thumbnails={platform.thumbnails}
-              locale={locale}
-              t={t}
-              onOpen={openViewer}
-              onHoverResultChange={setHoveredResultId}
-            />
-          ))}
-        </div>
       </section>
       {viewerSession &&
         viewerLocalIndex >= 0 &&

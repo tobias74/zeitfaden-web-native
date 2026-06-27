@@ -14,6 +14,7 @@ import type {
   SearchIndexStats,
   SearchPage,
   SearchSpec,
+  TimelineGroupPage,
   TimeRange,
   ValidationReport,
 } from '../types'
@@ -92,6 +93,10 @@ export interface CatalogBackend {
     spec: SearchSpec,
     options?: CatalogSearchOptions,
   ): Promise<MapPointPage>
+  searchTimelineGroups(
+    spec: SearchSpec,
+    options?: CatalogSearchOptions,
+  ): Promise<TimelineGroupPage>
   prepareLineTileSource(
     spec: SearchSpec,
     options?: CatalogSearchOptions,
