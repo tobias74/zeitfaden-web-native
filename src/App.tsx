@@ -1163,7 +1163,7 @@ function App() {
       geoBounds,
       order: {
         kind: 'timestamp',
-        sort: 'timestamp_asc',
+        sort: catalogSort,
         engineId: CATALOG_QUERY_INDEX_ID,
       },
       limit: timelineGroupPageSize,
@@ -1171,6 +1171,7 @@ function App() {
       purpose: 'groups',
     }),
     [
+      catalogSort,
       geoBounds,
       timeRange,
       timelineGroupOffset,

@@ -6,7 +6,6 @@ use quick_xml::Reader as XmlReader;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
-use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
@@ -26,6 +25,9 @@ const FILE_CATALOG_DIR: &str = "catalog-file-v1";
 const FILE_CATALOG_MANIFEST: &str = "manifest.json";
 const FILE_CATALOG_ASSETS: &str = "assets.bin";
 const FILE_CATALOG_TIME_GEO_INDEX: &str = "time-geo.idx";
+const FILE_CATALOG_TIMELINE_GROUPS_INDEX: &str = "timeline-groups.idx";
+const FILE_CATALOG_TIMELINE_GROUP_POINTS_INDEX: &str = "timeline-group-points.idx";
+const FILE_CATALOG_TIMELINE_GROUP_STRINGS: &str = "timeline-group-strings.json";
 const ASSET_RECORD_INDEX_FILE: &str = "records.idx";
 const ASSET_ID_MAP_FILE: &str = "ids.idx";
 const ASSET_CHUNK_PREFIX: &str = "chunk-";
@@ -33,7 +35,7 @@ const ASSET_BINARY_CHUNK_EXTENSION: &str = ".bin";
 const ASSET_TABLE_MAGIC: u32 = 0x4153_5431;
 const ASSET_ID_MAP_MAGIC: u32 = 0x4149_4431;
 const PACKED_INDEX_MAGIC: u32 = 0x5049_5831;
-const BINARY_SCHEMA_VERSION: u32 = 3;
+const BINARY_SCHEMA_VERSION: u32 = 4;
 const ASSET_CHUNK_SIZE: usize = 10_000;
 const ASSET_TABLE_HEADER_SIZE: usize = 32;
 const ASSET_RECORD_INDEX_ENTRY_SIZE: usize = 16;
@@ -41,6 +43,8 @@ const ASSET_ID_MAP_HEADER_SIZE: usize = 32;
 const ASSET_ID_MAP_ENTRY_SIZE: usize = 72;
 const PACKED_INDEX_HEADER_SIZE: usize = 96;
 const TIME_GEO_RECORD_SIZE: usize = 44;
+const TIMELINE_GROUP_RECORD_SIZE: usize = 56;
+const TIMELINE_GROUP_POINT_RECORD_SIZE: usize = 24;
 const PACKED_SCAN_RECORDS: usize = 8192;
 const MAX_RENDERED_MAP_BUBBLES: i64 = 5_000;
 const WEB_MERCATOR_MAX_LAT: f64 = 85.051_128_779_806_6;
@@ -50,6 +54,8 @@ const LINE_TILE_GUTTER_PX: f64 = 12.0;
 const LINE_TILE_STYLE_VERSION: &str = "line-raster-v1";
 const LINE_TILE_CACHE_DIR: &str = "line-tiles";
 const INDEX_KIND_TIME_GEO: u32 = 1;
+const INDEX_KIND_TIMELINE_GROUPS: u32 = 2;
+const INDEX_KIND_TIMELINE_GROUP_POINTS: u32 = 3;
 const KIND_CODE_IMAGE: u8 = 0;
 const KIND_CODE_VIDEO: u8 = 1;
 const KIND_CODE_GEO_POINT: u8 = 2;
@@ -3540,19 +3546,15 @@ fn parse_google_timeline_location_items(json: &str) -> AppResult<(Vec<ParsedGeoI
             {
                 let mut path_items = Vec::<(usize, ParsedGeoItem)>::new();
                 for (point_index, point) in path.iter().enumerate() {
-                    if let Some(item) =
-                        timeline_path_item(point_index, segment, point)
-                    {
+                    if let Some(item) = timeline_path_item(point_index, segment, point) {
                         path_items.push((point_index, item));
                     } else {
                         skipped_points += 1;
                     }
                 }
                 if path_items.len() > 1 {
-                    let start_time =
-                        segment.get("startTime").and_then(parse_json_timestamp);
-                    let end_time =
-                        segment.get("endTime").and_then(parse_json_timestamp);
+                    let start_time = segment.get("startTime").and_then(parse_json_timestamp);
+                    let end_time = segment.get("endTime").and_then(parse_json_timestamp);
                     let group_id = timeline_segment_group_id(segment_index, start_time, end_time);
                     for (point_index, item) in path_items.iter_mut() {
                         item.group_id = Some(group_id.clone());
@@ -4823,6 +4825,8 @@ fn write_file_catalog_indexes(app: &AppHandle, manifest: &FileCatalogManifest) -
     let indexes_dir = catalog_indexes_dir(app)?;
     let items = active_media_items(app)?;
     let mut time_records = Vec::<NativePackedIndexRecord>::new();
+    let mut timeline_groups = HashMap::<String, NativeTimelineGroupIndexAccumulator>::new();
+    let mut timeline_group_point_records = Vec::<NativeTimelineGroupPointIndexRecord>::new();
     for (asset_id, item) in items.iter().enumerate() {
         if item.timestamp.is_some() || (item.latitude.is_some() && item.longitude.is_some()) {
             let (
@@ -4850,6 +4854,38 @@ fn write_file_catalog_indexes(app: &AppHandle, manifest: &FileCatalogManifest) -
             };
             time_records.push(record);
         }
+        for group_id in media_item_group_ids(item) {
+            update_timeline_group_index_accumulator(&mut timeline_groups, item, &group_id);
+        }
+        let mut item_group_present_in_locations = false;
+        for location in item
+            .locations
+            .iter()
+            .filter(|location| location.group_id.is_some())
+        {
+            let Some(group_id) = location.group_id.as_ref() else {
+                continue;
+            };
+            if item.group_id.as_ref() == Some(group_id) {
+                item_group_present_in_locations = true;
+            }
+            if let Some(record) =
+                timeline_group_point_record_from_item(item, group_id, Some(location))
+            {
+                if record.group_hash != 0 {
+                    timeline_group_point_records.push(record);
+                }
+            }
+        }
+        if let Some(group_id) = item.group_id.as_ref() {
+            if !item_group_present_in_locations {
+                if let Some(record) = timeline_group_point_record_from_item(item, group_id, None) {
+                    if record.group_hash != 0 {
+                        timeline_group_point_records.push(record);
+                    }
+                }
+            }
+        }
     }
     let _ = fs::remove_file(indexes_dir.join("cell-time.idx"));
     write_packed_index_file(
@@ -4857,6 +4893,12 @@ fn write_file_catalog_indexes(app: &AppHandle, manifest: &FileCatalogManifest) -
         INDEX_KIND_TIME_GEO,
         manifest,
         &mut time_records,
+    )?;
+    write_timeline_group_indexes(
+        &indexes_dir,
+        manifest,
+        timeline_groups,
+        &mut timeline_group_point_records,
     )?;
     Ok(())
 }
@@ -5054,132 +5096,93 @@ fn item_matches_catalog_query(item: &MediaItem, query: &CatalogQuery) -> bool {
     true
 }
 
-struct NativeTimelineGroupAccumulator {
-    id: String,
-    count: usize,
-    start_time: Option<i64>,
-    end_time: Option<i64>,
-    source_types: HashSet<String>,
-    kinds: HashSet<String>,
-    bounds: Option<GeoBounds>,
+fn media_item_group_ids(item: &MediaItem) -> Vec<String> {
+    let mut group_ids = HashSet::<String>::new();
+    if let Some(group_id) = item.group_id.as_ref() {
+        group_ids.insert(group_id.clone());
+    }
+    for location in &item.locations {
+        if let Some(group_id) = location.group_id.as_ref() {
+            group_ids.insert(group_id.clone());
+        }
+    }
+    let mut result = group_ids.into_iter().collect::<Vec<_>>();
+    result.sort();
+    result
 }
 
-fn media_item_group_id(item: &MediaItem) -> Option<&str> {
-    item.group_id.as_deref().or_else(|| {
-        item.locations
-            .iter()
-            .find_map(|location| location.group_id.as_deref())
-    })
-}
-
-fn add_item_to_timeline_group(
-    groups: &mut HashMap<String, NativeTimelineGroupAccumulator>,
+fn update_timeline_group_index_accumulator(
+    groups: &mut HashMap<String, NativeTimelineGroupIndexAccumulator>,
     item: &MediaItem,
+    group_id: &str,
 ) {
-    let Some(group_id) = media_item_group_id(item) else {
+    let group_hash = hash_string_64(Some(group_id));
+    if group_hash == 0 {
+        return;
+    }
+    let Some(timestamp) = item.timestamp.or(item.end_timestamp) else {
         return;
     };
+    let start_time_sec = timestamp_seconds(timestamp);
+    let end_time_sec = timestamp_seconds(item.end_timestamp.unwrap_or(timestamp));
+    let source_types = item_source_types(item);
     let group =
         groups
             .entry(group_id.to_string())
-            .or_insert_with(|| NativeTimelineGroupAccumulator {
+            .or_insert_with(|| NativeTimelineGroupIndexAccumulator {
                 id: group_id.to_string(),
+                group_hash,
                 count: 0,
-                start_time: None,
-                end_time: None,
+                start_time_sec,
+                end_time_sec,
+                min_lat_e7: i32::MAX,
+                max_lat_e7: i32::MIN,
+                min_lon_e7: i32::MAX,
+                max_lon_e7: i32::MIN,
+                has_geo: false,
+                kind_mask: 0,
+                source_type_mask: 0,
                 source_types: HashSet::new(),
-                kinds: HashSet::new(),
-                bounds: None,
             });
     group.count += 1;
-    group.kinds.insert(item.kind.clone());
-    if let Some(source_type) = item.source_type.as_ref() {
-        group.source_types.insert(source_type.clone());
-    }
-    for location in &item.locations {
-        if let Some(source_type) = location.source_type.as_ref() {
-            group.source_types.insert(source_type.clone());
-        }
-    }
-    if let Some(timestamp) = item.timestamp {
-        group.start_time = Some(
-            group
-                .start_time
-                .map_or(timestamp, |current| current.min(timestamp)),
-        );
-        group.end_time = Some(
-            group
-                .end_time
-                .map_or(timestamp, |current| current.max(timestamp)),
-        );
-    }
-    if let Some(end_timestamp) = item.end_timestamp {
-        group.end_time = Some(
-            group
-                .end_time
-                .map_or(end_timestamp, |current| current.max(end_timestamp)),
-        );
+    group.start_time_sec = group.start_time_sec.min(start_time_sec);
+    group.end_time_sec = group.end_time_sec.max(end_time_sec);
+    group.kind_mask |= kind_mask_from_kind(item.kind.as_str());
+    group.source_type_mask |= source_type_mask_from_item(item);
+    for source_type in source_types {
+        group.source_types.insert(source_type);
     }
     if let (Some(lat), Some(lon)) = (item.latitude, item.longitude) {
-        if let Some(bounds) = group.bounds.as_mut() {
-            bounds.min_lat = bounds.min_lat.min(lat);
-            bounds.max_lat = bounds.max_lat.max(lat);
-            bounds.min_lon = bounds.min_lon.min(lon);
-            bounds.max_lon = bounds.max_lon.max(lon);
-        } else {
-            group.bounds = Some(GeoBounds {
-                min_lat: lat,
-                max_lat: lat,
-                min_lon: lon,
-                max_lon: lon,
-            });
-        }
+        let item_lat_e7 = lat_e7(lat);
+        let item_lon_e7 = lon_e7(lon);
+        group.min_lat_e7 = group.min_lat_e7.min(item_lat_e7);
+        group.max_lat_e7 = group.max_lat_e7.max(item_lat_e7);
+        group.min_lon_e7 = group.min_lon_e7.min(item_lon_e7);
+        group.max_lon_e7 = group.max_lon_e7.max(item_lon_e7);
+        group.has_geo = true;
     }
 }
 
-fn timeline_group_results_page(
-    groups: HashMap<String, NativeTimelineGroupAccumulator>,
-    take_count: usize,
-) -> Vec<TimelineGroupResult> {
-    if take_count == 0 {
-        return Vec::new();
-    }
-    let mut results = Vec::<TimelineGroupResult>::new();
-    for group in groups.into_values() {
-        let mut source_types = group.source_types.into_iter().collect::<Vec<_>>();
-        source_types.sort();
-        let mut kinds = group.kinds.into_iter().collect::<Vec<_>>();
-        kinds.sort();
-        let result = TimelineGroupResult {
-            id: group.id,
-            count: group.count,
-            start_time: group.start_time,
-            end_time: group.end_time,
-            source_types,
-            kinds,
-            bounds: group.bounds,
-        };
-        let insert_index = results
-            .binary_search_by(|existing| timeline_group_result_order(existing, &result))
-            .unwrap_or_else(|index| index);
-        if insert_index < take_count {
-            results.insert(insert_index, result);
-            if results.len() > take_count {
-                results.pop();
-            }
-        }
-    }
-    results
-}
-
-fn timeline_group_result_order(
-    left: &TimelineGroupResult,
-    right: &TimelineGroupResult,
-) -> CmpOrdering {
-    left.start_time
-        .unwrap_or(i64::MAX)
-        .cmp(&right.start_time.unwrap_or(i64::MAX))
-        .then_with(|| left.id.cmp(&right.id))
+fn timeline_group_point_record_from_item(
+    item: &MediaItem,
+    group_id: &str,
+    location: Option<&MediaLocation>,
+) -> Option<NativeTimelineGroupPointIndexRecord> {
+    let lat = item.latitude?;
+    let lon = item.longitude?;
+    let timestamp = location
+        .and_then(|value| value.timestamp)
+        .or(item.timestamp)?;
+    let sequence = location
+        .and_then(|value| value.sequence)
+        .or(item.sequence)?;
+    Some(NativeTimelineGroupPointIndexRecord {
+        group_hash: hash_string_64(Some(group_id)),
+        sequence: sequence.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        timestamp_sec: timestamp_seconds(timestamp),
+        lat_e7: lat_e7(lat),
+        lon_e7: lon_e7(lon),
+    })
 }
 
 fn filtered_locations(item: &MediaItem, query: &CatalogQuery) -> Vec<MediaLocation> {
@@ -5223,8 +5226,69 @@ struct NativePackedIndexRecord {
     sequence: i32,
 }
 
+#[derive(Clone, Copy)]
+struct NativeTimelineGroupIndexRecord {
+    group_hash: u64,
+    string_id: usize,
+    count: usize,
+    start_time_sec: u32,
+    end_time_sec: u32,
+    min_lat_e7: i32,
+    max_lat_e7: i32,
+    min_lon_e7: i32,
+    max_lon_e7: i32,
+    kind_mask: u32,
+    source_type_mask: u32,
+    first_point_offset: usize,
+    point_count: usize,
+}
+
+#[derive(Clone, Copy)]
+struct NativeTimelineGroupPointIndexRecord {
+    group_hash: u64,
+    sequence: i32,
+    timestamp_sec: u32,
+    lat_e7: i32,
+    lon_e7: i32,
+}
+
+#[derive(Clone)]
+struct NativeTimelineGroupIndexAccumulator {
+    id: String,
+    group_hash: u64,
+    count: usize,
+    start_time_sec: u32,
+    end_time_sec: u32,
+    min_lat_e7: i32,
+    max_lat_e7: i32,
+    min_lon_e7: i32,
+    max_lon_e7: i32,
+    has_geo: bool,
+    kind_mask: u32,
+    source_type_mask: u32,
+    source_types: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeTimelineGroupStringTable {
+    schema_version: u32,
+    catalog_version: i64,
+    groups: Vec<NativeTimelineGroupStringEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeTimelineGroupStringEntry {
+    hash: String,
+    id: String,
+    source_types: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
 struct NativePackedIndexHeader {
     catalog_version: i64,
+    asset_count: usize,
     entry_count: usize,
     index_size_bytes: usize,
 }
@@ -5299,8 +5363,8 @@ fn coordinate_from_e7(value: i32) -> f64 {
     value as f64 / 10_000_000.0
 }
 
-fn kind_flags(item: &MediaItem) -> u8 {
-    let kind = match item.kind.as_str() {
+fn kind_code_from_kind(kind: &str) -> u8 {
+    match kind {
         "video" => KIND_CODE_VIDEO,
         "geo_point" => KIND_CODE_GEO_POINT,
         "timeline_visit" => KIND_CODE_TIMELINE_VISIT,
@@ -5308,12 +5372,44 @@ fn kind_flags(item: &MediaItem) -> u8 {
         "activity_sample" => KIND_CODE_ACTIVITY_SAMPLE,
         "frequent_place" => KIND_CODE_FREQUENT_PLACE,
         _ => KIND_CODE_IMAGE,
-    };
-    kind | if item.latitude.is_some() && item.longitude.is_some() {
-        KIND_FLAG_HAS_GEO
-    } else {
-        0
     }
+}
+
+fn kind_flags(item: &MediaItem) -> u8 {
+    kind_code_from_kind(item.kind.as_str())
+        | if item.latitude.is_some() && item.longitude.is_some() {
+            KIND_FLAG_HAS_GEO
+        } else {
+            0
+        }
+}
+
+fn kind_mask_from_kind(kind: &str) -> u32 {
+    1_u32 << kind_code_from_kind(kind)
+}
+
+fn accepted_kind_mask(kind: Option<&str>) -> u32 {
+    match kind {
+        None | Some("all") => u32::MAX,
+        Some("media") => (1_u32 << KIND_CODE_IMAGE) | (1_u32 << KIND_CODE_VIDEO),
+        Some(value) => kind_mask_from_kind(value),
+    }
+}
+
+fn kinds_from_mask(mask: u32) -> Vec<String> {
+    let ordered = [
+        ("image", KIND_CODE_IMAGE),
+        ("video", KIND_CODE_VIDEO),
+        ("geo_point", KIND_CODE_GEO_POINT),
+        ("timeline_visit", KIND_CODE_TIMELINE_VISIT),
+        ("timeline_activity", KIND_CODE_TIMELINE_ACTIVITY),
+        ("activity_sample", KIND_CODE_ACTIVITY_SAMPLE),
+        ("frequent_place", KIND_CODE_FREQUENT_PLACE),
+    ];
+    ordered
+        .iter()
+        .filter_map(|(kind, code)| ((mask & (1_u32 << *code)) != 0).then_some((*kind).to_string()))
+        .collect()
 }
 
 fn source_code_from_value(value: Option<&str>) -> u8 {
@@ -5339,6 +5435,51 @@ fn source_code_from_item(item: &MediaItem) -> u8 {
         .and_then(|source| source.as_str())
         .map(|source| source_code_from_value(Some(source)))
         .unwrap_or(LINE_SOURCE_UNKNOWN)
+}
+
+fn source_type_mask_from_value(value: Option<&str>) -> u32 {
+    let Some(value) = value else {
+        return 0;
+    };
+    match value.trim() {
+        "GPS" => 1 << 0,
+        "WIFI" | "WI_FI" => 1 << 1,
+        "CELL" | "CELLULAR" => 1 << 2,
+        "UNKNOWN" => 1 << 3,
+        "timeline_path" => 1 << 4,
+        "visit" => 1 << 5,
+        "activity" => 1 << 6,
+        "activity_record" => 1 << 7,
+        "frequent_place" => 1 << 8,
+        other => match other.to_ascii_uppercase().as_str() {
+            "GPS" => 1 << 0,
+            "WIFI" | "WI_FI" => 1 << 1,
+            "CELL" | "CELLULAR" => 1 << 2,
+            "UNKNOWN" => 1 << 3,
+            _ => 0,
+        },
+    }
+}
+
+fn item_source_types(item: &MediaItem) -> HashSet<String> {
+    let mut source_types = HashSet::<String>::new();
+    if let Some(source_type) = item.source_type.as_ref() {
+        source_types.insert(source_type.clone());
+    }
+    for location in &item.locations {
+        if let Some(source_type) = location.source_type.as_ref() {
+            source_types.insert(source_type.clone());
+        }
+    }
+    source_types
+}
+
+fn source_type_mask_from_item(item: &MediaItem) -> u32 {
+    item_source_types(item)
+        .iter()
+        .fold(0_u32, |mask, source_type| {
+            mask | source_type_mask_from_value(Some(source_type.as_str()))
+        })
 }
 
 fn line_source_from_code(code: u8) -> &'static str {
@@ -5469,6 +5610,15 @@ fn packed_record_matches_query(record: NativePackedIndexRecord, query: &CatalogQ
     true
 }
 
+fn packed_index_record_size(expected_kind: u32) -> usize {
+    match expected_kind {
+        INDEX_KIND_TIME_GEO => TIME_GEO_RECORD_SIZE,
+        INDEX_KIND_TIMELINE_GROUPS => TIMELINE_GROUP_RECORD_SIZE,
+        INDEX_KIND_TIMELINE_GROUP_POINTS => TIMELINE_GROUP_POINT_RECORD_SIZE,
+        _ => 0,
+    }
+}
+
 fn packed_index_header_from_bytes(
     bytes: &[u8],
     expected_kind: u32,
@@ -5485,11 +5635,12 @@ fn packed_index_header_from_bytes(
     if read_u32_le(&bytes, 40)? != expected_kind {
         return None;
     }
-    if read_u32_le(&bytes, 36)? as usize != TIME_GEO_RECORD_SIZE {
+    if read_u32_le(&bytes, 36)? as usize != packed_index_record_size(expected_kind) {
         return None;
     }
     Some(NativePackedIndexHeader {
         catalog_version: read_f64_le(&bytes, 8)? as i64,
+        asset_count: read_f64_le(&bytes, 16)? as usize,
         entry_count: read_f64_le(&bytes, 24)? as usize,
         index_size_bytes: bytes.len(),
     })
@@ -5508,6 +5659,313 @@ fn read_packed_index_bytes(
     let header = packed_index_header_from_bytes(&bytes, expected_kind)
         .ok_or_else(|| "Catalog index file is missing or invalid.".to_string())?;
     Ok((header, bytes))
+}
+
+struct NativeTimelineGroupIndex {
+    header: NativePackedIndexHeader,
+    point_header: NativePackedIndexHeader,
+    group_bytes: Vec<u8>,
+    point_bytes: Vec<u8>,
+    string_table: NativeTimelineGroupStringTable,
+    hash_to_group_index: HashMap<u64, usize>,
+}
+
+impl NativeTimelineGroupIndex {
+    fn load(app: &AppHandle) -> AppResult<Self> {
+        let indexes_dir = catalog_indexes_dir(app)?;
+        let (header, group_bytes) = read_packed_index_bytes(
+            &indexes_dir.join(FILE_CATALOG_TIMELINE_GROUPS_INDEX),
+            INDEX_KIND_TIMELINE_GROUPS,
+        )?;
+        let (point_header, point_bytes) = read_packed_index_bytes(
+            &indexes_dir.join(FILE_CATALOG_TIMELINE_GROUP_POINTS_INDEX),
+            INDEX_KIND_TIMELINE_GROUP_POINTS,
+        )?;
+        if header.catalog_version != point_header.catalog_version
+            || header.asset_count != point_header.asset_count
+        {
+            return Err("Catalog timeline group index files are out of sync.".to_string());
+        }
+        let string_table_text =
+            fs::read_to_string(indexes_dir.join(FILE_CATALOG_TIMELINE_GROUP_STRINGS))
+                .map_err(|error| error.to_string())?;
+        let string_table: NativeTimelineGroupStringTable =
+            serde_json::from_str(&string_table_text).map_err(|error| error.to_string())?;
+        if string_table.schema_version != BINARY_SCHEMA_VERSION
+            || string_table.catalog_version != header.catalog_version
+        {
+            return Err("Catalog timeline group string index is stale.".to_string());
+        }
+        let mut hash_to_group_index = HashMap::<u64, usize>::new();
+        for index in 0..header.entry_count {
+            if let Some(record) = read_timeline_group_record(&group_bytes, index) {
+                hash_to_group_index.insert(record.group_hash, index);
+            }
+        }
+        Ok(Self {
+            header,
+            point_header,
+            group_bytes,
+            point_bytes,
+            string_table,
+            hash_to_group_index,
+        })
+    }
+
+    fn search(&self, spec: &SearchSpec) -> TimelineGroupPage {
+        let started_at = Instant::now();
+        let query = search_spec_to_catalog_query(spec, i64::MAX);
+        let offset = spec.offset.unwrap_or(0).max(0) as usize;
+        let limit = spec.limit.unwrap_or(50).max(0) as usize;
+        let take_count = limit.saturating_add(1);
+        let ascending =
+            spec.order.kind != "timestamp" || spec.order.sort.as_deref() != Some("timestamp_desc");
+        let query_end = query.end_time.map(timestamp_seconds);
+        let mut groups = Vec::<TimelineGroupResult>::new();
+        let mut skipped = 0_usize;
+        let mut inspected = 0_usize;
+
+        if ascending {
+            for index in 0..self.header.entry_count {
+                let Some(record) = read_timeline_group_record(&self.group_bytes, index) else {
+                    continue;
+                };
+                if query_end.is_some_and(|end| record.start_time_sec > end) {
+                    break;
+                }
+                inspected += 1;
+                if !timeline_group_record_matches_query(record, &query) {
+                    continue;
+                }
+                if skipped < offset {
+                    skipped += 1;
+                    continue;
+                }
+                groups.push(self.result_from_record(record));
+                if groups.len() >= take_count {
+                    break;
+                }
+            }
+        } else if self.header.entry_count > 0 {
+            let mut index = query_end
+                .map(|end| {
+                    timeline_group_lower_bound_start_time(
+                        &self.group_bytes,
+                        self.header.entry_count,
+                        end.saturating_add(1),
+                    )
+                    .saturating_sub(1)
+                })
+                .unwrap_or_else(|| self.header.entry_count.saturating_sub(1));
+            loop {
+                let Some(record) = read_timeline_group_record(&self.group_bytes, index) else {
+                    if index == 0 {
+                        break;
+                    }
+                    index -= 1;
+                    continue;
+                };
+                inspected += 1;
+                if timeline_group_record_matches_query(record, &query) {
+                    if skipped < offset {
+                        skipped += 1;
+                    } else {
+                        groups.push(self.result_from_record(record));
+                        if groups.len() >= take_count {
+                            break;
+                        }
+                    }
+                }
+                if index == 0 {
+                    break;
+                }
+                index -= 1;
+            }
+        }
+
+        let limit_reached = groups.len() > limit;
+        let paged_groups = groups.into_iter().take(limit).collect::<Vec<_>>();
+        let mut index_stats = empty_search_index_stats("catalog-groups", "Catalog groups");
+        index_stats.point_count = self.header.entry_count;
+        index_stats.index_size_bytes =
+            Some(self.header.index_size_bytes + self.point_header.index_size_bytes);
+        index_stats.candidates_inspected = inspected as i64;
+        index_stats.index_storage = Some("disk".to_string());
+        let result_metrics = with_query_metrics(
+            index_stats,
+            spec,
+            "native",
+            started_at.elapsed().as_secs_f64() * 1000.0,
+            paged_groups.len(),
+            limit as i64,
+            offset as i64,
+            limit_reached,
+        );
+
+        TimelineGroupPage {
+            groups: paged_groups,
+            total_groups: None,
+            limit_reached: Some(limit_reached),
+            result_metrics: Some(result_metrics),
+        }
+    }
+
+    fn result_from_record(&self, record: NativeTimelineGroupIndexRecord) -> TimelineGroupResult {
+        let entry = self.string_table.groups.get(record.string_id);
+        TimelineGroupResult {
+            id: entry
+                .map(|entry| entry.id.clone())
+                .unwrap_or_else(|| format!("{:016x}", record.group_hash)),
+            count: record.count,
+            start_time: Some(record.start_time_sec as i64 * 1000),
+            end_time: Some(record.end_time_sec as i64 * 1000),
+            source_types: entry
+                .map(|entry| entry.source_types.clone())
+                .unwrap_or_default(),
+            kinds: kinds_from_mask(record.kind_mask),
+            bounds: Some(GeoBounds {
+                min_lat: coordinate_from_e7(record.min_lat_e7),
+                max_lat: coordinate_from_e7(record.max_lat_e7),
+                min_lon: coordinate_from_e7(record.min_lon_e7),
+                max_lon: coordinate_from_e7(record.max_lon_e7),
+            }),
+        }
+    }
+
+    fn polyline(&self, group_id: &str) -> MapPolyline {
+        let group_hash = hash_string_64(Some(group_id));
+        let Some(group_index) = self.hash_to_group_index.get(&group_hash).copied() else {
+            return empty_map_polyline();
+        };
+        let Some(group) = read_timeline_group_record(&self.group_bytes, group_index) else {
+            return empty_map_polyline();
+        };
+        if self
+            .string_table
+            .groups
+            .get(group.string_id)
+            .is_some_and(|entry| entry.id != group_id)
+        {
+            return empty_map_polyline();
+        }
+        let mut candidates = Vec::<NativePolylineCandidate>::new();
+        let end = group
+            .first_point_offset
+            .saturating_add(group.point_count)
+            .min(self.point_header.entry_count);
+        for index in group.first_point_offset..end {
+            let Some(point) = read_timeline_group_point_record(&self.point_bytes, index) else {
+                continue;
+            };
+            if point.group_hash != group_hash {
+                continue;
+            }
+            candidates.push(NativePolylineCandidate {
+                asset_id: index,
+                kind: "geo_point".to_string(),
+                lat: coordinate_from_e7(point.lat_e7),
+                lon: coordinate_from_e7(point.lon_e7),
+                timestamp_sec: point.timestamp_sec,
+                source: "UNKNOWN",
+                accuracy_meters: None,
+                group_key: Some(group_id.to_string()),
+                sequence: Some(point.sequence),
+            });
+        }
+        let (line_segments, _) = split_group_by_consecutive_sequence(group_id, candidates);
+        polyline_from_candidate_segments(&line_segments, 0.0, usize::MAX)
+    }
+}
+
+fn read_timeline_group_record(
+    bytes: &[u8],
+    index: usize,
+) -> Option<NativeTimelineGroupIndexRecord> {
+    let offset = PACKED_INDEX_HEADER_SIZE + index * TIMELINE_GROUP_RECORD_SIZE;
+    Some(NativeTimelineGroupIndexRecord {
+        group_hash: read_u64_le(bytes, offset)?,
+        string_id: read_u32_le(bytes, offset + 8)? as usize,
+        count: read_u32_le(bytes, offset + 12)? as usize,
+        start_time_sec: read_u32_le(bytes, offset + 16)?,
+        end_time_sec: read_u32_le(bytes, offset + 20)?,
+        min_lat_e7: read_i32_le(bytes, offset + 24)?,
+        max_lat_e7: read_i32_le(bytes, offset + 28)?,
+        min_lon_e7: read_i32_le(bytes, offset + 32)?,
+        max_lon_e7: read_i32_le(bytes, offset + 36)?,
+        kind_mask: read_u32_le(bytes, offset + 40)?,
+        source_type_mask: read_u32_le(bytes, offset + 44)?,
+        first_point_offset: read_u32_le(bytes, offset + 48)? as usize,
+        point_count: read_u32_le(bytes, offset + 52)? as usize,
+    })
+}
+
+fn read_timeline_group_point_record(
+    bytes: &[u8],
+    index: usize,
+) -> Option<NativeTimelineGroupPointIndexRecord> {
+    let offset = PACKED_INDEX_HEADER_SIZE + index * TIMELINE_GROUP_POINT_RECORD_SIZE;
+    Some(NativeTimelineGroupPointIndexRecord {
+        group_hash: read_u64_le(bytes, offset)?,
+        sequence: read_i32_le(bytes, offset + 8)?,
+        timestamp_sec: read_u32_le(bytes, offset + 12)?,
+        lat_e7: read_i32_le(bytes, offset + 16)?,
+        lon_e7: read_i32_le(bytes, offset + 20)?,
+    })
+}
+
+fn timeline_group_start_time_at(bytes: &[u8], index: usize) -> Option<u32> {
+    read_u32_le(
+        bytes,
+        PACKED_INDEX_HEADER_SIZE + index * TIMELINE_GROUP_RECORD_SIZE + 16,
+    )
+}
+
+fn timeline_group_lower_bound_start_time(bytes: &[u8], entry_count: usize, target: u32) -> usize {
+    let mut low = 0_usize;
+    let mut high = entry_count;
+    while low < high {
+        let middle = (low + high) / 2;
+        let Some(start_time_sec) = timeline_group_start_time_at(bytes, middle) else {
+            break;
+        };
+        if start_time_sec < target {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
+fn timeline_group_record_matches_query(
+    record: NativeTimelineGroupIndexRecord,
+    query: &CatalogQuery,
+) -> bool {
+    if (record.kind_mask & accepted_kind_mask(query.kind.as_deref())) == 0 {
+        return false;
+    }
+    if let Some(start_time) = query.start_time {
+        if record.end_time_sec < timestamp_seconds(start_time) {
+            return false;
+        }
+    }
+    if let Some(end_time) = query.end_time {
+        if record.start_time_sec > timestamp_seconds(end_time) {
+            return false;
+        }
+    }
+    if let Some(bounds) = query.geo_bounds.as_ref() {
+        let record_bounds = GeoBounds {
+            min_lat: coordinate_from_e7(record.min_lat_e7),
+            max_lat: coordinate_from_e7(record.max_lat_e7),
+            min_lon: coordinate_from_e7(record.min_lon_e7),
+            max_lon: coordinate_from_e7(record.max_lon_e7),
+        };
+        if !geo_bounds_intersect(&record_bounds, bounds) {
+            return false;
+        }
+    }
+    true
 }
 
 fn packed_record_at(bytes: &[u8], index: usize) -> Option<NativePackedIndexRecord> {
@@ -5600,6 +6058,176 @@ fn write_packed_index_file(
         bytes.extend_from_slice(&entry_bytes);
     }
     fs::write(path, bytes).map_err(|error| error.to_string())
+}
+
+fn encode_packed_index_header(
+    kind: u32,
+    record_size: usize,
+    catalog_version: i64,
+    asset_count: usize,
+    entry_count: usize,
+    index_applied_version: i64,
+) -> Vec<u8> {
+    let mut header = vec![0_u8; PACKED_INDEX_HEADER_SIZE];
+    write_u32_le(&mut header, 0, PACKED_INDEX_MAGIC);
+    write_u32_le(&mut header, 4, BINARY_SCHEMA_VERSION);
+    write_f64_le(&mut header, 8, catalog_version as f64);
+    write_f64_le(&mut header, 16, asset_count as f64);
+    write_f64_le(&mut header, 24, entry_count as f64);
+    write_u32_le(&mut header, 32, 0);
+    write_u32_le(&mut header, 36, record_size as u32);
+    write_u32_le(&mut header, 40, kind);
+    write_u32_le(&mut header, 44, 0);
+    write_u32_le(&mut header, 48, 0);
+    write_f64_le(&mut header, 56, PACKED_INDEX_HEADER_SIZE as f64);
+    write_f64_le(&mut header, 80, index_applied_version as f64);
+    header
+}
+
+fn write_timeline_group_summary_index(
+    path: &Path,
+    manifest: &FileCatalogManifest,
+    records: &[NativeTimelineGroupIndexRecord],
+) -> AppResult<()> {
+    let mut bytes =
+        Vec::with_capacity(PACKED_INDEX_HEADER_SIZE + records.len() * TIMELINE_GROUP_RECORD_SIZE);
+    bytes.extend_from_slice(&encode_packed_index_header(
+        INDEX_KIND_TIMELINE_GROUPS,
+        TIMELINE_GROUP_RECORD_SIZE,
+        manifest.catalog_version,
+        manifest.asset_count,
+        records.len(),
+        manifest.index_applied_version,
+    ));
+    for record in records {
+        let mut entry_bytes = vec![0_u8; TIMELINE_GROUP_RECORD_SIZE];
+        write_u64_le(&mut entry_bytes, 0, record.group_hash);
+        write_u32_le(&mut entry_bytes, 8, record.string_id as u32);
+        write_u32_le(&mut entry_bytes, 12, record.count as u32);
+        write_u32_le(&mut entry_bytes, 16, record.start_time_sec);
+        write_u32_le(&mut entry_bytes, 20, record.end_time_sec);
+        write_i32_le(&mut entry_bytes, 24, record.min_lat_e7);
+        write_i32_le(&mut entry_bytes, 28, record.max_lat_e7);
+        write_i32_le(&mut entry_bytes, 32, record.min_lon_e7);
+        write_i32_le(&mut entry_bytes, 36, record.max_lon_e7);
+        write_u32_le(&mut entry_bytes, 40, record.kind_mask);
+        write_u32_le(&mut entry_bytes, 44, record.source_type_mask);
+        write_u32_le(&mut entry_bytes, 48, record.first_point_offset as u32);
+        write_u32_le(&mut entry_bytes, 52, record.point_count as u32);
+        bytes.extend_from_slice(&entry_bytes);
+    }
+    fs::write(path, bytes).map_err(|error| error.to_string())
+}
+
+fn write_timeline_group_point_index(
+    path: &Path,
+    manifest: &FileCatalogManifest,
+    records: &[NativeTimelineGroupPointIndexRecord],
+) -> AppResult<()> {
+    let mut bytes = Vec::with_capacity(
+        PACKED_INDEX_HEADER_SIZE + records.len() * TIMELINE_GROUP_POINT_RECORD_SIZE,
+    );
+    bytes.extend_from_slice(&encode_packed_index_header(
+        INDEX_KIND_TIMELINE_GROUP_POINTS,
+        TIMELINE_GROUP_POINT_RECORD_SIZE,
+        manifest.catalog_version,
+        manifest.asset_count,
+        records.len(),
+        manifest.index_applied_version,
+    ));
+    for record in records {
+        let mut entry_bytes = vec![0_u8; TIMELINE_GROUP_POINT_RECORD_SIZE];
+        write_u64_le(&mut entry_bytes, 0, record.group_hash);
+        write_i32_le(&mut entry_bytes, 8, record.sequence);
+        write_u32_le(&mut entry_bytes, 12, record.timestamp_sec);
+        write_i32_le(&mut entry_bytes, 16, record.lat_e7);
+        write_i32_le(&mut entry_bytes, 20, record.lon_e7);
+        bytes.extend_from_slice(&entry_bytes);
+    }
+    fs::write(path, bytes).map_err(|error| error.to_string())
+}
+
+fn write_timeline_group_indexes(
+    indexes_dir: &Path,
+    manifest: &FileCatalogManifest,
+    groups: HashMap<String, NativeTimelineGroupIndexAccumulator>,
+    point_records: &mut [NativeTimelineGroupPointIndexRecord],
+) -> AppResult<()> {
+    point_records.sort_by(|left, right| {
+        left.group_hash
+            .cmp(&right.group_hash)
+            .then_with(|| left.sequence.cmp(&right.sequence))
+            .then_with(|| left.timestamp_sec.cmp(&right.timestamp_sec))
+    });
+    let mut point_ranges = HashMap::<u64, (usize, usize)>::new();
+    for (index, point) in point_records.iter().enumerate() {
+        point_ranges
+            .entry(point.group_hash)
+            .and_modify(|range| range.1 += 1)
+            .or_insert((index, 1));
+    }
+
+    let mut sorted_groups = groups.into_values().collect::<Vec<_>>();
+    sorted_groups.sort_by(|left, right| {
+        left.start_time_sec
+            .cmp(&right.start_time_sec)
+            .then_with(|| left.end_time_sec.cmp(&right.end_time_sec))
+            .then_with(|| left.group_hash.cmp(&right.group_hash))
+    });
+    let string_table = NativeTimelineGroupStringTable {
+        schema_version: BINARY_SCHEMA_VERSION,
+        catalog_version: manifest.catalog_version,
+        groups: sorted_groups
+            .iter()
+            .map(|group| {
+                let mut source_types = group.source_types.iter().cloned().collect::<Vec<_>>();
+                source_types.sort();
+                NativeTimelineGroupStringEntry {
+                    hash: format!("{:016x}", group.group_hash),
+                    id: group.id.clone(),
+                    source_types,
+                }
+            })
+            .collect(),
+    };
+    let summary_records = sorted_groups
+        .iter()
+        .enumerate()
+        .map(|(string_id, group)| {
+            let range = point_ranges.get(&group.group_hash).copied();
+            NativeTimelineGroupIndexRecord {
+                group_hash: group.group_hash,
+                string_id,
+                count: group.count,
+                start_time_sec: group.start_time_sec,
+                end_time_sec: group.end_time_sec,
+                min_lat_e7: if group.has_geo { group.min_lat_e7 } else { 0 },
+                max_lat_e7: if group.has_geo { group.max_lat_e7 } else { 0 },
+                min_lon_e7: if group.has_geo { group.min_lon_e7 } else { 0 },
+                max_lon_e7: if group.has_geo { group.max_lon_e7 } else { 0 },
+                kind_mask: group.kind_mask,
+                source_type_mask: group.source_type_mask,
+                first_point_offset: range.map(|value| value.0).unwrap_or(0),
+                point_count: range.map(|value| value.1).unwrap_or(0),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    write_timeline_group_summary_index(
+        &indexes_dir.join(FILE_CATALOG_TIMELINE_GROUPS_INDEX),
+        manifest,
+        &summary_records,
+    )?;
+    write_timeline_group_point_index(
+        &indexes_dir.join(FILE_CATALOG_TIMELINE_GROUP_POINTS_INDEX),
+        manifest,
+        point_records,
+    )?;
+    fs::write(
+        indexes_dir.join(FILE_CATALOG_TIMELINE_GROUP_STRINGS),
+        serde_json::to_string(&string_table).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn file_search_engine(spec: &SearchSpec) -> AppResult<(&'static str, &'static str)> {
@@ -6434,6 +7062,17 @@ fn polyline_from_candidate_segments(
     }
 }
 
+fn empty_map_polyline() -> MapPolyline {
+    MapPolyline {
+        points: Vec::new(),
+        segments: Some(Vec::new()),
+        bounds: None,
+        source_point_count: 0,
+        simplified_point_count: 0,
+        tolerance_px: 0.0,
+    }
+}
+
 fn map_point_bucket(
     aggregation: &NativeMapPointAggregation,
     point: &MapPoint,
@@ -7123,104 +7762,12 @@ fn search_media(app: AppHandle, spec: SearchSpec) -> AppResult<SearchPage> {
 
 #[tauri::command]
 fn search_timeline_groups(app: AppHandle, spec: SearchSpec) -> AppResult<TimelineGroupPage> {
-    let started_at = Instant::now();
-    let query = search_spec_to_catalog_query(&spec, i64::MAX);
-    let items = active_media_items(&app)?;
-    let total_items = items.len();
-    let mut groups = HashMap::<String, NativeTimelineGroupAccumulator>::new();
-    let mut inspected = 0usize;
-    for item in &items {
-        inspected += 1;
-        if item_matches_catalog_query(item, &query) {
-            add_item_to_timeline_group(&mut groups, item);
-        }
-    }
-    let offset = spec.offset.unwrap_or(0).max(0) as usize;
-    let limit = spec.limit.unwrap_or(50).max(0) as usize;
-    let page_limit = limit.saturating_add(1);
-    let results = timeline_group_results_page(groups, offset.saturating_add(page_limit));
-    let page_candidates = if limit == 0 {
-        Vec::new()
-    } else {
-        results.into_iter().skip(offset).take(page_limit).collect()
-    };
-    let limit_reached = page_candidates.len() > limit;
-    let paged_results = page_candidates.into_iter().take(limit).collect::<Vec<_>>();
-    let mut index_stats = empty_search_index_stats("catalog-groups", "Catalog groups");
-    index_stats.point_count = total_items;
-    index_stats.candidates_inspected = inspected as i64;
-    let result_metrics = with_query_metrics(
-        index_stats,
-        &spec,
-        "native",
-        started_at.elapsed().as_secs_f64() * 1000.0,
-        paged_results.len(),
-        limit as i64,
-        offset as i64,
-        limit_reached,
-    );
-
-    Ok(TimelineGroupPage {
-        groups: paged_results,
-        total_groups: None,
-        limit_reached: Some(limit_reached),
-        result_metrics: Some(result_metrics),
-    })
-}
-
-fn timeline_group_candidate_from_item(
-    item: &MediaItem,
-    asset_id: usize,
-    group_id: &str,
-    location: Option<&MediaLocation>,
-) -> Option<NativePolylineCandidate> {
-    let lat = item.latitude?;
-    let lon = item.longitude?;
-    let timestamp = location.and_then(|value| value.timestamp).or(item.timestamp)?;
-    Some(NativePolylineCandidate {
-        asset_id,
-        kind: item.kind.clone(),
-        lat,
-        lon,
-        timestamp_sec: timestamp_seconds(timestamp),
-        source: "UNKNOWN",
-        accuracy_meters: item.accuracy_meters,
-        group_key: Some(group_id.to_string()),
-        sequence: location
-            .and_then(|value| value.sequence)
-            .or(item.sequence)
-            .and_then(|value| i32::try_from(value).ok()),
-    })
+    Ok(NativeTimelineGroupIndex::load(&app)?.search(&spec))
 }
 
 #[tauri::command]
 fn get_timeline_group_polyline(app: AppHandle, group_id: String) -> AppResult<MapPolyline> {
-    let items = active_media_items(&app)?;
-    let mut candidates = Vec::<NativePolylineCandidate>::new();
-    for (index, item) in items.iter().enumerate() {
-        let mut found_location = false;
-        for location in item
-            .locations
-            .iter()
-            .filter(|location| location.group_id.as_deref() == Some(group_id.as_str()))
-        {
-            found_location = true;
-            if let Some(candidate) =
-                timeline_group_candidate_from_item(item, index + 1, &group_id, Some(location))
-            {
-                candidates.push(candidate);
-            }
-        }
-        if !found_location && item.group_id.as_deref() == Some(group_id.as_str()) {
-            if let Some(candidate) =
-                timeline_group_candidate_from_item(item, index + 1, &group_id, None)
-            {
-                candidates.push(candidate);
-            }
-        }
-    }
-    let (line_segments, _) = split_group_by_consecutive_sequence(&group_id, candidates);
-    Ok(polyline_from_candidate_segments(&line_segments, 0.0, usize::MAX))
+    Ok(NativeTimelineGroupIndex::load(&app)?.polyline(&group_id))
 }
 
 #[tauri::command]
@@ -7985,21 +8532,65 @@ fn file_catalog_index_status_stats(
     engine_label: &str,
 ) -> AppResult<SearchIndexStats> {
     let manifest = load_file_catalog_manifest(app)?;
-    let required_file = (FILE_CATALOG_TIME_GEO_INDEX, INDEX_KIND_TIME_GEO);
     let indexes_dir = catalog_indexes_dir(app)?;
-    let path = indexes_dir.join(required_file.0);
-    let header = packed_index_header(&path, required_file.1);
-    let existing_file = path.is_file();
-    let index_catalog_version = header.as_ref().map(|header| header.catalog_version);
-    let index_size_bytes = header.as_ref().map(|header| header.index_size_bytes);
-    let is_current = header.is_some()
+    let required_files = [
+        (FILE_CATALOG_TIME_GEO_INDEX, INDEX_KIND_TIME_GEO),
+        (
+            FILE_CATALOG_TIMELINE_GROUPS_INDEX,
+            INDEX_KIND_TIMELINE_GROUPS,
+        ),
+        (
+            FILE_CATALOG_TIMELINE_GROUP_POINTS_INDEX,
+            INDEX_KIND_TIMELINE_GROUP_POINTS,
+        ),
+    ];
+    let headers = required_files
+        .iter()
+        .map(|(file_name, kind)| {
+            let path = indexes_dir.join(file_name);
+            (path.is_file(), packed_index_header(&path, *kind))
+        })
+        .collect::<Vec<_>>();
+    let strings_path = indexes_dir.join(FILE_CATALOG_TIMELINE_GROUP_STRINGS);
+    let strings_header = fs::read_to_string(&strings_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<NativeTimelineGroupStringTable>(&content).ok());
+    let strings_current = strings_header.as_ref().is_some_and(|table| {
+        table.schema_version == BINARY_SCHEMA_VERSION
+            && table.catalog_version == manifest.catalog_version
+    });
+    let index_catalog_version = headers
+        .iter()
+        .find_map(|(_, header)| header.as_ref().map(|header| header.catalog_version));
+    let index_size_bytes = headers
+        .iter()
+        .map(|(_, header)| {
+            header
+                .as_ref()
+                .map(|header| header.index_size_bytes)
+                .unwrap_or(0)
+        })
+        .sum::<usize>()
+        + fs::metadata(&strings_path)
+            .ok()
+            .map(|metadata| metadata.len() as usize)
+            .unwrap_or(0);
+    let all_headers_current = headers.iter().all(|(_, header)| {
+        header
+            .as_ref()
+            .is_some_and(|header| header.catalog_version == manifest.catalog_version)
+    });
+    let is_current = all_headers_current
+        && strings_current
         && manifest.materialized_version == manifest.catalog_version
-        && manifest.index_applied_version == manifest.catalog_version
-        && index_catalog_version == Some(manifest.catalog_version);
-    let file_exists = existing_file || header.is_some();
+        && manifest.index_applied_version == manifest.catalog_version;
+    let file_exists = headers
+        .iter()
+        .any(|(exists, header)| *exists || header.is_some())
+        || strings_path.is_file();
     let mut stats = empty_search_index_stats(engine_id, engine_label);
     stats.point_count = manifest.asset_count;
-    stats.index_size_bytes = index_size_bytes;
+    stats.index_size_bytes = (index_size_bytes > 0).then_some(index_size_bytes);
     stats.index_storage = Some("disk".to_string());
     stats.index_status = Some(
         if is_current {
@@ -9005,14 +9596,9 @@ fn import_geo_path(
                 total_bytes,
                 window,
             ),
-            GeoFileFormat::GoogleTimelineJson => import_google_timeline_json(
-                app,
-                &path,
-                &source,
-                &session,
-                total_bytes,
-                window,
-            ),
+            GeoFileFormat::GoogleTimelineJson => {
+                import_google_timeline_json(app, &path, &source, &session, total_bytes, window)
+            }
             GeoFileFormat::Gpx => import_gpx_streaming(
                 app,
                 &path,

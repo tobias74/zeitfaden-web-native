@@ -683,6 +683,45 @@ describe('App pagination', () => {
     })
   })
 
+  it('uses the catalog timestamp sort for tours queries', async () => {
+    const { default: App } = await import('./App')
+
+    render(<App />)
+
+    expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
+    fireEvent.change(screen.getByLabelText('Sort'), {
+      target: { value: 'timestamp_asc' },
+    })
+    fireEvent.click(screen.getByRole('tab', { name: /Tours \/ groups/ }))
+
+    await waitFor(() => {
+      expect(
+        searchTimelineGroupCalls.some(
+          (query) =>
+            query.purpose === 'groups' &&
+            query.order.kind === 'timestamp' &&
+            query.order.sort === 'timestamp_asc',
+        ),
+      ).toBe(true)
+    })
+
+    searchTimelineGroupCalls = []
+    fireEvent.change(screen.getByLabelText('Sort'), {
+      target: { value: 'timestamp_desc' },
+    })
+
+    await waitFor(() => {
+      expect(
+        searchTimelineGroupCalls.some(
+          (query) =>
+            query.purpose === 'groups' &&
+            query.order.kind === 'timestamp' &&
+            query.order.sort === 'timestamp_desc',
+        ),
+      ).toBe(true)
+    })
+  })
+
   it('shows a map loading strip while map events are loading', async () => {
     let releaseMapSearch!: () => void
     mapSearchDelay = new Promise((resolve) => {

@@ -228,16 +228,21 @@ const ASSET_CHUNK_EXTENSION = '.jsonl'
 const ASSET_BINARY_CHUNK_EXTENSION = '.bin'
 const ASSET_CHUNK_SIZE = 10_000
 const TIME_GEO_INDEX_FILE = 'time-geo.idx'
+const TIMELINE_GROUPS_INDEX_FILE = 'timeline-groups.idx'
+const TIMELINE_GROUP_POINTS_INDEX_FILE = 'timeline-group-points.idx'
+const TIMELINE_GROUP_STRINGS_FILE = 'timeline-group-strings.json'
 const ASSET_TABLE_MAGIC = 0x41535431
 const ASSET_ID_MAP_MAGIC = 0x41494431
 const PACKED_INDEX_MAGIC = 0x50495831
-const BINARY_SCHEMA_VERSION = 3
+const BINARY_SCHEMA_VERSION = 4
 const ASSET_TABLE_HEADER_SIZE = 32
 const ASSET_RECORD_INDEX_ENTRY_SIZE = 16
 const ASSET_ID_MAP_HEADER_SIZE = 32
 const ASSET_ID_MAP_ENTRY_SIZE = 72
 const PACKED_INDEX_HEADER_SIZE = 96
 const TIME_GEO_RECORD_SIZE = 44
+const TIMELINE_GROUP_RECORD_SIZE = 56
+const TIMELINE_GROUP_POINT_RECORD_SIZE = 24
 const PACKED_SCAN_RECORDS = 8192
 const PACKED_MAP_SCAN_RECORDS = 131_072
 const MAX_RENDERED_MAP_BUBBLES = 5_000
@@ -248,6 +253,8 @@ const LINE_TILE_SIZE = 256
 const LINE_TILE_GUTTER_PX = 12
 const LINE_TILE_STYLE_VERSION = 'line-raster-v1'
 const INDEX_KIND_TIME_GEO = 1
+const INDEX_KIND_TIMELINE_GROUPS = 2
+const INDEX_KIND_TIMELINE_GROUP_POINTS = 3
 const KIND_CODE_IMAGE = 0
 const KIND_CODE_VIDEO = 1
 const KIND_CODE_GEO_POINT = 2
@@ -423,6 +430,31 @@ function encodeHeader(
   return bytes
 }
 
+function encodePackedIndexHeader(
+  kind: number,
+  recordSize: number,
+  catalogVersion: number,
+  assetCount: number,
+  entryCount: number,
+  indexAppliedVersion: number,
+): Uint8Array {
+  const bytes = new Uint8Array(PACKED_INDEX_HEADER_SIZE)
+  const view = new DataView(bytes.buffer)
+  view.setUint32(0, PACKED_INDEX_MAGIC, true)
+  view.setUint32(4, BINARY_SCHEMA_VERSION, true)
+  view.setFloat64(8, catalogVersion, true)
+  view.setFloat64(16, assetCount, true)
+  view.setFloat64(24, entryCount, true)
+  view.setUint32(32, 0, true)
+  view.setUint32(36, recordSize, true)
+  view.setUint32(40, kind, true)
+  view.setUint32(44, 0, true)
+  view.setUint32(48, 0, true)
+  view.setFloat64(56, PACKED_INDEX_HEADER_SIZE, true)
+  view.setFloat64(80, indexAppliedVersion, true)
+  return bytes
+}
+
 function bytesAsBlobPart(bytes: Uint8Array): BlobPart {
   return bytes as unknown as BlobPart
 }
@@ -571,6 +603,57 @@ function hashString64(value: string | undefined): { lo: number; hi: number } {
   }
 }
 
+function hashKey(lo: number, hi: number): string {
+  return `${hi.toString(16).padStart(8, '0')}${lo.toString(16).padStart(8, '0')}`
+}
+
+function compareHash(
+  leftLo: number,
+  leftHi: number,
+  rightLo: number,
+  rightHi: number,
+): number {
+  return leftHi - rightHi || leftLo - rightLo
+}
+
+function kindMaskFromKind(kind: MediaKind): number {
+  return 1 << kindCode(kind)
+}
+
+const SOURCE_TYPE_BITS = new Map<string, number>([
+  ['GPS', 1 << 0],
+  ['WIFI', 1 << 1],
+  ['CELL', 1 << 2],
+  ['UNKNOWN', 1 << 3],
+  ['timeline_path', 1 << 4],
+  ['visit', 1 << 5],
+  ['activity', 1 << 6],
+  ['activity_record', 1 << 7],
+  ['frequent_place', 1 << 8],
+])
+
+function sourceTypeMaskFromValue(value: string | undefined): number {
+  if (!value) return 0
+  return SOURCE_TYPE_BITS.get(value) ?? SOURCE_TYPE_BITS.get(value.toUpperCase()) ?? 0
+}
+
+function itemSourceTypes(item: MediaItem): string[] {
+  const sourceTypes = new Set<string>()
+  if (item.sourceType) sourceTypes.add(item.sourceType)
+  for (const location of item.locations) {
+    if (location.sourceType) sourceTypes.add(location.sourceType)
+  }
+  return Array.from(sourceTypes)
+}
+
+function sourceTypeMaskFromItem(item: MediaItem): number {
+  let mask = 0
+  for (const sourceType of itemSourceTypes(item)) {
+    mask |= sourceTypeMaskFromValue(sourceType)
+  }
+  return mask
+}
+
 function linePayloadFromItem(item: MediaItem): Pick<
   PackedIndexRecord,
   | 'sourceCode'
@@ -614,6 +697,32 @@ function kindFromFlags(flags: number): MapPoint['kind'] {
   if (encoded === KIND_CODE_ACTIVITY_SAMPLE) return 'activity_sample'
   if (encoded === KIND_CODE_FREQUENT_PLACE) return 'frequent_place'
   return 'image'
+}
+
+function kindsFromMask(mask: number): MediaKind[] {
+  const kinds: MediaKind[] = []
+  for (const kind of [
+    'image',
+    'video',
+    'geo_point',
+    'timeline_visit',
+    'timeline_activity',
+    'activity_sample',
+    'frequent_place',
+  ] as const) {
+    if ((mask & kindMaskFromKind(kind)) !== 0) kinds.push(kind)
+  }
+  return kinds
+}
+
+function emptyMapPolyline(): MapPolyline {
+  return {
+    points: [],
+    segments: [],
+    sourcePointCount: 0,
+    simplifiedPointCount: 0,
+    tolerancePx: 0,
+  }
 }
 
 function acceptedKindMask(kind: CatalogQuery['kind']): number {
@@ -895,109 +1004,6 @@ function itemMatchesQuery(item: MediaItem, query: CatalogQuery): boolean {
   return true
 }
 
-type TimelineGroupAccumulator = TimelineGroupResult & {
-  sourceTypeSet: Set<string>
-  kindSet: Set<MediaKind>
-}
-
-function itemTimelineGroupId(item: MediaItem): string | undefined {
-  return item.groupId ?? item.locations.find((location) => location.groupId)?.groupId
-}
-
-function addItemToTimelineGroup(
-  groups: Map<string, TimelineGroupAccumulator>,
-  item: MediaItem,
-) {
-  const groupId = itemTimelineGroupId(item)
-  if (!groupId) return
-  const group = groups.get(groupId) ?? {
-    id: groupId,
-    count: 0,
-    startTime: undefined,
-    endTime: undefined,
-    sourceTypes: [],
-    sourceTypeSet: new Set<string>(),
-    kinds: [],
-    kindSet: new Set<MediaKind>(),
-    bounds: undefined,
-  }
-  group.count += 1
-  if (typeof item.timestamp === 'number') {
-    group.startTime = Math.min(group.startTime ?? item.timestamp, item.timestamp)
-    group.endTime = Math.max(group.endTime ?? item.timestamp, item.timestamp)
-  }
-  if (typeof item.endTimestamp === 'number') {
-    group.endTime = Math.max(group.endTime ?? item.endTimestamp, item.endTimestamp)
-  }
-  if (item.sourceType) group.sourceTypeSet.add(item.sourceType)
-  for (const location of item.locations) {
-    if (location.sourceType) group.sourceTypeSet.add(location.sourceType)
-  }
-  group.kindSet.add(item.kind)
-  if (typeof item.latitude === 'number' && typeof item.longitude === 'number') {
-    group.bounds = group.bounds
-      ? {
-          minLat: Math.min(group.bounds.minLat, item.latitude),
-          maxLat: Math.max(group.bounds.maxLat, item.latitude),
-          minLon: Math.min(group.bounds.minLon, item.longitude),
-          maxLon: Math.max(group.bounds.maxLon, item.longitude),
-        }
-      : {
-          minLat: item.latitude,
-          maxLat: item.latitude,
-          minLon: item.longitude,
-          maxLon: item.longitude,
-        }
-  }
-  groups.set(groupId, group)
-}
-
-function timelineGroupCompare(
-  left: TimelineGroupResult,
-  right: TimelineGroupResult,
-): number {
-  const leftTime = left.startTime ?? Number.MAX_SAFE_INTEGER
-  const rightTime = right.startTime ?? Number.MAX_SAFE_INTEGER
-  return leftTime - rightTime || left.id.localeCompare(right.id)
-}
-
-function timelineGroupResultsPage(
-  groups: Map<string, TimelineGroupAccumulator>,
-  takeCount: number,
-): TimelineGroupResult[] {
-  if (takeCount <= 0) return []
-  const results: TimelineGroupResult[] = []
-  for (const group of groups.values()) {
-    const result = {
-      id: group.id,
-      count: group.count,
-      startTime: group.startTime,
-      endTime: group.endTime,
-      sourceTypes: Array.from(group.sourceTypeSet).sort((left, right) =>
-        left.localeCompare(right),
-      ),
-      kinds: Array.from(group.kindSet).sort((left, right) =>
-        left.localeCompare(right),
-      ),
-      bounds: group.bounds,
-    }
-    const insertIndex = results.findIndex(
-      (existing) => timelineGroupCompare(result, existing) < 0,
-    )
-    if (insertIndex === -1) {
-      if (results.length < takeCount) {
-        results.push(result)
-      }
-    } else {
-      results.splice(insertIndex, 0, result)
-      if (results.length > takeCount) {
-        results.pop()
-      }
-    }
-  }
-  return results
-}
-
 function groupCandidateFromItem(
   item: MediaItem,
   assetId: number,
@@ -1064,6 +1070,77 @@ function timelineGroupPolylineFromCandidates(
     sourcePointCount: candidates.length,
     simplifiedPointCount: points.length,
     tolerancePx: 0,
+  }
+}
+
+function timelineGroupIdsForItem(item: MediaItem): string[] {
+  const groupIds = new Set<string>()
+  if (item.groupId) groupIds.add(item.groupId)
+  for (const location of item.locations) {
+    if (location.groupId) groupIds.add(location.groupId)
+  }
+  return Array.from(groupIds)
+}
+
+function updateTimelineGroupAccumulator(
+  groups: Map<string, TimelineGroupBuildAccumulator>,
+  item: MediaItem,
+  groupId: string,
+): void {
+  const hash = hashString64(groupId)
+  if (hash.lo === 0 && hash.hi === 0) return
+  const timestamp = item.timestamp
+  const endTimestamp = item.endTimestamp ?? item.timestamp
+  if (timestamp === undefined && endTimestamp === undefined) return
+  const startTimeSec = timestamp === undefined ? 0 : timestampSeconds(timestamp)
+  const endTimeSec = endTimestamp === undefined ? startTimeSec : timestampSeconds(endTimestamp)
+  const existing = groups.get(groupId)
+  const group = existing ?? {
+    id: groupId,
+    groupHashLo: hash.lo,
+    groupHashHi: hash.hi,
+    count: 0,
+    startTimeSec,
+    endTimeSec,
+    minLatE7: Number.MAX_SAFE_INTEGER,
+    maxLatE7: Number.MIN_SAFE_INTEGER,
+    minLonE7: Number.MAX_SAFE_INTEGER,
+    maxLonE7: Number.MIN_SAFE_INTEGER,
+    kindMask: 0,
+    sourceTypeMask: 0,
+    sourceTypes: new Set<string>(),
+  }
+
+  group.count += 1
+  group.startTimeSec = Math.min(group.startTimeSec, startTimeSec)
+  group.endTimeSec = Math.max(group.endTimeSec, endTimeSec)
+  group.kindMask |= kindMaskFromKind(item.kind)
+  group.sourceTypeMask |= sourceTypeMaskFromItem(item)
+  for (const sourceType of itemSourceTypes(item)) group.sourceTypes.add(sourceType)
+  if (typeof item.latitude === 'number' && typeof item.longitude === 'number') {
+    const itemLatE7 = latE7(item.latitude)
+    const itemLonE7 = lonE7(item.longitude)
+    group.minLatE7 = Math.min(group.minLatE7, itemLatE7)
+    group.maxLatE7 = Math.max(group.maxLatE7, itemLatE7)
+    group.minLonE7 = Math.min(group.minLonE7, itemLonE7)
+    group.maxLonE7 = Math.max(group.maxLonE7, itemLonE7)
+  }
+  groups.set(groupId, group)
+}
+
+function timelineGroupPointRecordFromCandidate(
+  candidate: PolylineCandidate,
+): TimelineGroupPointIndexRecord | undefined {
+  if (!candidate.groupKey || candidate.sequence === undefined) return undefined
+  const hash = hashString64(candidate.groupKey)
+  if (hash.lo === 0 && hash.hi === 0) return undefined
+  return {
+    groupHashLo: hash.lo,
+    groupHashHi: hash.hi,
+    sequence: candidate.sequence,
+    timestampSec: candidate.timestampSec,
+    latE7: latE7(candidate.lat),
+    lonE7: lonE7(candidate.lon),
   }
 }
 
@@ -1480,6 +1557,60 @@ export type PackedIndexRecord = {
   groupHashLo?: number
   groupHashHi?: number
   sequence?: number
+}
+
+type TimelineGroupIndexRecord = {
+  groupHashLo: number
+  groupHashHi: number
+  stringId: number
+  count: number
+  startTimeSec: number
+  endTimeSec: number
+  minLatE7: number
+  maxLatE7: number
+  minLonE7: number
+  maxLonE7: number
+  kindMask: number
+  sourceTypeMask: number
+  firstPointOffset: number
+  pointCount: number
+}
+
+type TimelineGroupPointIndexRecord = {
+  groupHashLo: number
+  groupHashHi: number
+  sequence: number
+  timestampSec: number
+  latE7: number
+  lonE7: number
+}
+
+type TimelineGroupStringEntry = {
+  hash: string
+  id: string
+  sourceTypes: string[]
+}
+
+type TimelineGroupStringTable = {
+  schemaVersion: number
+  catalogVersion: number
+  groups: TimelineGroupStringEntry[]
+}
+
+type TimelineGroupBuildAccumulator = {
+  id: string
+  groupHashLo: number
+  groupHashHi: number
+  count: number
+  startTimeSec: number
+  endTimeSec: number
+  minLatE7: number
+  maxLatE7: number
+  minLonE7: number
+  maxLonE7: number
+  kindMask: number
+  sourceTypeMask: number
+  sourceTypes: Set<string>
 }
 
 type PackedIndexMetrics = {
@@ -2857,7 +2988,10 @@ class AssetIdMap {
 }
 
 function expectedPackedRecordSize(kind: number): number {
-  return kind === INDEX_KIND_TIME_GEO ? TIME_GEO_RECORD_SIZE : 0
+  if (kind === INDEX_KIND_TIME_GEO) return TIME_GEO_RECORD_SIZE
+  if (kind === INDEX_KIND_TIMELINE_GROUPS) return TIMELINE_GROUP_RECORD_SIZE
+  if (kind === INDEX_KIND_TIMELINE_GROUP_POINTS) return TIMELINE_GROUP_POINT_RECORD_SIZE
+  return 0
 }
 
 export function encodeTimeGeoIndexForTests(
@@ -3589,6 +3723,247 @@ export class ResidentPackedGeoIndex {
   }
 }
 
+class ResidentTimelineGroupIndex {
+  readonly catalogVersion: number
+  readonly assetCount: number
+  readonly indexSizeBytes: number
+  private readonly groupView: DataView
+  private readonly pointView: DataView
+  private readonly groupCount: number
+  private readonly pointCount: number
+  private readonly stringTable: TimelineGroupStringTable
+  private readonly hashToGroupIndex = new Map<string, number>()
+
+  constructor(
+    groupHeader: PackedIndexHeader,
+    groupBytes: ArrayBuffer,
+    pointHeader: PackedIndexHeader,
+    pointBytes: ArrayBuffer,
+    stringTable: TimelineGroupStringTable,
+  ) {
+    this.catalogVersion = groupHeader.catalogVersion
+    this.assetCount = groupHeader.assetCount
+    this.indexSizeBytes = groupHeader.indexSizeBytes + pointHeader.indexSizeBytes
+    this.groupView = new DataView(groupBytes)
+    this.pointView = new DataView(pointBytes)
+    this.groupCount = groupHeader.entryCount
+    this.pointCount = pointHeader.entryCount
+    this.stringTable = stringTable
+    for (let index = 0; index < this.groupCount; index += 1) {
+      const record = this.readGroupRecord(index)
+      this.hashToGroupIndex.set(hashKey(record.groupHashLo, record.groupHashHi), index)
+    }
+  }
+
+  static fromArrayBuffers(
+    groupBytes: ArrayBuffer,
+    pointBytes: ArrayBuffer,
+    stringTable: TimelineGroupStringTable,
+  ): ResidentTimelineGroupIndex | undefined {
+    const groupHeader = parsePackedIndexHeader(
+      groupBytes,
+      INDEX_KIND_TIMELINE_GROUPS,
+      groupBytes.byteLength,
+    )
+    const pointHeader = parsePackedIndexHeader(
+      pointBytes,
+      INDEX_KIND_TIMELINE_GROUP_POINTS,
+      pointBytes.byteLength,
+    )
+    if (!groupHeader || !pointHeader) return undefined
+    if (
+      groupHeader.catalogVersion !== pointHeader.catalogVersion ||
+      groupHeader.assetCount !== pointHeader.assetCount ||
+      stringTable.schemaVersion !== BINARY_SCHEMA_VERSION ||
+      stringTable.catalogVersion !== groupHeader.catalogVersion
+    ) {
+      return undefined
+    }
+    return new ResidentTimelineGroupIndex(
+      groupHeader,
+      groupBytes,
+      pointHeader,
+      pointBytes,
+      stringTable,
+    )
+  }
+
+  private readGroupRecord(index: number): TimelineGroupIndexRecord {
+    const offset = PACKED_INDEX_HEADER_SIZE + index * TIMELINE_GROUP_RECORD_SIZE
+    return {
+      groupHashLo: this.groupView.getUint32(offset, true),
+      groupHashHi: this.groupView.getUint32(offset + 4, true),
+      stringId: this.groupView.getUint32(offset + 8, true),
+      count: this.groupView.getUint32(offset + 12, true),
+      startTimeSec: this.groupView.getUint32(offset + 16, true),
+      endTimeSec: this.groupView.getUint32(offset + 20, true),
+      minLatE7: this.groupView.getInt32(offset + 24, true),
+      maxLatE7: this.groupView.getInt32(offset + 28, true),
+      minLonE7: this.groupView.getInt32(offset + 32, true),
+      maxLonE7: this.groupView.getInt32(offset + 36, true),
+      kindMask: this.groupView.getUint32(offset + 40, true),
+      sourceTypeMask: this.groupView.getUint32(offset + 44, true),
+      firstPointOffset: this.groupView.getUint32(offset + 48, true),
+      pointCount: this.groupView.getUint32(offset + 52, true),
+    }
+  }
+
+  private readPointRecord(index: number): TimelineGroupPointIndexRecord {
+    const offset = PACKED_INDEX_HEADER_SIZE + index * TIMELINE_GROUP_POINT_RECORD_SIZE
+    return {
+      groupHashLo: this.pointView.getUint32(offset, true),
+      groupHashHi: this.pointView.getUint32(offset + 4, true),
+      sequence: this.pointView.getInt32(offset + 8, true),
+      timestampSec: this.pointView.getUint32(offset + 12, true),
+      latE7: this.pointView.getInt32(offset + 16, true),
+      lonE7: this.pointView.getInt32(offset + 20, true),
+    }
+  }
+
+  private lowerBoundStartTime(target: number): number {
+    let low = 0
+    let high = this.groupCount
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2)
+      const record = this.readGroupRecord(middle)
+      if (record.startTimeSec < target) low = middle + 1
+      else high = middle
+    }
+    return low
+  }
+
+  private groupResult(record: TimelineGroupIndexRecord): TimelineGroupResult {
+    const entry = this.stringTable.groups[record.stringId]
+    return {
+      id: entry?.id ?? hashKey(record.groupHashLo, record.groupHashHi),
+      count: record.count,
+      startTime: record.startTimeSec * 1000,
+      endTime: record.endTimeSec * 1000,
+      sourceTypes: entry?.sourceTypes ?? [],
+      kinds: kindsFromMask(record.kindMask),
+      bounds: {
+        minLat: coordinateFromE7(record.minLatE7),
+        maxLat: coordinateFromE7(record.maxLatE7),
+        minLon: coordinateFromE7(record.minLonE7),
+        maxLon: coordinateFromE7(record.maxLonE7),
+      },
+    }
+  }
+
+  private groupMatches(record: TimelineGroupIndexRecord, query: CatalogQuery): boolean {
+    if ((record.kindMask & acceptedKindMask(query.kind)) === 0) return false
+    if (
+      query.startTime !== undefined &&
+      record.endTimeSec < timestampSeconds(query.startTime)
+    ) {
+      return false
+    }
+    if (
+      query.endTime !== undefined &&
+      record.startTimeSec > timestampSeconds(query.endTime)
+    ) {
+      return false
+    }
+    if (query.geoBounds) {
+      const minLat = coordinateFromE7(record.minLatE7)
+      const maxLat = coordinateFromE7(record.maxLatE7)
+      const minLon = coordinateFromE7(record.minLonE7)
+      const maxLon = coordinateFromE7(record.maxLonE7)
+      if (
+        maxLat < query.geoBounds.minLat ||
+        minLat > query.geoBounds.maxLat ||
+        maxLon < query.geoBounds.minLon ||
+        minLon > query.geoBounds.maxLon
+      ) {
+        return false
+      }
+    }
+    return true
+  }
+
+  search(
+    spec: SearchSpec,
+    isCancelled: CancellationSignal = neverCancelled,
+  ): TimelineGroupPage & { inspected: number } {
+    const query = searchSpecToCatalogQuery(spec, Number.MAX_SAFE_INTEGER)
+    const offset = Math.max(0, spec.offset ?? 0)
+    const limit = Math.max(0, spec.limit ?? 50)
+    const takeCount = limit + 1
+    const groups: TimelineGroupResult[] = []
+    let skipped = 0
+    let inspected = 0
+    const ascending =
+      spec.order.kind !== 'timestamp' || spec.order.sort !== 'timestamp_desc'
+    const queryEnd = query.endTime === undefined
+      ? Number.POSITIVE_INFINITY
+      : timestampSeconds(query.endTime)
+
+    if (ascending) {
+      for (let index = 0; index < this.groupCount; index += 1) {
+        if (index % PACKED_SCAN_RECORDS === 0) throwIfCancelled(isCancelled)
+        const record = this.readGroupRecord(index)
+        if (record.startTimeSec > queryEnd) break
+        inspected += 1
+        if (!this.groupMatches(record, query)) continue
+        if (skipped < offset) {
+          skipped += 1
+          continue
+        }
+        groups.push(this.groupResult(record))
+        if (groups.length >= takeCount) break
+      }
+    } else {
+      const startIndex = Number.isFinite(queryEnd)
+        ? Math.min(this.lowerBoundStartTime(queryEnd + 1) - 1, this.groupCount - 1)
+        : this.groupCount - 1
+      for (let index = startIndex; index >= 0; index -= 1) {
+        if (index % PACKED_SCAN_RECORDS === 0) throwIfCancelled(isCancelled)
+        const record = this.readGroupRecord(index)
+        inspected += 1
+        if (!this.groupMatches(record, query)) continue
+        if (skipped < offset) {
+          skipped += 1
+          continue
+        }
+        groups.push(this.groupResult(record))
+        if (groups.length >= takeCount) break
+      }
+    }
+
+    const limitReached = groups.length > limit
+    return {
+      groups: groups.slice(0, limit),
+      limitReached,
+      inspected,
+    }
+  }
+
+  polyline(groupId: string): MapPolyline {
+    const hash = hashString64(groupId)
+    const groupIndex = this.hashToGroupIndex.get(hashKey(hash.lo, hash.hi))
+    if (groupIndex === undefined) return emptyMapPolyline()
+    const group = this.readGroupRecord(groupIndex)
+    const entry = this.stringTable.groups[group.stringId]
+    if (entry?.id !== groupId) return emptyMapPolyline()
+    const candidates: PolylineCandidate[] = []
+    const end = Math.min(group.firstPointOffset + group.pointCount, this.pointCount)
+    for (let index = group.firstPointOffset; index < end; index += 1) {
+      const point = this.readPointRecord(index)
+      candidates.push({
+        assetId: index,
+        kind: 'geo_point',
+        lat: coordinateFromE7(point.latE7),
+        lon: coordinateFromE7(point.lonE7),
+        timestampSec: point.timestampSec,
+        source: 'UNKNOWN',
+        groupKey: groupId,
+        sequence: point.sequence,
+      })
+    }
+    return timelineGroupPolylineFromCandidates(groupId, candidates)
+  }
+}
+
 class FileCatalogStore implements CatalogStore {
   readonly storageMode = 'file' as const
   readonly geoImportWriteBatchSize = GEO_IMPORT_WRITE_BATCH_SIZE
@@ -3603,6 +3978,7 @@ class FileCatalogStore implements CatalogStore {
   private transactionDepth = 0
   private backgroundIndexPromise: Promise<void> | undefined
   private residentPackedIndexes = new Map<FileCatalogIndexId, ResidentPackedGeoIndex>()
+  private residentTimelineGroupIndex: ResidentTimelineGroupIndex | undefined
   private residentPackedIndexLoadPromise: Promise<void> | undefined
   private residentPackedIndexLoadError: Error | undefined
 
@@ -3852,44 +4228,36 @@ class FileCatalogStore implements CatalogStore {
   ): Promise<TimelineGroupPage> {
     throwIfCancelled(isCancelled)
     const startedAt = performance.now()
-    const query = searchSpecToCatalogQuery(spec, Number.MAX_SAFE_INTEGER)
-    const catalog = await this.ensureMaterialized()
+    const readyStartedAt = performance.now()
+    const index = await this.timelineGroupIndex()
+    const queryIndexReadyMs = performance.now() - readyStartedAt
     throwIfCancelled(isCancelled)
-    const groups = new Map<string, TimelineGroupAccumulator>()
-    let inspected = 0
-    for (const item of catalog.assets) {
-      inspected += 1
-      if (inspected % 8192 === 0) {
-        throwIfCancelled(isCancelled)
-        await yieldToEventLoop()
-      }
-      if (itemMatchesQuery(item, query)) {
-        addItemToTimelineGroup(groups, item)
-      }
-    }
+    const scanStartedAt = performance.now()
+    const page = index.search(spec, isCancelled)
+    const queryIndexScanMs = performance.now() - scanStartedAt
     const offset = Math.max(0, spec.offset ?? 0)
     const requestedLimit = Math.max(0, spec.limit ?? 50)
-    const pageLimit = requestedLimit + 1
-    const results = timelineGroupResultsPage(groups, offset + pageLimit)
-    const pageCandidates =
-      requestedLimit === 0 ? [] : results.slice(offset, offset + pageLimit)
-    const limitReached = pageCandidates.length > requestedLimit
-    const pagedResults = pageCandidates.slice(0, requestedLimit)
     return {
-      groups: pagedResults,
-      limitReached,
+      groups: page.groups,
+      limitReached: page.limitReached,
       resultMetrics: withQueryMetrics(
         {
           ...defaultSearchStats('catalog-groups', 'Catalog groups'),
-          candidatesInspected: inspected,
-          pointCount: catalog.assets.length,
+          candidatesInspected: page.inspected,
+          pointCount: index.assetCount,
+          indexStorage: 'memory',
+          residentBytes: index.indexSizeBytes,
         },
         spec,
         performance.now() - startedAt,
-        pagedResults.length,
+        page.groups.length,
         requestedLimit,
         offset,
-        limitReached,
+        Boolean(page.limitReached),
+        {
+          queryIndexReadyMs,
+          queryIndexScanMs,
+        },
       ),
     }
   }
@@ -3899,33 +4267,7 @@ class FileCatalogStore implements CatalogStore {
     isCancelled: CancellationSignal = neverCancelled,
   ): Promise<MapPolyline> {
     throwIfCancelled(isCancelled)
-    const catalog = await this.ensureMaterialized()
-    const candidates: PolylineCandidate[] = []
-    for (let index = 0; index < catalog.assets.length; index += 1) {
-      if (index % 8192 === 0) {
-        throwIfCancelled(isCancelled)
-        await yieldToEventLoop()
-      }
-      const item = catalog.assets[index]
-      const matchingLocations = item.locations.filter(
-        (location) => location.groupId === groupId,
-      )
-      if (matchingLocations.length > 0) {
-        for (const location of matchingLocations) {
-          const candidate = groupCandidateFromItem(
-            item,
-            index + 1,
-            groupId,
-            location,
-          )
-          if (candidate) candidates.push(candidate)
-        }
-      } else if (item.groupId === groupId) {
-        const candidate = groupCandidateFromItem(item, index + 1, groupId)
-        if (candidate) candidates.push(candidate)
-      }
-    }
-    return timelineGroupPolylineFromCandidates(groupId, candidates)
+    return (await this.timelineGroupIndex()).polyline(groupId)
   }
 
   async prepareLineTileSource(
@@ -4316,6 +4658,7 @@ class FileCatalogStore implements CatalogStore {
 
   private clearResidentPackedIndexes(): void {
     this.residentPackedIndexes.clear()
+    this.residentTimelineGroupIndex = undefined
     this.residentPackedIndexLoadPromise = undefined
     this.residentPackedIndexLoadError = undefined
     lineTileSources.clear()
@@ -4328,6 +4671,42 @@ class FileCatalogStore implements CatalogStore {
     if (!file) return undefined
     const headerBuffer = await readFileRange(file, 0, PACKED_INDEX_HEADER_SIZE)
     return parsePackedIndexHeader(headerBuffer, spec.kind, file.size)
+  }
+
+  private async requiredPackedIndexHeaders(): Promise<PackedIndexHeader[]> {
+    const indexesDir = await childDirectory(await rootDirectory(), 'indexes')
+    const required = [
+      { fileName: TIME_GEO_INDEX_FILE, kind: INDEX_KIND_TIME_GEO },
+      { fileName: TIMELINE_GROUPS_INDEX_FILE, kind: INDEX_KIND_TIMELINE_GROUPS },
+      {
+        fileName: TIMELINE_GROUP_POINTS_INDEX_FILE,
+        kind: INDEX_KIND_TIMELINE_GROUP_POINTS,
+      },
+    ]
+    const headers: PackedIndexHeader[] = []
+    for (const spec of required) {
+      const file = await readFile(indexesDir, spec.fileName)
+      if (!file) return []
+      const headerBuffer = await readFileRange(file, 0, PACKED_INDEX_HEADER_SIZE)
+      const header = parsePackedIndexHeader(headerBuffer, spec.kind, file.size)
+      if (!header) return []
+      headers.push(header)
+    }
+    const stringsFile = await readFile(indexesDir, TIMELINE_GROUP_STRINGS_FILE)
+    if (!stringsFile) return []
+    let stringTable: TimelineGroupStringTable
+    try {
+      stringTable = JSON.parse(await stringsFile.text()) as TimelineGroupStringTable
+    } catch {
+      return []
+    }
+    if (
+      stringTable.schemaVersion !== BINARY_SCHEMA_VERSION ||
+      stringTable.catalogVersion !== headers[0]?.catalogVersion
+    ) {
+      return []
+    }
+    return headers
   }
 
   private async loadResidentPackedIndex(
@@ -4350,8 +4729,39 @@ class FileCatalogStore implements CatalogStore {
     return index
   }
 
+  private async loadResidentTimelineGroupIndex(
+    catalogVersion: number,
+  ): Promise<ResidentTimelineGroupIndex> {
+    const indexesDir = await childDirectory(await rootDirectory(), 'indexes')
+    const groupsFile = await readFile(indexesDir, TIMELINE_GROUPS_INDEX_FILE)
+    const pointsFile = await readFile(indexesDir, TIMELINE_GROUP_POINTS_INDEX_FILE)
+    const stringsFile = await readFile(indexesDir, TIMELINE_GROUP_STRINGS_FILE)
+    if (!groupsFile || !pointsFile || !stringsFile) {
+      throw new Error('Timeline group index files are missing.')
+    }
+    const [groupsBytes, pointsBytes, stringsText] = await Promise.all([
+      groupsFile.arrayBuffer(),
+      pointsFile.arrayBuffer(),
+      stringsFile.text(),
+    ])
+    const stringTable = JSON.parse(stringsText) as TimelineGroupStringTable
+    const index = ResidentTimelineGroupIndex.fromArrayBuffers(
+      groupsBytes,
+      pointsBytes,
+      stringTable,
+    )
+    if (!index) throw new Error('Timeline group index files are invalid.')
+    if (index.catalogVersion !== catalogVersion) {
+      throw new Error('Timeline group index files are stale.')
+    }
+    return index
+  }
+
   private residentIndexesCurrent(catalogVersion: number): boolean {
-    return this.residentPackedIndexes.get('file-time-geo')?.catalogVersion === catalogVersion
+    return (
+      this.residentPackedIndexes.get('file-time-geo')?.catalogVersion === catalogVersion &&
+      this.residentTimelineGroupIndex?.catalogVersion === catalogVersion
+    )
   }
 
   private async ensureResidentPackedIndexes(): Promise<void> {
@@ -4388,17 +4798,27 @@ class FileCatalogStore implements CatalogStore {
     return index
   }
 
+  private async timelineGroupIndex(): Promise<ResidentTimelineGroupIndex> {
+    await this.ensureResidentPackedIndexes()
+    if (!this.residentTimelineGroupIndex) {
+      throw new Error('Timeline group indexes could not be loaded into memory.')
+    }
+    return this.residentTimelineGroupIndex
+  }
+
   private async loadAllResidentPackedIndexes(catalogVersion: number): Promise<void> {
     try {
       console.log('[geo-index:worker] loading packed catalog indexes into memory', {
         catalogVersion,
       })
       const timeIndex = await this.loadResidentPackedIndex(catalogVersion)
+      const groupIndex = await this.loadResidentTimelineGroupIndex(catalogVersion)
       this.residentPackedIndexes.set('file-time-geo', timeIndex)
+      this.residentTimelineGroupIndex = groupIndex
       this.residentPackedIndexLoadError = undefined
       console.log('[geo-index:worker] packed catalog indexes loaded into memory', {
         catalogVersion,
-        residentBytes: timeIndex.indexSizeBytes,
+        residentBytes: timeIndex.indexSizeBytes + groupIndex.indexSizeBytes,
       })
     } catch (caught) {
       console.error('[geo-index:worker] failed to load packed catalog indexes into memory', caught)
@@ -5023,6 +5443,8 @@ class FileCatalogStore implements CatalogStore {
       throw new Error('Catalog asset table is missing or stale. Finish the import before rebuilding indexes.')
     }
     const timeRecords: PackedIndexRecord[] = []
+    const timelineGroups = new Map<string, TimelineGroupBuildAccumulator>()
+    const timelineGroupPointRecords: TimelineGroupPointIndexRecord[] = []
     let processed = 0
     for await (const { assetId, item } of assetTable.scan()) {
       if (
@@ -5040,6 +5462,32 @@ class FileCatalogStore implements CatalogStore {
           ...linePayloadFromItem(item),
         }
         timeRecords.push(record)
+      }
+      for (const groupId of timelineGroupIdsForItem(item)) {
+        updateTimelineGroupAccumulator(timelineGroups, item, groupId)
+      }
+      const groupedLocations = item.locations.filter((location) => location.groupId)
+      for (const location of groupedLocations) {
+        const candidate = groupCandidateFromItem(
+          item,
+          assetId,
+          location.groupId!,
+          location,
+        )
+        const pointRecord = candidate
+          ? timelineGroupPointRecordFromCandidate(candidate)
+          : undefined
+        if (pointRecord) timelineGroupPointRecords.push(pointRecord)
+      }
+      if (
+        item.groupId &&
+        !groupedLocations.some((location) => location.groupId === item.groupId)
+      ) {
+        const candidate = groupCandidateFromItem(item, assetId, item.groupId)
+        const pointRecord = candidate
+          ? timelineGroupPointRecordFromCandidate(candidate)
+          : undefined
+        if (pointRecord) timelineGroupPointRecords.push(pointRecord)
       }
       processed += 1
       if (processed % 50_000 === 0) {
@@ -5064,6 +5512,8 @@ class FileCatalogStore implements CatalogStore {
     await indexesDir.removeEntry('cell-time.idx').catch(() => undefined)
     console.log('[geo-index:worker] writing packed file catalog index files', {
       timeRecords: timeRecords.length,
+      timelineGroups: timelineGroups.size,
+      timelineGroupPoints: timelineGroupPointRecords.length,
     })
     await this.writePackedIndex(
       indexesDir,
@@ -5075,9 +5525,18 @@ class FileCatalogStore implements CatalogStore {
       0,
       'time-first index',
     )
+    await this.writeTimelineGroupIndexes(
+      indexesDir,
+      timelineGroups,
+      timelineGroupPointRecords,
+      postProgress,
+      currentIndexLabel,
+    )
     console.log('[geo-index:worker] write packed file catalog indexes complete', {
       catalogVersion: manifest.catalogVersion,
       timeRecords: timeRecords.length,
+      timelineGroups: timelineGroups.size,
+      timelineGroupPoints: timelineGroupPointRecords.length,
     })
   }
 
@@ -5195,6 +5654,210 @@ class FileCatalogStore implements CatalogStore {
     })
   }
 
+  private async writeTimelineGroupIndexes(
+    indexesDir: FileSystemDirectoryHandle,
+    groups: Map<string, TimelineGroupBuildAccumulator>,
+    pointRecords: TimelineGroupPointIndexRecord[],
+    postProgress: ((progress: GeoIndexBuildProgress) => void) | undefined,
+    currentIndexLabel: string,
+  ): Promise<void> {
+    const manifest = await this.ensureManifest()
+    postProgress?.({
+      phase: 'building',
+      pointCount: groups.size,
+      builtIndexes: 1,
+      totalIndexes: 1,
+      currentIndexId: 'file-time-geo',
+      currentIndexLabel: `${currentIndexLabel}: sorting timeline groups`,
+      currentIndexProcessedPoints: 0,
+      currentIndexTotalPoints: groups.size,
+    })
+    await yieldToEventLoop()
+
+    pointRecords.sort((left, right) =>
+      compareHash(
+        left.groupHashLo,
+        left.groupHashHi,
+        right.groupHashLo,
+        right.groupHashHi,
+      ) ||
+      left.sequence - right.sequence ||
+      left.timestampSec - right.timestampSec,
+    )
+    const pointRanges = new Map<string, { firstPointOffset: number; pointCount: number }>()
+    for (let index = 0; index < pointRecords.length; index += 1) {
+      const point = pointRecords[index]
+      const key = hashKey(point.groupHashLo, point.groupHashHi)
+      const range = pointRanges.get(key)
+      if (range) {
+        range.pointCount += 1
+      } else {
+        pointRanges.set(key, { firstPointOffset: index, pointCount: 1 })
+      }
+    }
+
+    const sortedGroups = Array.from(groups.values()).sort((left, right) =>
+      left.startTimeSec - right.startTimeSec ||
+      left.endTimeSec - right.endTimeSec ||
+      compareHash(left.groupHashLo, left.groupHashHi, right.groupHashLo, right.groupHashHi),
+    )
+    const stringTable: TimelineGroupStringTable = {
+      schemaVersion: BINARY_SCHEMA_VERSION,
+      catalogVersion: manifest.catalogVersion,
+      groups: sortedGroups.map((group) => ({
+        hash: hashKey(group.groupHashLo, group.groupHashHi),
+        id: group.id,
+        sourceTypes: Array.from(group.sourceTypes).sort((left, right) =>
+          left.localeCompare(right),
+        ),
+      })),
+    }
+    const summaryRecords = sortedGroups.map<TimelineGroupIndexRecord>(
+      (group, stringId) => {
+        const key = hashKey(group.groupHashLo, group.groupHashHi)
+        const range = pointRanges.get(key)
+        return {
+          groupHashLo: group.groupHashLo,
+          groupHashHi: group.groupHashHi,
+          stringId,
+          count: group.count,
+          startTimeSec: group.startTimeSec,
+          endTimeSec: group.endTimeSec,
+          minLatE7: group.minLatE7 === Number.MAX_SAFE_INTEGER ? 0 : group.minLatE7,
+          maxLatE7: group.maxLatE7 === Number.MIN_SAFE_INTEGER ? 0 : group.maxLatE7,
+          minLonE7: group.minLonE7 === Number.MAX_SAFE_INTEGER ? 0 : group.minLonE7,
+          maxLonE7: group.maxLonE7 === Number.MIN_SAFE_INTEGER ? 0 : group.maxLonE7,
+          kindMask: group.kindMask,
+          sourceTypeMask: group.sourceTypeMask,
+          firstPointOffset: range?.firstPointOffset ?? 0,
+          pointCount: range?.pointCount ?? 0,
+        }
+      },
+    )
+
+    await this.writeTimelineGroupSummaryIndex(
+      indexesDir,
+      summaryRecords,
+      postProgress,
+      currentIndexLabel,
+    )
+    await this.writeTimelineGroupPointIndex(
+      indexesDir,
+      pointRecords,
+      postProgress,
+      currentIndexLabel,
+    )
+    await writeFileParts(
+      indexesDir,
+      TIMELINE_GROUP_STRINGS_FILE,
+      [textEncoder.encode(JSON.stringify(stringTable))],
+    )
+  }
+
+  private async writeTimelineGroupSummaryIndex(
+    indexesDir: FileSystemDirectoryHandle,
+    records: TimelineGroupIndexRecord[],
+    postProgress: ((progress: GeoIndexBuildProgress) => void) | undefined,
+    currentIndexLabel: string,
+  ): Promise<void> {
+    const manifest = await this.ensureManifest()
+    const parts: BlobPart[] = [
+      bytesAsBlobPart(encodePackedIndexHeader(
+        INDEX_KIND_TIMELINE_GROUPS,
+        TIMELINE_GROUP_RECORD_SIZE,
+        manifest.catalogVersion,
+        manifest.assetCount,
+        records.length,
+        manifest.indexAppliedVersion,
+      )),
+    ]
+    for (let offset = 0; offset < records.length; offset += PACKED_SCAN_RECORDS) {
+      const chunk = records.slice(offset, offset + PACKED_SCAN_RECORDS)
+      const bytes = new Uint8Array(chunk.length * TIMELINE_GROUP_RECORD_SIZE)
+      const view = new DataView(bytes.buffer)
+      for (let index = 0; index < chunk.length; index += 1) {
+        const record = chunk[index]
+        const recordOffset = index * TIMELINE_GROUP_RECORD_SIZE
+        view.setUint32(recordOffset, record.groupHashLo, true)
+        view.setUint32(recordOffset + 4, record.groupHashHi, true)
+        view.setUint32(recordOffset + 8, record.stringId, true)
+        view.setUint32(recordOffset + 12, record.count, true)
+        view.setUint32(recordOffset + 16, record.startTimeSec, true)
+        view.setUint32(recordOffset + 20, record.endTimeSec, true)
+        view.setInt32(recordOffset + 24, record.minLatE7, true)
+        view.setInt32(recordOffset + 28, record.maxLatE7, true)
+        view.setInt32(recordOffset + 32, record.minLonE7, true)
+        view.setInt32(recordOffset + 36, record.maxLonE7, true)
+        view.setUint32(recordOffset + 40, record.kindMask, true)
+        view.setUint32(recordOffset + 44, record.sourceTypeMask, true)
+        view.setUint32(recordOffset + 48, record.firstPointOffset, true)
+        view.setUint32(recordOffset + 52, record.pointCount, true)
+      }
+      parts.push(bytes)
+      const processed = Math.min(records.length, offset + chunk.length)
+      postProgress?.({
+        phase: 'building',
+        pointCount: records.length,
+        builtIndexes: 1,
+        totalIndexes: 1,
+        currentIndexId: 'file-time-geo',
+        currentIndexLabel: `${currentIndexLabel}: writing timeline groups`,
+        currentIndexProcessedPoints: processed,
+        currentIndexTotalPoints: records.length,
+      })
+      await yieldToEventLoop()
+    }
+    await writeFileParts(indexesDir, TIMELINE_GROUPS_INDEX_FILE, parts)
+  }
+
+  private async writeTimelineGroupPointIndex(
+    indexesDir: FileSystemDirectoryHandle,
+    records: TimelineGroupPointIndexRecord[],
+    postProgress: ((progress: GeoIndexBuildProgress) => void) | undefined,
+    currentIndexLabel: string,
+  ): Promise<void> {
+    const manifest = await this.ensureManifest()
+    const parts: BlobPart[] = [
+      bytesAsBlobPart(encodePackedIndexHeader(
+        INDEX_KIND_TIMELINE_GROUP_POINTS,
+        TIMELINE_GROUP_POINT_RECORD_SIZE,
+        manifest.catalogVersion,
+        manifest.assetCount,
+        records.length,
+        manifest.indexAppliedVersion,
+      )),
+    ]
+    for (let offset = 0; offset < records.length; offset += PACKED_SCAN_RECORDS) {
+      const chunk = records.slice(offset, offset + PACKED_SCAN_RECORDS)
+      const bytes = new Uint8Array(chunk.length * TIMELINE_GROUP_POINT_RECORD_SIZE)
+      const view = new DataView(bytes.buffer)
+      for (let index = 0; index < chunk.length; index += 1) {
+        const record = chunk[index]
+        const recordOffset = index * TIMELINE_GROUP_POINT_RECORD_SIZE
+        view.setUint32(recordOffset, record.groupHashLo, true)
+        view.setUint32(recordOffset + 4, record.groupHashHi, true)
+        view.setInt32(recordOffset + 8, record.sequence, true)
+        view.setUint32(recordOffset + 12, record.timestampSec, true)
+        view.setInt32(recordOffset + 16, record.latE7, true)
+        view.setInt32(recordOffset + 20, record.lonE7, true)
+      }
+      parts.push(bytes)
+      const processed = Math.min(records.length, offset + chunk.length)
+      postProgress?.({
+        phase: 'building',
+        pointCount: records.length,
+        builtIndexes: 1,
+        totalIndexes: 1,
+        currentIndexId: 'file-time-geo',
+        currentIndexLabel: `${currentIndexLabel}: writing timeline group points`,
+        currentIndexProcessedPoints: processed,
+        currentIndexTotalPoints: records.length,
+      })
+      await yieldToEventLoop()
+    }
+    await writeFileParts(indexesDir, TIMELINE_GROUP_POINTS_INDEX_FILE, parts)
+  }
+
   private async buildFileCatalogIndexes(
     indexId: FileCatalogIndexId,
     postProgress: (progress: GeoIndexBuildProgress) => void,
@@ -5278,18 +5941,23 @@ class FileCatalogStore implements CatalogStore {
     indexId: FileCatalogIndexId,
   ): Promise<SearchIndexStats> {
     const manifest = await this.ensureManifest()
-    const index = await this.readPackedIndexHeader()
+    const timeIndex = await this.readPackedIndexHeader()
+    const requiredIndexes = await this.requiredPackedIndexHeaders()
     const resident = this.residentPackedIndexes.get(indexId)
-    const indexCatalogVersion = index?.catalogVersion
+    const indexCatalogVersion = timeIndex?.catalogVersion
+    const allRequiredCurrent =
+      requiredIndexes.length === 3 &&
+      requiredIndexes.every((entry) => entry.catalogVersion === manifest.catalogVersion)
     const isCurrent =
-      Boolean(index) &&
+      Boolean(timeIndex) &&
+      allRequiredCurrent &&
       manifest.materializedVersion === manifest.catalogVersion &&
       manifest.indexAppliedVersion === manifest.catalogVersion &&
       indexCatalogVersion === manifest.catalogVersion
     const isResident =
       isCurrent &&
       resident?.catalogVersion === manifest.catalogVersion &&
-      resident?.indexSizeBytes === index?.indexSizeBytes
+      this.residentTimelineGroupIndex?.catalogVersion === manifest.catalogVersion
     if (isCurrent && !isResident && !this.residentPackedIndexLoadError) {
       this.scheduleResidentPackedIndexPreload()
     }
@@ -5300,8 +5968,12 @@ class FileCatalogStore implements CatalogStore {
         fileCatalogIndexSpec().label,
       ),
       pointCount: manifest.assetCount,
-      indexSizeBytes: index?.indexSizeBytes,
-      residentBytes: isResident ? resident.indexSizeBytes : undefined,
+      indexSizeBytes: requiredIndexes.length > 0
+        ? requiredIndexes.reduce((total, entry) => total + entry.indexSizeBytes, 0)
+        : timeIndex?.indexSizeBytes,
+      residentBytes: isResident && resident && this.residentTimelineGroupIndex
+        ? resident.indexSizeBytes + this.residentTimelineGroupIndex.indexSizeBytes
+        : undefined,
       indexStorage: isResident ? 'memory' : 'disk',
       indexStatus: this.residentPackedIndexLoadError
         ? 'failed'
@@ -5313,7 +5985,7 @@ class FileCatalogStore implements CatalogStore {
             ? 'pending'
           : manifest.indexJob?.status === 'failed'
               ? 'failed'
-              : index ? 'stale' : 'missing',
+              : timeIndex ? 'stale' : 'missing',
       catalogVersion: manifest.catalogVersion,
       indexCatalogVersion,
     }
