@@ -2285,14 +2285,6 @@ function App() {
             )}
           </div>
 
-          <details className="map-settings-accordion">
-            <summary>
-              <Settings2 size={16} />
-              {t('mapSettings')}
-            </summary>
-            {mapSettingsControls}
-          </details>
-
           <div
             aria-label={t('resizeMapAndQueryPanels')}
             aria-orientation="horizontal"
@@ -2383,6 +2375,14 @@ function App() {
                 </label>
               )}
             </section>
+
+            <details className="map-settings-accordion">
+              <summary>
+                <Settings2 size={16} />
+                {t('mapSettings')}
+              </summary>
+              {mapSettingsControls}
+            </details>
 
             <section className="panel index-panel">
               <div className="panel-title">

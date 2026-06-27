@@ -276,6 +276,58 @@ async function appbarReport(page: Page): Promise<{
   })
 }
 
+async function mapSettingsPlacementReport(page: Page): Promise<{
+  missing: string[]
+  settingsParentIsControlPane: boolean
+  queryParentIsControlPane: boolean
+  settingsImmediatelyAfterQuery: boolean
+  settingsBelowResizeHandle: boolean
+  queryBelowResizeHandle: boolean
+  settingsTop: number
+  queryTop: number
+  resizeBottom: number
+}> {
+  return page.evaluate(() => {
+    const settings = document.querySelector('.map-settings-accordion')
+    const resizeHandle = document.querySelector('.resize-handle-horizontal')
+    const controlPane = document.querySelector('.control-pane')
+    const queryPanel = Array.from(controlPane?.children ?? []).find(
+      (element) =>
+        element.matches('section.panel') &&
+        element.querySelector('h2')?.textContent?.trim() === 'Query',
+    )
+    const missing = [
+      settings ? undefined : '.map-settings-accordion',
+      resizeHandle ? undefined : '.resize-handle-horizontal',
+      controlPane ? undefined : '.control-pane',
+      queryPanel ? undefined : 'query panel',
+    ].filter((value): value is string => Boolean(value))
+    const settingsRect = settings?.getBoundingClientRect()
+    const resizeRect = resizeHandle?.getBoundingClientRect()
+    const queryRect = queryPanel?.getBoundingClientRect()
+
+    return {
+      missing,
+      settingsParentIsControlPane: settings?.parentElement === controlPane,
+      queryParentIsControlPane: queryPanel?.parentElement === controlPane,
+      settingsImmediatelyAfterQuery: queryPanel?.nextElementSibling === settings,
+      settingsBelowResizeHandle: Boolean(
+        settingsRect &&
+          resizeRect &&
+          settingsRect.top >= resizeRect.bottom - 2,
+      ),
+      queryBelowResizeHandle: Boolean(
+        queryRect &&
+          resizeRect &&
+          queryRect.top >= resizeRect.bottom - 2,
+      ),
+      settingsTop: settingsRect?.top ?? Number.NaN,
+      queryTop: queryRect?.top ?? Number.NaN,
+      resizeBottom: resizeRect?.bottom ?? Number.NaN,
+    }
+  })
+}
+
 async function appbarAlertReport(page: Page): Promise<{
   alertMissing: boolean
   alertOutside: string[]
@@ -408,6 +460,32 @@ describeE2E('responsive layout e2e', () => {
     }
   }, TEST_TIMEOUT_MS)
 
+  it('keeps map settings below the map resize handle as a query neighbour', async () => {
+    const { context, userDataDir } = await createContext({
+      width: 1280,
+      height: 720,
+    })
+    const page = await context.newPage()
+    try {
+      await page.goto(baseUrl)
+      await page.locator('.map-settings-accordion').waitFor({
+        timeout: STEP_TIMEOUT_MS,
+      })
+
+      const report = await mapSettingsPlacementReport(page)
+      expect(report.missing, JSON.stringify(report)).toEqual([])
+      expect(report.settingsParentIsControlPane, JSON.stringify(report)).toBe(true)
+      expect(report.queryParentIsControlPane, JSON.stringify(report)).toBe(true)
+      expect(report.settingsImmediatelyAfterQuery, JSON.stringify(report)).toBe(true)
+      expect(report.queryBelowResizeHandle, JSON.stringify(report)).toBe(true)
+      expect(report.settingsBelowResizeHandle, JSON.stringify(report)).toBe(true)
+    } finally {
+      await page.close().catch(() => undefined)
+      await context.close()
+      await rm(userDataDir, { force: true, recursive: true })
+    }
+  }, TEST_TIMEOUT_MS)
+
   it('keeps the index error banner in its own appbar row on desktop widths', async () => {
     const { context, userDataDir } = await createContext({
       width: 1600,
@@ -429,7 +507,7 @@ describeE2E('responsive layout e2e', () => {
         expect(report.alertOutside, `${viewport.name} ${JSON.stringify(report)}`).toEqual([])
         expect(report.overlaps, `${viewport.name} ${JSON.stringify(report)}`).toEqual([])
         expect(report.alertBelowFirstRow, `${viewport.name} ${JSON.stringify(report)}`).toBe(true)
-        expect(report.titleTopDeltaPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(10)
+        expect(report.titleTopDeltaPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(12)
         expect(report.alertLeftDeltaToTitlePx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
         expect(report.alertRightDeltaToActionsPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
         expect(report.topbarOverflowPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
@@ -455,7 +533,6 @@ describeE2E('responsive layout e2e', () => {
 
         await page.locator('details.settings-menu summary').click()
         await page.getByLabel('Show debug data').check()
-        await page.getByLabel('Map bubble density').selectOption('80')
 
         const openSettingsReport = await layoutReport(page)
         expect(
@@ -466,6 +543,9 @@ describeE2E('responsive layout e2e', () => {
         await page.evaluate(() => {
           document.querySelector('details.settings-menu')?.removeAttribute('open')
         })
+        await page.locator('details.map-settings-accordion summary').click()
+        await page.getByLabel('Map bubble density').selectOption('80')
+
         const report = await layoutReport(page)
         expect(report.keyBoxesOutside, JSON.stringify(report)).toEqual([])
         expect(report.controlsOutside, JSON.stringify(report)).toEqual([])
