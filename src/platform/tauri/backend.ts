@@ -10,6 +10,7 @@ import type {
   LineTileResult,
   LineTileSourceSummary,
   MapPointPage,
+  MapPolyline,
   MediaItem,
   MediaLocation,
   MediaSource,
@@ -102,6 +103,17 @@ class TauriCatalogBackend implements CatalogBackend {
     options: CatalogSearchOptions = {},
   ): Promise<TimelineGroupPage> {
     return invokeWithAbort('search_timeline_groups', { spec }, options.signal)
+  }
+
+  getTimelineGroupPolyline(
+    groupId: string,
+    options: CatalogSearchOptions = {},
+  ): Promise<MapPolyline> {
+    return invokeWithAbort(
+      'get_timeline_group_polyline',
+      { groupId },
+      options.signal,
+    )
   }
 
   prepareLineTileSource(

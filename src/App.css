@@ -1185,6 +1185,14 @@
   border: 1px solid #e2e8e4;
   border-radius: 6px;
   background: #ffffff;
+  cursor: pointer;
+}
+
+.timeline-group-card:hover,
+.timeline-group-card:focus-visible {
+  border-color: #d84d2a;
+  box-shadow: 0 0 0 2px rgba(216, 77, 42, 0.12);
+  outline: none;
 }
 
 .timeline-group-card strong,

@@ -176,6 +176,10 @@ type CatalogStore = {
     spec: SearchSpec,
     isCancelled?: CancellationSignal,
   ): Promise<TimelineGroupPage>
+  getTimelineGroupPolyline(
+    groupId: string,
+    isCancelled?: CancellationSignal,
+  ): Promise<MapPolyline>
   prepareLineTileSource(
     spec: SearchSpec,
     isCancelled?: CancellationSignal,
@@ -948,11 +952,23 @@ function addItemToTimelineGroup(
   groups.set(groupId, group)
 }
 
-function timelineGroupResults(
+function timelineGroupCompare(
+  left: TimelineGroupResult,
+  right: TimelineGroupResult,
+): number {
+  const leftTime = left.startTime ?? Number.MAX_SAFE_INTEGER
+  const rightTime = right.startTime ?? Number.MAX_SAFE_INTEGER
+  return leftTime - rightTime || left.id.localeCompare(right.id)
+}
+
+function timelineGroupResultsPage(
   groups: Map<string, TimelineGroupAccumulator>,
+  takeCount: number,
 ): TimelineGroupResult[] {
-  return Array.from(groups.values())
-    .map((group) => ({
+  if (takeCount <= 0) return []
+  const results: TimelineGroupResult[] = []
+  for (const group of groups.values()) {
+    const result = {
       id: group.id,
       count: group.count,
       startTime: group.startTime,
@@ -964,12 +980,91 @@ function timelineGroupResults(
         left.localeCompare(right),
       ),
       bounds: group.bounds,
+    }
+    const insertIndex = results.findIndex(
+      (existing) => timelineGroupCompare(result, existing) < 0,
+    )
+    if (insertIndex === -1) {
+      if (results.length < takeCount) {
+        results.push(result)
+      }
+    } else {
+      results.splice(insertIndex, 0, result)
+      if (results.length > takeCount) {
+        results.pop()
+      }
+    }
+  }
+  return results
+}
+
+function groupCandidateFromItem(
+  item: MediaItem,
+  assetId: number,
+  groupId: string,
+  location?: MediaLocation,
+): PolylineCandidate | undefined {
+  if (typeof item.latitude !== 'number' || typeof item.longitude !== 'number') {
+    return undefined
+  }
+  const timestamp = location?.timestamp ?? item.timestamp
+  if (typeof timestamp !== 'number') return undefined
+  return {
+    assetId,
+    kind: item.kind,
+    lat: item.latitude,
+    lon: item.longitude,
+    timestampSec: Math.floor(timestamp / 1000),
+    source: 'UNKNOWN',
+    accuracyMeters: item.accuracyMeters,
+    groupKey: groupId,
+    sequence: location?.sequence ?? item.sequence,
+  }
+}
+
+function timelineGroupPolylineFromCandidates(
+  groupId: string,
+  candidates: PolylineCandidate[],
+): MapPolyline {
+  const groupedSegments = splitGroupByConsecutiveSequence(groupId, candidates)
+  const segments: NonNullable<MapPolyline['segments']> = []
+  const points: MapPolyline['points'] = []
+  for (const segment of groupedSegments.lineSegments) {
+    const segmentPoints = segment.candidates.map((candidate) => ({
+      lat: candidate.lat,
+      lon: candidate.lon,
     }))
-    .sort((left, right) => {
-      const leftTime = left.startTime ?? Number.MAX_SAFE_INTEGER
-      const rightTime = right.startTime ?? Number.MAX_SAFE_INTEGER
-      return leftTime - rightTime || left.id.localeCompare(right.id)
-    })
+    if (segmentPoints.length < 2) continue
+    segments.push({ groupKey: groupId, points: segmentPoints })
+    points.push(...segmentPoints)
+  }
+
+  const bounds =
+    points.length > 0
+      ? points.reduce<GeoBounds>(
+          (current, point) => ({
+            minLat: Math.min(current.minLat, point.lat),
+            maxLat: Math.max(current.maxLat, point.lat),
+            minLon: Math.min(current.minLon, point.lon),
+            maxLon: Math.max(current.maxLon, point.lon),
+          }),
+          {
+            minLat: Number.POSITIVE_INFINITY,
+            maxLat: Number.NEGATIVE_INFINITY,
+            minLon: Number.POSITIVE_INFINITY,
+            maxLon: Number.NEGATIVE_INFINITY,
+          },
+        )
+      : undefined
+
+  return {
+    points,
+    segments,
+    bounds,
+    sourcePointCount: candidates.length,
+    simplifiedPointCount: points.length,
+    tolerancePx: 0,
+  }
 }
 
 function defaultSearchStats(engineId: string, engineLabel: string): SearchIndexStats {
@@ -3772,14 +3867,17 @@ class FileCatalogStore implements CatalogStore {
         addItemToTimelineGroup(groups, item)
       }
     }
-    const results = timelineGroupResults(groups)
     const offset = Math.max(0, spec.offset ?? 0)
-    const limit = Math.max(0, spec.limit ?? results.length)
-    const pagedResults =
-      limit === 0 ? [] : results.slice(offset, offset + limit)
+    const requestedLimit = Math.max(0, spec.limit ?? 50)
+    const pageLimit = requestedLimit + 1
+    const results = timelineGroupResultsPage(groups, offset + pageLimit)
+    const pageCandidates =
+      requestedLimit === 0 ? [] : results.slice(offset, offset + pageLimit)
+    const limitReached = pageCandidates.length > requestedLimit
+    const pagedResults = pageCandidates.slice(0, requestedLimit)
     return {
       groups: pagedResults,
-      totalGroups: results.length,
+      limitReached,
       resultMetrics: withQueryMetrics(
         {
           ...defaultSearchStats('catalog-groups', 'Catalog groups'),
@@ -3789,11 +3887,45 @@ class FileCatalogStore implements CatalogStore {
         spec,
         performance.now() - startedAt,
         pagedResults.length,
-        limit,
+        requestedLimit,
         offset,
-        offset + pagedResults.length < results.length,
+        limitReached,
       ),
     }
+  }
+
+  async getTimelineGroupPolyline(
+    groupId: string,
+    isCancelled: CancellationSignal = neverCancelled,
+  ): Promise<MapPolyline> {
+    throwIfCancelled(isCancelled)
+    const catalog = await this.ensureMaterialized()
+    const candidates: PolylineCandidate[] = []
+    for (let index = 0; index < catalog.assets.length; index += 1) {
+      if (index % 8192 === 0) {
+        throwIfCancelled(isCancelled)
+        await yieldToEventLoop()
+      }
+      const item = catalog.assets[index]
+      const matchingLocations = item.locations.filter(
+        (location) => location.groupId === groupId,
+      )
+      if (matchingLocations.length > 0) {
+        for (const location of matchingLocations) {
+          const candidate = groupCandidateFromItem(
+            item,
+            index + 1,
+            groupId,
+            location,
+          )
+          if (candidate) candidates.push(candidate)
+        }
+      } else if (item.groupId === groupId) {
+        const candidate = groupCandidateFromItem(item, index + 1, groupId)
+        if (candidate) candidates.push(candidate)
+      }
+    }
+    return timelineGroupPolylineFromCandidates(groupId, candidates)
   }
 
   async prepareLineTileSource(
@@ -6134,6 +6266,11 @@ async function handleRequest(
     case 'searchTimelineGroups':
       return store.searchTimelineGroups(
         request.payload as SearchSpec,
+        () => cancelledRequests.has(request.id),
+      )
+    case 'getTimelineGroupPolyline':
+      return store.getTimelineGroupPolyline(
+        request.payload as string,
         () => cancelledRequests.has(request.id),
       )
     case 'prepareLineTileSource':

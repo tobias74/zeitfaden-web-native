@@ -452,7 +452,6 @@ function timelineSegmentGroupId(
 }
 
 function timelinePathItem(
-  segmentIndex: number,
   pointIndex: number,
   segment: Record<string, unknown>,
   point: unknown,
@@ -471,8 +470,6 @@ function timelinePathItem(
     timestamp,
     sourceDataset: 'google_timeline',
     sourceType: 'timeline_path',
-    groupId: timelineSegmentGroupId(segmentIndex, startTime, endTime),
-    sequence: pointIndex,
     metadata: {
       segmentStartTime: startTime,
       segmentEndTime: endTime,
@@ -545,7 +542,6 @@ function timelineVisitItem(
     endTimestamp: endTime,
     sourceDataset: 'google_timeline',
     sourceType: 'visit',
-    groupId: timelineSegmentGroupId(segmentIndex, startTime, endTime),
     contentHash,
     displayName: `Visit ${segmentIndex + 1}`,
     metadata: {
@@ -593,7 +589,6 @@ function timelineActivityItem(
     endTimestamp: endTime,
     sourceDataset: 'google_timeline',
     sourceType: 'activity',
-    groupId: timelineSegmentGroupId(segmentIndex, startTime, endTime),
     contentHash,
     displayName: `Activity ${segmentIndex + 1}`,
     metadata: {
@@ -693,11 +688,22 @@ export function parseGoogleTimelineLocationItems(jsonText: string): ParsedGeoFil
       return
     }
     if (Array.isArray(segment.timelinePath)) {
+      const pathItems: Array<{ item: ParsedGeoItem; pointIndex: number }> = []
       segment.timelinePath.forEach((point, pointIndex) => {
-        const item = timelinePathItem(segmentIndex, pointIndex, segment, point)
-        if (item) items.push(item)
+        const item = timelinePathItem(pointIndex, segment, point)
+        if (item) pathItems.push({ item, pointIndex })
         else skippedPoints += 1
       })
+      if (pathItems.length > 1) {
+        const startTime = timestampMillis(segment.startTime)
+        const endTime = timestampMillis(segment.endTime)
+        const groupId = timelineSegmentGroupId(segmentIndex, startTime, endTime)
+        pathItems.forEach(({ item, pointIndex }) => {
+          item.groupId = groupId
+          item.sequence = pointIndex
+        })
+      }
+      items.push(...pathItems.map(({ item }) => item))
     }
     const visit = timelineVisitItem(segmentIndex, segment)
     if (visit) items.push(visit)

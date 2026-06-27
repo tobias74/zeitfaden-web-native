@@ -153,7 +153,8 @@ export type TimelineGroupResult = {
 
 export type TimelineGroupPage = {
   groups: TimelineGroupResult[]
-  totalGroups: number
+  totalGroups?: number
+  limitReached?: boolean
   resultMetrics?: SearchResultMetrics
 }
 

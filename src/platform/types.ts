@@ -14,6 +14,7 @@ import type {
   SearchIndexStats,
   SearchPage,
   SearchSpec,
+  MapPolyline,
   TimelineGroupPage,
   TimeRange,
   ValidationReport,
@@ -97,6 +98,10 @@ export interface CatalogBackend {
     spec: SearchSpec,
     options?: CatalogSearchOptions,
   ): Promise<TimelineGroupPage>
+  getTimelineGroupPolyline(
+    groupId: string,
+    options?: CatalogSearchOptions,
+  ): Promise<MapPolyline>
   prepareLineTileSource(
     spec: SearchSpec,
     options?: CatalogSearchOptions,

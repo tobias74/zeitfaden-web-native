@@ -296,7 +296,8 @@ describe('geo point helpers', () => {
     )
 
     expect(result.points).toHaveLength(2)
-    expect(result.items).toMatchObject([
+    const items = result.items ?? []
+    expect(items).toMatchObject([
       {
         kind: 'geo_point',
         sourceDataset: 'google_timeline_raw_signals',
@@ -315,7 +316,6 @@ describe('geo point helpers', () => {
         kind: 'geo_point',
         sourceDataset: 'google_timeline',
         sourceType: 'timeline_path',
-        sequence: 0,
       },
       {
         kind: 'timeline_visit',
@@ -336,6 +336,58 @@ describe('geo point helpers', () => {
         sourceType: 'frequent_place',
       },
     ])
+    expect(items[2].groupId).toBeUndefined()
+    expect(items[2].sequence).toBeUndefined()
+    expect(items[3].groupId).toBeUndefined()
+    expect(items[4].groupId).toBeUndefined()
+  })
+
+  it('only assigns timeline path group ids to real multi-point paths', () => {
+    const result = parseGeoFilePoints(
+      'Zeitachse.json',
+      JSON.stringify({
+        semanticSegments: [
+          {
+            startTime: '2026-06-01T10:00:00.000+02:00',
+            endTime: '2026-06-01T11:00:00.000+02:00',
+            timelinePath: [
+              {
+                point: '48.1370673°, 11.5775995°',
+                time: '2026-06-01T10:10:00.000+02:00',
+              },
+            ],
+          },
+          {
+            startTime: '2026-06-01T12:00:00.000+02:00',
+            endTime: '2026-06-01T13:00:00.000+02:00',
+            timelinePath: [
+              {
+                point: '48.2000000°, 11.6000000°',
+                time: '2026-06-01T12:10:00.000+02:00',
+              },
+              {
+                point: '48.2100000°, 11.6100000°',
+                time: '2026-06-01T12:20:00.000+02:00',
+              },
+            ],
+          },
+        ],
+      }),
+    )
+
+    const items = result.items ?? []
+    const singleton = items[0]
+    const grouped = items.slice(1)
+    expect(singleton).toMatchObject({
+      kind: 'geo_point',
+      sourceType: 'timeline_path',
+    })
+    expect(singleton.groupId).toBeUndefined()
+    expect(singleton.sequence).toBeUndefined()
+    expect(grouped).toHaveLength(2)
+    expect(grouped[0].groupId).toBe(grouped[1].groupId)
+    expect(grouped[0].groupId).toMatch(/^google_timeline_segment:v1:2:/)
+    expect(grouped.map((item) => item.sequence)).toEqual([0, 1])
   })
 
   it('rejects files whose geo format cannot be detected', () => {

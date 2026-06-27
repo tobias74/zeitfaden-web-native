@@ -21,6 +21,8 @@ vi.mock('./components/MapView', async () => {
       onQueryPointChange,
       onVisibleViewportChange,
       hoverPoint,
+      highlightPolyline,
+      focusBoundsRequest,
       mapMode,
       polyline,
       lineTileSource,
@@ -39,6 +41,16 @@ vi.mock('./components/MapView', async () => {
         heightPx: number
       }) => void
       hoverPoint?: { lat: number; lon: number }
+      highlightPolyline?: MapPolyline
+      focusBoundsRequest?: {
+        bounds: {
+          minLat: number
+          maxLat: number
+          minLon: number
+          maxLon: number
+        }
+        token: number
+      }
       mapMode?: MapDisplayMode
       polyline?: MapPolyline
       lineTileSource?: LineTileSourceSummary
@@ -112,6 +124,19 @@ vi.mock('./components/MapView', async () => {
           <div data-testid="map-mode">{mapMode}</div>
           <div data-testid="map-polyline-count">
             {polyline?.points.length ?? 0}
+          </div>
+          <div data-testid="map-highlight-polyline-count">
+            {highlightPolyline?.points.length ?? 0}
+          </div>
+          <div data-testid="map-focus-bounds">
+            {focusBoundsRequest
+              ? [
+                  focusBoundsRequest.bounds.minLat,
+                  focusBoundsRequest.bounds.maxLat,
+                  focusBoundsRequest.bounds.minLon,
+                  focusBoundsRequest.bounds.maxLon,
+                ].join(',')
+              : ''}
           </div>
         </>
       )
@@ -317,8 +342,28 @@ function createPlatform(): PlatformBackend {
       return {
         ...page,
         groups: limit === 0 ? [] : page.groups.slice(offset, offset + limit),
+        limitReached: offset + limit < page.groups.length,
       }
     },
+    getTimelineGroupPolyline: async (groupId) => ({
+      points: [
+        { lat: 48.1, lon: 11.5 },
+        { lat: 48.2, lon: 11.6 },
+      ],
+      segments: [
+        {
+          groupKey: groupId,
+          points: [
+            { lat: 48.1, lon: 11.5 },
+            { lat: 48.2, lon: 11.6 },
+          ],
+        },
+      ],
+      bounds: { minLat: 48.1, maxLat: 48.2, minLon: 11.5, maxLon: 11.6 },
+      sourcePointCount: 2,
+      simplifiedPointCount: 2,
+      tolerancePx: 0,
+    }),
     prepareLineTileSource: async (spec, options) => {
       lineTileSourceCalls.push(spec)
       if (options?.signal) {
@@ -476,6 +521,12 @@ describe('App pagination', () => {
     render(<App />)
 
     expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
+    expect(
+      screen.getByRole('button', { name: /Import media folder/i }),
+    ).toBeTruthy()
+    expect(
+      screen.queryByRole('button', { name: /Import geo folder/i }),
+    ).toBeNull()
     await waitFor(() => {
       expect(
         searchMapPointCalls.some(
@@ -510,7 +561,7 @@ describe('App pagination', () => {
     })
   })
 
-  it('shows imported timeline metadata and visible groups', async () => {
+  it('shows imported timeline metadata and groups', async () => {
     window.localStorage.setItem('geo-media-index-lab:result-metadata', 'true')
     resultItemsOverride = [
       {
@@ -558,6 +609,7 @@ describe('App pagination', () => {
           endTime: Date.parse('2026-06-01T10:10:00.000Z'),
           sourceTypes: ['timeline_path'],
           kinds: ['geo_point'],
+          bounds: { minLat: 48.1, maxLat: 48.2, minLon: 11.5, maxLon: 11.6 },
         },
       ],
       totalGroups: 1,
@@ -571,7 +623,20 @@ describe('App pagination', () => {
     expect(screen.getByText(/Source type: timeline_path/)).toBeTruthy()
     expect(screen.getByText(/Accuracy: 12 m/)).toBeTruthy()
     fireEvent.click(screen.getByRole('tab', { name: /Tours \/ groups/ }))
-    expect(screen.getAllByText(/Segment 7/).length).toBeGreaterThan(0)
+    const groupCard = await waitFor(() => {
+      expect(screen.getAllByText(/Segment 7/).length).toBeGreaterThan(0)
+      const card = screen.getByText(/Segment 7/).closest('.timeline-group-card')
+      expect(card).toBeTruthy()
+      return card as HTMLElement
+    })
+    fireEvent.pointerEnter(groupCard)
+    await waitFor(() => {
+      expect(screen.getByTestId('map-highlight-polyline-count').textContent).toBe('2')
+    })
+    fireEvent.click(groupCard)
+    expect(screen.getByTestId('map-focus-bounds').textContent).toBe(
+      '48.1,48.2,11.5,11.6',
+    )
   })
 
   it('paginates matching groups in a separate trips tab', async () => {
@@ -581,16 +646,18 @@ describe('App pagination', () => {
     render(<App />)
 
     expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
+    expect(searchTimelineGroupCalls).toHaveLength(0)
     fireEvent.click(screen.getByRole('tab', { name: /Tours \/ groups/ }))
 
     await waitFor(() => {
-      expect(screen.getByText('1-50 of 75 groups')).toBeTruthy()
+      expect(screen.getByText('1-50')).toBeTruthy()
       expect(screen.getByText(/Segment 50/)).toBeTruthy()
       expect(screen.queryByText(/Segment 51/)).toBeNull()
       expect(
         searchTimelineGroupCalls.some(
           (query) =>
             query.purpose === 'groups' &&
+            query.kind === 'all' &&
             query.limit === 50 &&
             query.offset === 0,
         ),
@@ -601,13 +668,14 @@ describe('App pagination', () => {
     fireEvent.click(screen.getByTitle('Next page'))
 
     await waitFor(() => {
-      expect(screen.getByText('51-75 of 75 groups')).toBeTruthy()
+      expect(screen.getByText('51-75')).toBeTruthy()
       expect(screen.getByText(/Segment 75/)).toBeTruthy()
       expect(screen.queryByText(/Segment 50/)).toBeNull()
       expect(
         searchTimelineGroupCalls.some(
           (query) =>
             query.purpose === 'groups' &&
+            query.kind === 'all' &&
             query.limit === 50 &&
             query.offset === 50,
         ),
@@ -773,7 +841,7 @@ describe('App pagination', () => {
       (speedBreakSlider as HTMLInputElement).max,
     )
     fireEvent.change(speedBreakSlider, {
-      target: { value: '3' },
+      target: { value: '55.2' },
     })
     expect(
       lineTileRequests.some(
@@ -789,7 +857,7 @@ describe('App pagination', () => {
       (maxSegmentSlider as HTMLInputElement).max,
     )
     fireEvent.change(maxSegmentSlider, {
-      target: { value: '4' },
+      target: { value: '16.1' },
     })
     expect(
       lineTileRequests.some(

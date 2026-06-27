@@ -1,6 +1,7 @@
 import Feature from 'ol/Feature'
 import Map from 'ol/Map'
 import View from 'ol/View'
+import LineString from 'ol/geom/LineString'
 import Point from 'ol/geom/Point'
 import ExtentInteraction from 'ol/interaction/Extent'
 import TileLayer from 'ol/layer/Tile'
@@ -50,6 +51,11 @@ type LineTileRequestBase = Omit<
 type MapViewProps = {
   queryPoint?: QueryPoint
   hoverPoint?: QueryPoint
+  highlightPolyline?: MapPolyline
+  focusBoundsRequest?: {
+    bounds: GeoBounds
+    token: number
+  }
   geoItems: MapPoint[]
   mapMode: MapDisplayMode
   polyline?: MapPolyline
@@ -95,6 +101,15 @@ const lineDotStyle = new Style({
     stroke: new Stroke({ color: 'rgba(255, 255, 255, 0.88)', width: 1.5 }),
   }),
 })
+
+const highlightedPolylineStyle = [
+  new Style({
+    stroke: new Stroke({ color: 'rgba(255, 255, 255, 0.92)', width: 7 }),
+  }),
+  new Style({
+    stroke: new Stroke({ color: '#d84d2a', width: 3 }),
+  }),
+]
 
 const mapPointStyleCache = new globalThis.Map<string, Style>()
 const AREA_CURSOR_TOLERANCE_PX = 10
@@ -355,6 +370,8 @@ async function emptyTileImage(): Promise<HTMLImageElement> {
 export function MapView({
   queryPoint,
   hoverPoint,
+  highlightPolyline,
+  focusBoundsRequest,
   geoItems,
   mapMode,
   lineTileSource,
@@ -381,6 +398,7 @@ export function MapView({
   const syncingBoundsRef = useRef(false)
   const sourceRef = useRef(new VectorSource())
   const lineTileLayerRef = useRef<TileLayer<ImageTileSource> | null>(null)
+  const highlightSourceRef = useRef(new VectorSource())
   const querySourceRef = useRef(new VectorSource())
   const hoverSourceRef = useRef(new VectorSource())
   const renderJobRef = useRef(0)
@@ -397,6 +415,10 @@ export function MapView({
       source: undefined,
       opacity: 1,
       visible: false,
+    })
+    const highlightLayer = new VectorLayer({
+      source: highlightSourceRef.current,
+      style: highlightedPolylineStyle,
     })
     const queryLayer = new VectorLayer({
       source: querySourceRef.current,
@@ -422,6 +444,7 @@ export function MapView({
           source: new OSM(),
         }),
         lineTileLayer,
+        highlightLayer,
         pointLayer,
         queryLayer,
         hoverLayer,
@@ -655,6 +678,43 @@ export function MapView({
       hoverSource.addFeature(feature)
     }
   }, [hoverPoint])
+
+  useEffect(() => {
+    const highlightSource = highlightSourceRef.current
+    highlightSource.clear(true)
+
+    const segments =
+      highlightPolyline?.segments && highlightPolyline.segments.length > 0
+        ? highlightPolyline.segments
+        : highlightPolyline?.points && highlightPolyline.points.length >= 2
+          ? [{ points: highlightPolyline.points }]
+          : []
+
+    for (const segment of segments) {
+      if (segment.points.length < 2) continue
+      highlightSource.addFeature(
+        new Feature(
+          new LineString(
+            segment.points.map((point) => fromLonLat([point.lon, point.lat])),
+          ),
+        ),
+      )
+    }
+  }, [highlightPolyline])
+
+  useEffect(() => {
+    if (!focusBoundsRequest) return
+    const map = mapRef.current
+    if (!map) return
+    map.getView().fit(
+      displayExtentFromBounds(focusBoundsRequest.bounds, map),
+      {
+        duration: 240,
+        padding: [48, 48, 48, 48],
+        maxZoom: 15,
+      },
+    )
+  }, [focusBoundsRequest])
 
   useEffect(() => {
     hasGeoBoundsRef.current = Boolean(geoBounds)

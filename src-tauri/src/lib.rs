@@ -6,6 +6,7 @@ use quick_xml::Reader as XmlReader;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
@@ -248,7 +249,9 @@ struct TimelineGroupResult {
 #[serde(rename_all = "camelCase")]
 struct TimelineGroupPage {
     groups: Vec<TimelineGroupResult>,
-    total_groups: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_groups: Option<usize>,
+    limit_reached: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     result_metrics: Option<SearchIndexStats>,
 }
@@ -3174,7 +3177,6 @@ fn timeline_segment_group_id(
 }
 
 fn timeline_path_item(
-    segment_index: usize,
     point_index: usize,
     segment: &JsonValue,
     point: &JsonValue,
@@ -3198,12 +3200,8 @@ fn timeline_path_item(
         vertical_accuracy_meters: None,
         velocity_meters_per_second: None,
         heading_degrees: None,
-        group_id: Some(timeline_segment_group_id(
-            segment_index,
-            start_time,
-            end_time,
-        )),
-        sequence: Some(point_index as i64),
+        group_id: None,
+        sequence: None,
         content_hash: None,
         display_name: None,
         metadata: compact_json_object(vec![
@@ -3327,11 +3325,7 @@ fn timeline_visit_item(segment_index: usize, segment: &JsonValue) -> Option<Pars
         vertical_accuracy_meters: None,
         velocity_meters_per_second: None,
         heading_degrees: None,
-        group_id: Some(timeline_segment_group_id(
-            segment_index,
-            Some(start_time),
-            end_time,
-        )),
+        group_id: None,
         sequence: None,
         content_hash: Some(content_hash),
         display_name: Some(format!("Visit {}", segment_index + 1)),
@@ -3393,11 +3387,7 @@ fn timeline_activity_item(segment_index: usize, segment: &JsonValue) -> Option<P
         vertical_accuracy_meters: None,
         velocity_meters_per_second: None,
         heading_degrees: None,
-        group_id: Some(timeline_segment_group_id(
-            segment_index,
-            Some(start_time),
-            end_time,
-        )),
+        group_id: None,
         sequence: None,
         content_hash: Some(content_hash),
         display_name: Some(format!("Activity {}", segment_index + 1)),
@@ -3548,15 +3538,28 @@ fn parse_google_timeline_location_items(json: &str) -> AppResult<(Vec<ParsedGeoI
                 .get("timelinePath")
                 .and_then(|value| value.as_array())
             {
+                let mut path_items = Vec::<(usize, ParsedGeoItem)>::new();
                 for (point_index, point) in path.iter().enumerate() {
                     if let Some(item) =
-                        timeline_path_item(segment_index, point_index, segment, point)
+                        timeline_path_item(point_index, segment, point)
                     {
-                        items.push(item);
+                        path_items.push((point_index, item));
                     } else {
                         skipped_points += 1;
                     }
                 }
+                if path_items.len() > 1 {
+                    let start_time =
+                        segment.get("startTime").and_then(parse_json_timestamp);
+                    let end_time =
+                        segment.get("endTime").and_then(parse_json_timestamp);
+                    let group_id = timeline_segment_group_id(segment_index, start_time, end_time);
+                    for (point_index, item) in path_items.iter_mut() {
+                        item.group_id = Some(group_id.clone());
+                        item.sequence = Some(*point_index as i64);
+                    }
+                }
+                items.extend(path_items.into_iter().map(|(_, item)| item));
             }
             if let Some(item) = timeline_visit_item(segment_index, segment) {
                 items.push(item);
@@ -5134,34 +5137,49 @@ fn add_item_to_timeline_group(
     }
 }
 
-fn timeline_group_results(
+fn timeline_group_results_page(
     groups: HashMap<String, NativeTimelineGroupAccumulator>,
+    take_count: usize,
 ) -> Vec<TimelineGroupResult> {
-    let mut results = groups
-        .into_values()
-        .map(|group| {
-            let mut source_types = group.source_types.into_iter().collect::<Vec<_>>();
-            source_types.sort();
-            let mut kinds = group.kinds.into_iter().collect::<Vec<_>>();
-            kinds.sort();
-            TimelineGroupResult {
-                id: group.id,
-                count: group.count,
-                start_time: group.start_time,
-                end_time: group.end_time,
-                source_types,
-                kinds,
-                bounds: group.bounds,
+    if take_count == 0 {
+        return Vec::new();
+    }
+    let mut results = Vec::<TimelineGroupResult>::new();
+    for group in groups.into_values() {
+        let mut source_types = group.source_types.into_iter().collect::<Vec<_>>();
+        source_types.sort();
+        let mut kinds = group.kinds.into_iter().collect::<Vec<_>>();
+        kinds.sort();
+        let result = TimelineGroupResult {
+            id: group.id,
+            count: group.count,
+            start_time: group.start_time,
+            end_time: group.end_time,
+            source_types,
+            kinds,
+            bounds: group.bounds,
+        };
+        let insert_index = results
+            .binary_search_by(|existing| timeline_group_result_order(existing, &result))
+            .unwrap_or_else(|index| index);
+        if insert_index < take_count {
+            results.insert(insert_index, result);
+            if results.len() > take_count {
+                results.pop();
             }
-        })
-        .collect::<Vec<_>>();
-    results.sort_by(|left, right| {
-        left.start_time
-            .unwrap_or(i64::MAX)
-            .cmp(&right.start_time.unwrap_or(i64::MAX))
-            .then_with(|| left.id.cmp(&right.id))
-    });
+        }
+    }
     results
+}
+
+fn timeline_group_result_order(
+    left: &TimelineGroupResult,
+    right: &TimelineGroupResult,
+) -> CmpOrdering {
+    left.start_time
+        .unwrap_or(i64::MAX)
+        .cmp(&right.start_time.unwrap_or(i64::MAX))
+        .then_with(|| left.id.cmp(&right.id))
 }
 
 fn filtered_locations(item: &MediaItem, query: &CatalogQuery) -> Vec<MediaLocation> {
@@ -7117,19 +7135,17 @@ fn search_timeline_groups(app: AppHandle, spec: SearchSpec) -> AppResult<Timelin
             add_item_to_timeline_group(&mut groups, item);
         }
     }
-    let results = timeline_group_results(groups);
-    let total_groups = results.len();
     let offset = spec.offset.unwrap_or(0).max(0) as usize;
-    let limit = spec.limit.unwrap_or(total_groups as i64).max(0) as usize;
-    let paged_results = if limit == 0 {
+    let limit = spec.limit.unwrap_or(50).max(0) as usize;
+    let page_limit = limit.saturating_add(1);
+    let results = timeline_group_results_page(groups, offset.saturating_add(page_limit));
+    let page_candidates = if limit == 0 {
         Vec::new()
     } else {
-        results
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .collect::<Vec<_>>()
+        results.into_iter().skip(offset).take(page_limit).collect()
     };
+    let limit_reached = page_candidates.len() > limit;
+    let paged_results = page_candidates.into_iter().take(limit).collect::<Vec<_>>();
     let mut index_stats = empty_search_index_stats("catalog-groups", "Catalog groups");
     index_stats.point_count = total_items;
     index_stats.candidates_inspected = inspected as i64;
@@ -7141,14 +7157,70 @@ fn search_timeline_groups(app: AppHandle, spec: SearchSpec) -> AppResult<Timelin
         paged_results.len(),
         limit as i64,
         offset as i64,
-        offset + paged_results.len() < total_groups,
+        limit_reached,
     );
 
     Ok(TimelineGroupPage {
-        total_groups,
         groups: paged_results,
+        total_groups: None,
+        limit_reached: Some(limit_reached),
         result_metrics: Some(result_metrics),
     })
+}
+
+fn timeline_group_candidate_from_item(
+    item: &MediaItem,
+    asset_id: usize,
+    group_id: &str,
+    location: Option<&MediaLocation>,
+) -> Option<NativePolylineCandidate> {
+    let lat = item.latitude?;
+    let lon = item.longitude?;
+    let timestamp = location.and_then(|value| value.timestamp).or(item.timestamp)?;
+    Some(NativePolylineCandidate {
+        asset_id,
+        kind: item.kind.clone(),
+        lat,
+        lon,
+        timestamp_sec: timestamp_seconds(timestamp),
+        source: "UNKNOWN",
+        accuracy_meters: item.accuracy_meters,
+        group_key: Some(group_id.to_string()),
+        sequence: location
+            .and_then(|value| value.sequence)
+            .or(item.sequence)
+            .and_then(|value| i32::try_from(value).ok()),
+    })
+}
+
+#[tauri::command]
+fn get_timeline_group_polyline(app: AppHandle, group_id: String) -> AppResult<MapPolyline> {
+    let items = active_media_items(&app)?;
+    let mut candidates = Vec::<NativePolylineCandidate>::new();
+    for (index, item) in items.iter().enumerate() {
+        let mut found_location = false;
+        for location in item
+            .locations
+            .iter()
+            .filter(|location| location.group_id.as_deref() == Some(group_id.as_str()))
+        {
+            found_location = true;
+            if let Some(candidate) =
+                timeline_group_candidate_from_item(item, index + 1, &group_id, Some(location))
+            {
+                candidates.push(candidate);
+            }
+        }
+        if !found_location && item.group_id.as_deref() == Some(group_id.as_str()) {
+            if let Some(candidate) =
+                timeline_group_candidate_from_item(item, index + 1, &group_id, None)
+            {
+                candidates.push(candidate);
+            }
+        }
+    }
+    let (line_segments, _) = split_group_by_consecutive_sequence(&group_id, candidates);
+    Ok(polyline_from_candidate_segments(&line_segments, 0.0, usize::MAX))
 }
 
 #[tauri::command]
@@ -9096,6 +9168,7 @@ pub fn run() {
             list_media,
             search_media,
             search_timeline_groups,
+            get_timeline_group_polyline,
             search_map_points,
             prepare_line_tile_source,
             get_line_tile,
@@ -9712,10 +9785,57 @@ mod tests {
         assert_eq!(items[0].velocity_meters_per_second, Some(3.5));
         assert_eq!(items[0].heading_degrees, Some(80.0));
         assert_eq!(items[2].source_type.as_deref(), Some("timeline_path"));
-        assert_eq!(items[2].sequence, Some(0));
+        assert_eq!(items[2].group_id.as_deref(), None);
+        assert_eq!(items[2].sequence, None);
         assert_eq!(items[3].source_type.as_deref(), Some("visit"));
+        assert_eq!(items[3].group_id.as_deref(), None);
         assert_eq!(items[4].source_type.as_deref(), Some("activity"));
+        assert_eq!(items[4].group_id.as_deref(), None);
         assert_eq!(items[5].source_type.as_deref(), Some("frequent_place"));
+    }
+
+    #[test]
+    fn assigns_timeline_group_ids_only_to_multi_point_paths() {
+        let (items, skipped_points) = parse_google_timeline_location_items(
+            r#"
+            {
+              "semanticSegments": [{
+                "startTime": "2026-06-01T10:00:00.000+02:00",
+                "endTime": "2026-06-01T11:00:00.000+02:00",
+                "timelinePath": [{
+                  "point": "48.1370673°, 11.5775995°",
+                  "time": "2026-06-01T10:10:00.000+02:00"
+                }]
+              }, {
+                "startTime": "2026-06-01T12:00:00.000+02:00",
+                "endTime": "2026-06-01T13:00:00.000+02:00",
+                "timelinePath": [{
+                  "point": "48.2000000°, 11.6000000°",
+                  "time": "2026-06-01T12:10:00.000+02:00"
+                }, {
+                  "point": "48.2100000°, 11.6100000°",
+                  "time": "2026-06-01T12:20:00.000+02:00"
+                }]
+              }]
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(skipped_points, 0);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].source_type.as_deref(), Some("timeline_path"));
+        assert_eq!(items[0].group_id.as_deref(), None);
+        assert_eq!(items[0].sequence, None);
+        assert_eq!(items[1].source_type.as_deref(), Some("timeline_path"));
+        assert_eq!(items[2].source_type.as_deref(), Some("timeline_path"));
+        let group_id = items[1].group_id.as_deref();
+        assert_eq!(group_id, items[2].group_id.as_deref());
+        assert!(group_id
+            .unwrap_or_default()
+            .starts_with("google_timeline_segment:v1:2:"));
+        assert_eq!(items[1].sequence, Some(0));
+        assert_eq!(items[2].sequence, Some(1));
     }
 
     #[test]

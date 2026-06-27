@@ -77,6 +77,7 @@ import type {
   KindFilter,
   LineTileRequest,
   MapDisplayMode,
+  MapPolyline,
   MapPolylineCleanupSource,
   MediaItem,
   SearchIndexStats,
@@ -108,14 +109,11 @@ type TimelineGroupSummary = {
   endTime?: number
   sourceTypes: string[]
   kinds: TimelineGroupResult['kinds']
+  bounds?: GeoBounds
 }
 type LineBreakState = {
   breakSpeedKmh?: number
   maxSegmentDistanceKm?: number
-}
-type LineBreakSliderState = {
-  breakSpeedIndex: number
-  maxSegmentDistanceIndex: number
 }
 const LEFT_WIDTH_KEY = 'geo-media-index-lab:left-width'
 const MAP_HEIGHT_KEY = 'geo-media-index-lab:map-height'
@@ -141,51 +139,15 @@ const MAP_POLYLINE_ALLOWED_SOURCES: MapPolylineCleanupSource[] = [
   'CELL',
   'UNKNOWN',
 ]
-const LINE_BREAK_SPEED_OPTIONS = [
-  50,
-  80,
-  100,
-  130,
-  200,
-  300,
-  500,
-  1_000,
-  0,
-] as const
-const LINE_MAX_SEGMENT_DISTANCE_OPTIONS = [
-  0.05,
-  0.1,
-  0.15,
-  0.2,
-  0.25,
-  0.3,
-  0.4,
-  0.5,
-  0.75,
-  1,
-  1.5,
-  2,
-  2.5,
-  3,
-  4,
-  5,
-  7.5,
-  10,
-  15,
-  20,
-  25,
-  30,
-  40,
-  50,
-  75,
-  100,
-  150,
-  250,
-  500,
-  750,
-  1_000,
-  0,
-] as const
+const LINE_BREAK_SLIDER_MIN = 0
+const LINE_BREAK_SLIDER_MAX = 100
+const LINE_BREAK_SLIDER_STEP = 0.1
+const LINE_BREAK_SLIDER_OFF_POSITION = LINE_BREAK_SLIDER_MAX
+const LINE_BREAK_SLIDER_ACTIVE_MAX = 99
+const LINE_BREAK_SPEED_MIN_KMH = 10
+const LINE_BREAK_SPEED_MAX_KMH = 1_000
+const LINE_MAX_SEGMENT_DISTANCE_MIN_KM = 0.05
+const LINE_MAX_SEGMENT_DISTANCE_MAX_KM = 1_000
 const DEFAULT_RESULT_PAGE_SIZE = 100
 const DEFAULT_MAP_BUBBLE_CELL_SIZE = 64
 const DEFAULT_MAP_RENDER_BATCH_SIZE = 500
@@ -193,10 +155,6 @@ const DEFAULT_MAP_BUBBLE_SCALE = 1
 const DEFAULT_MAP_MAX_BUBBLES = 5_000
 const MAP_POLYLINE_MAX_POINTS = 10_000
 const DEFAULT_LINE_BREAKS: LineBreakState = {}
-const DEFAULT_LINE_BREAK_SLIDERS: LineBreakSliderState = {
-  breakSpeedIndex: LINE_BREAK_SPEED_OPTIONS.length - 1,
-  maxSegmentDistanceIndex: LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1,
-}
 const DEFAULT_DISTANCE_ENGINE_ID = 'segmented-ball-tree'
 const CATALOG_QUERY_INDEX_ID = 'file-time-geo'
 const DISTANCE_ENGINE_IDS = [
@@ -256,24 +214,96 @@ function formatDistanceThresholdKm(value: number, locale: string): string {
   })} km`
 }
 
-function lineBreakSpeedFromOptionIndex(optionIndex: number): number | undefined {
-  const nextOptionIndex = Number.isFinite(optionIndex)
-    ? Math.trunc(clamp(optionIndex, 0, LINE_BREAK_SPEED_OPTIONS.length - 1))
-    : LINE_BREAK_SPEED_OPTIONS.length - 1
-  const nextValue = LINE_BREAK_SPEED_OPTIONS[nextOptionIndex]
-  return nextValue > 0 ? nextValue : undefined
+function lineBreakSliderPosition(position: number): number {
+  return Number.isFinite(position)
+    ? clamp(position, LINE_BREAK_SLIDER_MIN, LINE_BREAK_SLIDER_MAX)
+    : LINE_BREAK_SLIDER_OFF_POSITION
 }
 
-function lineMaxSegmentDistanceFromOptionIndex(
-  optionIndex: number,
+function lineBreakActiveRatio(position: number): number | undefined {
+  const nextPosition = lineBreakSliderPosition(position)
+  if (nextPosition >= LINE_BREAK_SLIDER_OFF_POSITION) return undefined
+  return clamp(nextPosition, 0, LINE_BREAK_SLIDER_ACTIVE_MAX) /
+    LINE_BREAK_SLIDER_ACTIVE_MAX
+}
+
+function logarithmicRangeValue(
+  minValue: number,
+  maxValue: number,
+  ratio: number,
+): number {
+  return minValue * Math.pow(maxValue / minValue, ratio)
+}
+
+function lineBreakSpeedFromSliderPosition(
+  position: number,
 ): number | undefined {
-  const nextOptionIndex = Number.isFinite(optionIndex)
-    ? Math.trunc(
-        clamp(optionIndex, 0, LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1),
-      )
-    : LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1
-  const nextValue = LINE_MAX_SEGMENT_DISTANCE_OPTIONS[nextOptionIndex]
-  return nextValue > 0 ? nextValue : undefined
+  const ratio = lineBreakActiveRatio(position)
+  if (ratio === undefined) return undefined
+  return Math.round(
+    logarithmicRangeValue(
+      LINE_BREAK_SPEED_MIN_KMH,
+      LINE_BREAK_SPEED_MAX_KMH,
+      ratio,
+    ),
+  )
+}
+
+function lineBreakSpeedToSliderPosition(value: number | undefined): number {
+  if (value === undefined || value <= 0) return LINE_BREAK_SLIDER_OFF_POSITION
+  const ratio =
+    Math.log(clamp(value, LINE_BREAK_SPEED_MIN_KMH, LINE_BREAK_SPEED_MAX_KMH) /
+      LINE_BREAK_SPEED_MIN_KMH) /
+    Math.log(LINE_BREAK_SPEED_MAX_KMH / LINE_BREAK_SPEED_MIN_KMH)
+  return clamp(
+    ratio * LINE_BREAK_SLIDER_ACTIVE_MAX,
+    LINE_BREAK_SLIDER_MIN,
+    LINE_BREAK_SLIDER_ACTIVE_MAX,
+  )
+}
+
+function roundedSegmentDistanceKm(value: number): number {
+  if (value < 1) return Math.round(value * 100) / 100
+  if (value < 10) return Math.round(value * 10) / 10
+  if (value < 100) return Math.round(value)
+  return Math.round(value / 10) * 10
+}
+
+function lineMaxSegmentDistanceFromSliderPosition(
+  position: number,
+): number | undefined {
+  const ratio = lineBreakActiveRatio(position)
+  if (ratio === undefined) return undefined
+  return roundedSegmentDistanceKm(
+    logarithmicRangeValue(
+      LINE_MAX_SEGMENT_DISTANCE_MIN_KM,
+      LINE_MAX_SEGMENT_DISTANCE_MAX_KM,
+      ratio,
+    ),
+  )
+}
+
+function lineMaxSegmentDistanceToSliderPosition(
+  value: number | undefined,
+): number {
+  if (value === undefined || value <= 0) return LINE_BREAK_SLIDER_OFF_POSITION
+  const ratio =
+    Math.log(
+      clamp(
+        value,
+        LINE_MAX_SEGMENT_DISTANCE_MIN_KM,
+        LINE_MAX_SEGMENT_DISTANCE_MAX_KM,
+      ) / LINE_MAX_SEGMENT_DISTANCE_MIN_KM,
+    ) /
+    Math.log(
+      LINE_MAX_SEGMENT_DISTANCE_MAX_KM /
+        LINE_MAX_SEGMENT_DISTANCE_MIN_KM,
+    )
+  return clamp(
+    ratio * LINE_BREAK_SLIDER_ACTIVE_MAX,
+    LINE_BREAK_SLIDER_MIN,
+    LINE_BREAK_SLIDER_ACTIVE_MAX,
+  )
 }
 
 function storedNumber(key: string, fallback: number): number {
@@ -632,6 +662,132 @@ function ResultSkeletons({
   ))
 }
 
+type LineBreakControlsProps = {
+  breakSpeedKmh?: number
+  maxSegmentDistanceKm?: number
+  locale: string
+  t: (key: TranslationKey, values?: TranslationValues) => string
+  onBreakSpeedCommit(value: number | undefined): void
+  onMaxSegmentDistanceCommit(value: number | undefined): void
+}
+
+const LineBreakControls = memo(function LineBreakControls({
+  breakSpeedKmh,
+  maxSegmentDistanceKm,
+  locale,
+  t,
+  onBreakSpeedCommit,
+  onMaxSegmentDistanceCommit,
+}: LineBreakControlsProps) {
+  const [breakSpeedPosition, setBreakSpeedPosition] = useState(() =>
+    lineBreakSpeedToSliderPosition(breakSpeedKmh),
+  )
+  const [maxSegmentDistancePosition, setMaxSegmentDistancePosition] =
+    useState(() => lineMaxSegmentDistanceToSliderPosition(maxSegmentDistanceKm))
+  const draftLineBreakSpeed =
+    lineBreakSpeedFromSliderPosition(breakSpeedPosition)
+  const draftLineMaxSegmentDistance =
+    lineMaxSegmentDistanceFromSliderPosition(maxSegmentDistancePosition)
+  const commitBreakSpeed = useCallback((position: number) => {
+    const nextPosition = lineBreakSliderPosition(position)
+    setBreakSpeedPosition(nextPosition)
+    onBreakSpeedCommit(lineBreakSpeedFromSliderPosition(nextPosition))
+  }, [onBreakSpeedCommit])
+  const commitMaxSegmentDistance = useCallback((position: number) => {
+    const nextPosition = lineBreakSliderPosition(position)
+    setMaxSegmentDistancePosition(nextPosition)
+    onMaxSegmentDistanceCommit(
+      lineMaxSegmentDistanceFromSliderPosition(nextPosition),
+    )
+  }, [onMaxSegmentDistanceCommit])
+
+  return (
+    <div className="display-section map-line-break-section">
+      <span>{t('linePathBreaks')}</span>
+      <label className="settings-slider-row">
+        <span>
+          {t('lineBreakSpeed')}
+          <strong>
+            {draftLineBreakSpeed === undefined
+              ? t('off')
+              : `${draftLineBreakSpeed.toLocaleString(locale)} km/h`}
+          </strong>
+        </span>
+        <input
+          aria-label={t('lineBreakSpeed')}
+          aria-valuetext={
+            draftLineBreakSpeed === undefined
+              ? t('off')
+              : `${draftLineBreakSpeed.toLocaleString(locale)} km/h`
+          }
+          type="range"
+          min={LINE_BREAK_SLIDER_MIN}
+          max={LINE_BREAK_SLIDER_MAX}
+          step={LINE_BREAK_SLIDER_STEP}
+          value={breakSpeedPosition}
+          onChange={(event) =>
+            setBreakSpeedPosition(
+              lineBreakSliderPosition(Number(event.target.value)),
+            )
+          }
+          onPointerUp={(event) =>
+            commitBreakSpeed(Number(event.currentTarget.value))
+          }
+          onKeyUp={(event) =>
+            commitBreakSpeed(Number(event.currentTarget.value))
+          }
+          onBlur={(event) =>
+            commitBreakSpeed(Number(event.currentTarget.value))
+          }
+        />
+      </label>
+      <label className="settings-slider-row">
+        <span>
+          {t('lineMaxSegmentDistance')}
+          <strong>
+            {draftLineMaxSegmentDistance === undefined
+              ? t('off')
+              : formatDistanceThresholdKm(
+                  draftLineMaxSegmentDistance,
+                  locale,
+                )}
+          </strong>
+        </span>
+        <input
+          aria-label={t('lineMaxSegmentDistance')}
+          aria-valuetext={
+            draftLineMaxSegmentDistance === undefined
+              ? t('off')
+              : formatDistanceThresholdKm(
+                  draftLineMaxSegmentDistance,
+                  locale,
+                )
+          }
+          type="range"
+          min={LINE_BREAK_SLIDER_MIN}
+          max={LINE_BREAK_SLIDER_MAX}
+          step={LINE_BREAK_SLIDER_STEP}
+          value={maxSegmentDistancePosition}
+          onChange={(event) =>
+            setMaxSegmentDistancePosition(
+              lineBreakSliderPosition(Number(event.target.value)),
+            )
+          }
+          onPointerUp={(event) =>
+            commitMaxSegmentDistance(Number(event.currentTarget.value))
+          }
+          onKeyUp={(event) =>
+            commitMaxSegmentDistance(Number(event.currentTarget.value))
+          }
+          onBlur={(event) =>
+            commitMaxSegmentDistance(Number(event.currentTarget.value))
+          }
+        />
+      </label>
+    </div>
+  )
+})
+
 type ResultCardProps = {
   result: EnrichedSearchResult
   index: number
@@ -893,10 +1049,16 @@ function App() {
   )
   const [lineBreaks, setLineBreaks] =
     useState<LineBreakState>(DEFAULT_LINE_BREAKS)
-  const [lineBreakSliderIndices, setLineBreakSliderIndices] =
-    useState<LineBreakSliderState>(DEFAULT_LINE_BREAK_SLIDERS)
   const [visibleMapViewport, setVisibleMapViewport] = useState<MapViewport>()
   const [hoveredResultId, setHoveredResultId] = useState<string>()
+  const [hoveredTimelineGroupId, setHoveredTimelineGroupId] = useState<string>()
+  const [hoveredTimelineGroupPolyline, setHoveredTimelineGroupPolyline] =
+    useState<{ groupId: string; polyline: MapPolyline }>()
+  const timelineGroupPolylineCacheRef = useRef(new Map<string, MapPolyline>())
+  const [mapFocusRequest, setMapFocusRequest] = useState<{
+    bounds: GeoBounds
+    token: number
+  }>()
   const workspaceRef = useRef<HTMLElement | null>(null)
   const leftStackRef = useRef<HTMLElement | null>(null)
   const settingsMenuRef = useRef<HTMLDetailsElement | null>(null)
@@ -997,7 +1159,7 @@ function App() {
   const groupSearchSpec = useMemo<SearchSpec>(
     () => ({
       ...timeRange,
-      kind: kindFilter,
+      kind: 'all',
       geoBounds,
       order: {
         kind: 'timestamp',
@@ -1010,7 +1172,6 @@ function App() {
     }),
     [
       geoBounds,
-      kindFilter,
       timeRange,
       timelineGroupOffset,
       timelineGroupPageSize,
@@ -1115,7 +1276,8 @@ function App() {
   const [timelineGroupResults, setTimelineGroupResults] = useState<
     TimelineGroupResult[]
   >([])
-  const [timelineGroupTotal, setTimelineGroupTotal] = useState(0)
+  const [timelineGroupLimitReached, setTimelineGroupLimitReached] =
+    useState(false)
   const [timelineGroupsLoading, setTimelineGroupsLoading] = useState(false)
   const requestLineTile = useCallback(
     (request: Omit<
@@ -1148,7 +1310,7 @@ function App() {
     [catalog, lineBreaks, lineTileSource, recordLineTileResult],
   )
   useEffect(() => {
-    if (!catalogReady) {
+    if (!catalogReady || resultTab !== 'groups') {
       return
     }
 
@@ -1157,19 +1319,19 @@ function App() {
       .then(() => {
         setTimelineGroupsLoading(true)
         setTimelineGroupResults([])
-        setTimelineGroupTotal(0)
+        setTimelineGroupLimitReached(false)
         return catalog.searchTimelineGroups(groupSearchSpec, {
           signal: controller.signal,
         })
       })
       .then((page) => {
         setTimelineGroupResults(page.groups)
-        setTimelineGroupTotal(page.totalGroups)
+        setTimelineGroupLimitReached(Boolean(page.limitReached))
       })
       .catch((caught: unknown) => {
         if (isAbortError(caught)) return
         setTimelineGroupResults([])
-        setTimelineGroupTotal(0)
+        setTimelineGroupLimitReached(false)
         reportError(caught)
       })
       .finally(() => {
@@ -1185,7 +1347,61 @@ function App() {
     catalogRevision,
     groupSearchSpec,
     reportError,
+    resultTab,
   ])
+
+  useEffect(() => {
+    if (!catalogReady || resultTab !== 'groups' || !hoveredTimelineGroupId) return
+
+    const cached = timelineGroupPolylineCacheRef.current.get(hoveredTimelineGroupId)
+    let active = true
+    if (cached) {
+      void Promise.resolve().then(() => {
+        if (active) {
+          setHoveredTimelineGroupPolyline({
+            groupId: hoveredTimelineGroupId,
+            polyline: cached,
+          })
+        }
+      })
+      return () => {
+        active = false
+      }
+    }
+
+    const controller = new AbortController()
+    void catalog.getTimelineGroupPolyline(hoveredTimelineGroupId, {
+      signal: controller.signal,
+    })
+      .then((polyline) => {
+        if (!active) return
+        timelineGroupPolylineCacheRef.current.set(hoveredTimelineGroupId, polyline)
+        setHoveredTimelineGroupPolyline({
+          groupId: hoveredTimelineGroupId,
+          polyline,
+        })
+      })
+      .catch((caught: unknown) => {
+        if (isAbortError(caught)) return
+        reportError(caught)
+      })
+
+    return () => {
+      active = false
+      controller.abort()
+    }
+  }, [
+    catalog,
+    catalogReady,
+    hoveredTimelineGroupId,
+    reportError,
+    resultTab,
+  ])
+
+  useEffect(() => {
+    timelineGroupPolylineCacheRef.current.clear()
+  }, [catalogRevision])
+
   const effectiveIndexStats =
     indexStatsOverride ?? resultMetrics ?? indexStats
   const hoveredResultPoint = useMemo<QueryPoint | undefined>(() => {
@@ -1245,7 +1461,6 @@ function App() {
     importFolder,
     rescanFolders,
     importGeoFile,
-    importGeoFolder,
     cancelImport,
     commitImport,
   } = useImports({
@@ -1285,27 +1500,41 @@ function App() {
       ),
     }),
   )
+  const highlightedTimelineGroupPolyline =
+    hoveredTimelineGroupId !== undefined &&
+    hoveredTimelineGroupPolyline?.groupId === hoveredTimelineGroupId
+      ? hoveredTimelineGroupPolyline.polyline
+      : undefined
   const catalogResultsTitle = visibleResults
     ? t('nearestResults')
     : t('catalogResults')
-  const catalogResultsMeta = `${visibleRange} ${t('visible')}`
-  const timelineGroupsMeta = timelineGroupsLoading
-    ? t('loadingGroups')
-    : timelineGroupTotal === 0 || timelineGroupResults.length === 0
-      ? t('timelineGroupsTotal', {
-          count: timelineGroupTotal.toLocaleString(locale),
-        })
-      : t('timelineGroupsRange', {
-          start: (timelineGroupOffset + 1).toLocaleString(locale),
-          end: (timelineGroupOffset + timelineGroupResults.length)
-            .toLocaleString(locale),
-          total: timelineGroupTotal.toLocaleString(locale),
-        })
+  const catalogResultsMeta = visibleRange
+  const timelineGroupsMeta =
+    resultTab !== 'groups'
+      ? ''
+      : timelineGroupsLoading
+        ? t('loadingGroups')
+        : timelineGroupResults.length === 0
+          ? '0'
+          : `${(timelineGroupOffset + 1).toLocaleString(locale)}-${(
+              timelineGroupOffset + timelineGroupResults.length
+            ).toLocaleString(locale)}`
   const canPageBackward = resultPage > 0
   const canPageForward = pageLimitReached
   const canPageGroupsBackward = timelineGroupPage > 0
-  const canPageGroupsForward =
-    timelineGroupOffset + timelineGroupResults.length < timelineGroupTotal
+  const canPageGroupsForward = timelineGroupLimitReached
+  const focusTimelineGroup = useCallback((group: TimelineGroupSummary) => {
+    const bounds =
+      group.bounds ??
+      (hoveredTimelineGroupPolyline?.groupId === group.id
+        ? hoveredTimelineGroupPolyline.polyline.bounds
+        : undefined)
+    if (!bounds) return
+    setMapFocusRequest({
+      bounds,
+      token: Date.now(),
+    })
+  }, [hoveredTimelineGroupPolyline])
   const loadViewerWindow = useCallback(
     async (windowOffset: number, signal?: AbortSignal) => {
       return (await loadWindow(windowOffset, signal)).items
@@ -1536,25 +1765,7 @@ function App() {
     window.localStorage.setItem(MAP_MAX_BUBBLES_KEY, String(nextValue))
   }, [])
 
-  const setLineBreakSpeedDraft = useCallback((optionIndex: number) => {
-    const nextOptionIndex = Number.isFinite(optionIndex)
-      ? Math.trunc(clamp(optionIndex, 0, LINE_BREAK_SPEED_OPTIONS.length - 1))
-      : LINE_BREAK_SPEED_OPTIONS.length - 1
-    setLineBreakSliderIndices((current) => ({
-      ...current,
-      breakSpeedIndex: nextOptionIndex,
-    }))
-  }, [])
-
-  const commitLineBreakSpeed = useCallback((optionIndex: number) => {
-    const nextOptionIndex = Number.isFinite(optionIndex)
-      ? Math.trunc(clamp(optionIndex, 0, LINE_BREAK_SPEED_OPTIONS.length - 1))
-      : LINE_BREAK_SPEED_OPTIONS.length - 1
-    setLineBreakSliderIndices((current) => ({
-      ...current,
-      breakSpeedIndex: nextOptionIndex,
-    }))
-    const nextValue = lineBreakSpeedFromOptionIndex(nextOptionIndex)
+  const commitLineBreakSpeed = useCallback((nextValue: number | undefined) => {
     setLineBreaks((current) =>
       current.breakSpeedKmh === nextValue
         ? current
@@ -1562,37 +1773,9 @@ function App() {
     )
   }, [])
 
-  const setLineMaxSegmentDistanceDraft = useCallback((optionIndex: number) => {
-    const nextOptionIndex = Number.isFinite(optionIndex)
-      ? Math.trunc(
-          clamp(
-            optionIndex,
-            0,
-            LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1,
-          ),
-        )
-      : LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1
-    setLineBreakSliderIndices((current) => ({
-      ...current,
-      maxSegmentDistanceIndex: nextOptionIndex,
-    }))
-  }, [])
-
-  const commitLineMaxSegmentDistance = useCallback((optionIndex: number) => {
-    const nextOptionIndex = Number.isFinite(optionIndex)
-      ? Math.trunc(
-          clamp(
-            optionIndex,
-            0,
-            LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1,
-          ),
-        )
-      : LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1
-    setLineBreakSliderIndices((current) => ({
-      ...current,
-      maxSegmentDistanceIndex: nextOptionIndex,
-    }))
-    const nextValue = lineMaxSegmentDistanceFromOptionIndex(nextOptionIndex)
+  const commitLineMaxSegmentDistance = useCallback((
+    nextValue: number | undefined,
+  ) => {
     setLineBreaks((current) =>
       current.maxSegmentDistanceKm === nextValue
         ? current
@@ -1610,13 +1793,6 @@ function App() {
     window.localStorage.setItem(DEBUG_DATA_KEY, String(enabled))
   }, [])
 
-  const draftLineBreakSpeed = lineBreakSpeedFromOptionIndex(
-    lineBreakSliderIndices.breakSpeedIndex,
-  )
-  const draftLineMaxSegmentDistance =
-    lineMaxSegmentDistanceFromOptionIndex(
-      lineBreakSliderIndices.maxSegmentDistanceIndex,
-    )
   const mapSettingsControls = (
     <div className="map-settings-grid">
       <div className="display-section">
@@ -1701,91 +1877,14 @@ function App() {
           {t('mapRenderBatchSizeHint')}
         </p>
       </div>
-      <div className="display-section map-line-break-section">
-        <span>{t('linePathBreaks')}</span>
-        <label className="settings-slider-row">
-          <span>
-            {t('lineBreakSpeed')}
-            <strong>
-              {draftLineBreakSpeed === undefined
-                ? t('off')
-                : `${draftLineBreakSpeed.toLocaleString(locale)} km/h`}
-            </strong>
-          </span>
-          <input
-            aria-label={t('lineBreakSpeed')}
-            aria-valuetext={
-              draftLineBreakSpeed === undefined
-                ? t('off')
-                : `${draftLineBreakSpeed.toLocaleString(locale)} km/h`
-            }
-            type="range"
-            min={0}
-            max={LINE_BREAK_SPEED_OPTIONS.length - 1}
-            step={1}
-            value={lineBreakSliderIndices.breakSpeedIndex}
-            onChange={(event) =>
-              setLineBreakSpeedDraft(Number(event.target.value))
-            }
-            onPointerUp={(event) =>
-              commitLineBreakSpeed(Number(event.currentTarget.value))
-            }
-            onKeyUp={(event) =>
-              commitLineBreakSpeed(Number(event.currentTarget.value))
-            }
-            onBlur={(event) =>
-              commitLineBreakSpeed(Number(event.currentTarget.value))
-            }
-          />
-        </label>
-        <label className="settings-slider-row">
-          <span>
-            {t('lineMaxSegmentDistance')}
-            <strong>
-              {draftLineMaxSegmentDistance === undefined
-                ? t('off')
-                : formatDistanceThresholdKm(
-                    draftLineMaxSegmentDistance,
-                    locale,
-                  )}
-            </strong>
-          </span>
-          <input
-            aria-label={t('lineMaxSegmentDistance')}
-            aria-valuetext={
-              draftLineMaxSegmentDistance === undefined
-                ? t('off')
-                : formatDistanceThresholdKm(
-                    draftLineMaxSegmentDistance,
-                    locale,
-                  )
-            }
-            type="range"
-            min={0}
-            max={LINE_MAX_SEGMENT_DISTANCE_OPTIONS.length - 1}
-            step={1}
-            value={lineBreakSliderIndices.maxSegmentDistanceIndex}
-            onChange={(event) =>
-              setLineMaxSegmentDistanceDraft(Number(event.target.value))
-            }
-            onPointerUp={(event) =>
-              commitLineMaxSegmentDistance(
-                Number(event.currentTarget.value),
-              )
-            }
-            onKeyUp={(event) =>
-              commitLineMaxSegmentDistance(
-                Number(event.currentTarget.value),
-              )
-            }
-            onBlur={(event) =>
-              commitLineMaxSegmentDistance(
-                Number(event.currentTarget.value),
-              )
-            }
-          />
-        </label>
-      </div>
+      <LineBreakControls
+        breakSpeedKmh={lineBreaks.breakSpeedKmh}
+        maxSegmentDistanceKm={lineBreaks.maxSegmentDistanceKm}
+        locale={locale}
+        t={t}
+        onBreakSpeedCommit={commitLineBreakSpeed}
+        onMaxSegmentDistanceCommit={commitLineMaxSegmentDistance}
+      />
     </div>
   )
 
@@ -2053,14 +2152,6 @@ function App() {
             </button>
             <button
               type="button"
-              onClick={importGeoFolder}
-              disabled={busy || !catalogReady}
-            >
-              <FolderOpen size={17} />
-              {t('importGeoFolder')}
-            </button>
-            <button
-              type="button"
               onClick={rescanFolders}
               disabled={busy || !catalogReady}
             >
@@ -2240,6 +2331,8 @@ function App() {
             <MapView
               queryPoint={distanceSortActive ? queryPoint : undefined}
               hoverPoint={hoveredResultPoint}
+              highlightPolyline={highlightedTimelineGroupPolyline}
+              focusBoundsRequest={mapFocusRequest}
               geoItems={mapItems}
               mapMode={mapDisplayMode}
               polyline={mapPolyline}
@@ -3160,7 +3253,30 @@ function App() {
               ) : timelineGroups.length === 0 ? (
                 <p className="library-empty">{t('noTimelineGroups')}</p>
               ) : timelineGroups.map((group) => (
-                <article key={group.id} className="timeline-group-card">
+                <article
+                  key={group.id}
+                  className="timeline-group-card"
+                  role="button"
+                  tabIndex={0}
+                  onPointerEnter={() => setHoveredTimelineGroupId(group.id)}
+                  onPointerLeave={() =>
+                    setHoveredTimelineGroupId((current) =>
+                      current === group.id ? undefined : current,
+                    )
+                  }
+                  onFocus={() => setHoveredTimelineGroupId(group.id)}
+                  onBlur={() =>
+                    setHoveredTimelineGroupId((current) =>
+                      current === group.id ? undefined : current,
+                    )
+                  }
+                  onClick={() => focusTimelineGroup(group)}
+                  onKeyDown={(event: KeyboardEvent<HTMLElement>) => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return
+                    event.preventDefault()
+                    focusTimelineGroup(group)
+                  }}
+                >
                   <strong>{group.label}</strong>
                   <span>
                     {t('timelineGroupItems', {

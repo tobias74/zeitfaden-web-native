@@ -95,6 +95,12 @@ function metricsPanel(page: Page) {
   return page.locator('section.metrics-panel')
 }
 
+async function openMapSettings(page: Page): Promise<void> {
+  const menu = page.locator('details.map-settings-accordion')
+  const open = await menu.evaluate((element) => element.open)
+  if (!open) await menu.locator('summary').click()
+}
+
 async function enableDebugData(page: Page): Promise<void> {
   await openSettings(page)
   await page.getByLabel('Show debug data').check()
@@ -135,6 +141,32 @@ async function readMapMetricNumber(page: Page, label: string): Promise<number> {
     }
     return parsed
   }, label)
+}
+
+async function waitForMapMetricGreaterThan(
+  page: Page,
+  label: string,
+  minimum: number,
+): Promise<number> {
+  await page.waitForFunction(
+    ({ metricLabel, minimumValue }) => {
+      const mapSection = Array.from(document.querySelectorAll('.metrics-section'))
+        .find((section) =>
+          section.querySelector('.metrics-section-title')?.textContent?.trim() ===
+            'Map query',
+        )
+      const metric = Array.from(
+        mapSection?.querySelectorAll('dl.metrics-grid > div') ?? [],
+      ).find((row) => row.querySelector('dt')?.textContent?.trim() === metricLabel)
+      const value = metric?.querySelector('dd')?.textContent?.trim()
+      if (!value) return false
+      const parsed = Number(value.replace(/[^\d.,-]/g, '').replace(/,/g, ''))
+      return Number.isFinite(parsed) && parsed > minimumValue
+    },
+    { metricLabel: label, minimumValue: minimum },
+    { timeout: STEP_TIMEOUT_MS },
+  )
+  return readMapMetricNumber(page, label)
 }
 
 async function appDiagnostic(page: Page): Promise<string> {
@@ -290,6 +322,7 @@ describeE2E('geo import and query UI e2e', () => {
 
     await runStep(page, 'Change map bubble density without warnings or stalls', async () => {
       await openSettings(page)
+      await openMapSettings(page)
 
       await page.getByLabel('Map bubble density').selectOption('80')
       await waitForMapIdle(page)
@@ -318,7 +351,11 @@ describeE2E('geo import and query UI e2e', () => {
       await page.getByRole('button', { name: 'Bubbles' }).click()
       await waitForMapIdle(page)
       await expectNoUiError(page)
-      const renderedBubbles = await readMapMetricNumber(page, 'Rendered bubbles')
+      const renderedBubbles = await waitForMapMetricGreaterThan(
+        page,
+        'Rendered bubbles',
+        0,
+      )
       expect(renderedBubbles).toBeGreaterThan(0)
     })
 

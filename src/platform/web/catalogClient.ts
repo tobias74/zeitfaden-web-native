@@ -8,6 +8,7 @@ import type {
   LineTileResult,
   LineTileSourceSummary,
   MapPointPage,
+  MapPolyline,
   MediaItem,
   MediaSource,
   SearchIndexStats,
@@ -128,6 +129,13 @@ export class CatalogClient {
     options: CatalogSearchOptions = {},
   ): Promise<TimelineGroupPage> {
     return this.request('searchTimelineGroups', spec, undefined, options.signal)
+  }
+
+  getTimelineGroupPolyline(
+    groupId: string,
+    options: CatalogSearchOptions = {},
+  ): Promise<MapPolyline> {
+    return this.request('getTimelineGroupPolyline', groupId, undefined, options.signal)
   }
 
   prepareLineTileSource(

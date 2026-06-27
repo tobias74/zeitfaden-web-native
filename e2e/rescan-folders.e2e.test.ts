@@ -118,7 +118,7 @@ async function importDirectory(activePage: Page, id: string): Promise<void> {
     }
     testWindow.__ZEITFADEN_E2E_SET_DIRECTORY__?.(directoryId)
   }, id)
-  await activePage.getByRole('button', { name: /Import folder/i }).click()
+  await activePage.getByRole('button', { name: /Import media folder/i }).click()
   await waitForIndexCurrent(activePage)
 }
 
