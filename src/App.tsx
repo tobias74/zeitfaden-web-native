@@ -1272,20 +1272,15 @@ function App() {
       ),
     }),
   )
-  const libraryTitle =
-    resultTab === 'groups'
-      ? t('timelineGroups')
-      : visibleResults
-        ? t('nearestResults')
-        : t('catalogResults')
-  const librarySubtitle =
-    resultTab === 'groups'
-      ? timelineGroupsLoading
-        ? t('loadingGroups')
-        : t('timelineGroupsTotal', {
-            count: timelineGroupTotal.toLocaleString(locale),
-          })
-      : `${visibleRange} ${t('visible')}`
+  const catalogResultsTitle = visibleResults
+    ? t('nearestResults')
+    : t('catalogResults')
+  const catalogResultsMeta = `${visibleRange} ${t('visible')}`
+  const timelineGroupsMeta = timelineGroupsLoading
+    ? t('loadingGroups')
+    : t('timelineGroupsTotal', {
+        count: timelineGroupTotal.toLocaleString(locale),
+      })
   const canPageBackward = resultPage > 0
   const canPageForward = pageLimitReached
   const loadViewerWindow = useCallback(
@@ -2941,35 +2936,31 @@ function App() {
 
         <section className="library-strip">
           <div className="library-header">
-            <div className="library-heading">
-              <h2>{libraryTitle}</h2>
-              <p className="subtle">
-                {librarySubtitle}
-              </p>
-              <div
-                className="result-tabs"
-                role="tablist"
-                aria-label={t('resultViews')}
+            <div
+              className="result-tabs"
+              role="tablist"
+              aria-label={t('resultViews')}
+            >
+              <button
+                type="button"
+                role="tab"
+                className={resultTab === 'catalog' ? 'active' : undefined}
+                aria-selected={resultTab === 'catalog'}
+                onClick={() => setResultTab('catalog')}
               >
-                <button
-                  type="button"
-                  role="tab"
-                  className={resultTab === 'catalog' ? 'active' : undefined}
-                  aria-selected={resultTab === 'catalog'}
-                  onClick={() => setResultTab('catalog')}
-                >
-                  {t('catalog')}
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  className={resultTab === 'groups' ? 'active' : undefined}
-                  aria-selected={resultTab === 'groups'}
-                  onClick={() => setResultTab('groups')}
-                >
-                  {t('trips')}
-                </button>
-              </div>
+                <span className="result-tab-title">{catalogResultsTitle}</span>
+                <span className="result-tab-meta">{catalogResultsMeta}</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                className={resultTab === 'groups' ? 'active' : undefined}
+                aria-selected={resultTab === 'groups'}
+                onClick={() => setResultTab('groups')}
+              >
+                <span className="result-tab-title">{t('timelineGroups')}</span>
+                <span className="result-tab-meta">{timelineGroupsMeta}</span>
+              </button>
             </div>
             <div className="library-actions">
               {resultTab === 'catalog' && (

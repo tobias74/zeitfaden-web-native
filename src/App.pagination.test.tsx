@@ -564,7 +564,7 @@ describe('App pagination', () => {
     expect(screen.getByText(/Dataset: google_timeline/)).toBeTruthy()
     expect(screen.getByText(/Source type: timeline_path/)).toBeTruthy()
     expect(screen.getByText(/Accuracy: 12 m/)).toBeTruthy()
-    fireEvent.click(screen.getByRole('tab', { name: 'Trips' }))
+    fireEvent.click(screen.getByRole('tab', { name: /Tours \/ groups/ }))
     expect(screen.getAllByText(/Segment 7/).length).toBeGreaterThan(0)
   })
 
@@ -575,7 +575,7 @@ describe('App pagination', () => {
     render(<App />)
 
     expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
-    fireEvent.click(screen.getByRole('tab', { name: 'Trips' }))
+    fireEvent.click(screen.getByRole('tab', { name: /Tours \/ groups/ }))
 
     await waitFor(() => {
       expect(screen.getByText('12 groups')).toBeTruthy()

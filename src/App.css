@@ -767,20 +767,39 @@
 }
 
 .result-tabs button {
-  min-height: 28px;
-  padding: 0 10px;
+  min-height: 42px;
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  padding: 4px 10px;
   border: 0;
   border-radius: 5px;
   background: transparent;
   color: #52605a;
+  text-align: left;
+}
+
+.result-tab-title {
   font-size: 12px;
   font-weight: 680;
+  line-height: 1.1;
+}
+
+.result-tab-meta {
+  color: #68746f;
+  font-size: 11px;
+  font-weight: 560;
+  line-height: 1.1;
 }
 
 .result-tabs button.active {
   background: #ffffff;
   color: #113c34;
   box-shadow: 0 1px 3px rgba(18, 30, 25, 0.14);
+}
+
+.result-tabs button.active .result-tab-meta {
+  color: #52605a;
 }
 
 .pagination-size {
