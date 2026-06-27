@@ -621,6 +621,23 @@ describe('App pagination', () => {
     expect(screen.getByTestId('map-hover-point').textContent).toBe('')
   })
 
+  it('labels the selected distance index status as a distance index, not a missing engine', async () => {
+    const { default: App } = await import('./App')
+
+    const { container } = render(<App />)
+
+    expect(await screen.findAllByText('item-0.jpg')).not.toHaveLength(0)
+    const selectedIndexStatus = container.querySelector(
+      '[data-index-id="segmented-ball-tree"]',
+    )
+    expect(selectedIndexStatus?.querySelector('dt')?.textContent).toBe(
+      'Distance index',
+    )
+    expect(selectedIndexStatus?.querySelector('dt')?.textContent).not.toBe(
+      'Engine',
+    )
+  })
+
   it('uses the configured map bubble density for map searches', async () => {
     const { default: App } = await import('./App')
 

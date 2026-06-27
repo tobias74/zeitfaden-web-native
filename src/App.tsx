@@ -2484,7 +2484,7 @@ function App() {
                   </div>
                 )}
                 <div data-index-id={selectedIndexId}>
-                  <dt>{t('engine')}</dt>
+                  <dt>{t('distanceIndex')}</dt>
                   <dd>
                     <span className={`index-status-badge ${selectedIndexStatus}`}>
                       {indexStatusLabel(selectedIndexStatus, t)}
