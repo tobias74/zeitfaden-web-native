@@ -1,6 +1,7 @@
 import {
   Activity,
   BoxSelect,
+  ChevronDown,
   Calendar,
   ChevronLeft,
   ChevronRight,
@@ -2301,6 +2302,19 @@ function App() {
           />
 
           <aside className="control-pane">
+            <details className="map-settings-accordion">
+              <summary>
+                <Settings2 size={16} />
+                {t('mapSettings')}
+                <ChevronDown
+                  aria-hidden="true"
+                  className="accordion-chevron"
+                  size={16}
+                />
+              </summary>
+              {mapSettingsControls}
+            </details>
+
             <section className="panel">
               <div className="panel-title">
                 <Calendar size={17} />
@@ -2375,14 +2389,6 @@ function App() {
                 </label>
               )}
             </section>
-
-            <details className="map-settings-accordion">
-              <summary>
-                <Settings2 size={16} />
-                {t('mapSettings')}
-              </summary>
-              {mapSettingsControls}
-            </details>
 
             <section className="panel index-panel">
               <div className="panel-title">

@@ -292,8 +292,22 @@
   user-select: none;
 }
 
+.map-settings-accordion summary::-webkit-details-marker {
+  display: none;
+}
+
 .map-settings-accordion summary::marker {
+  content: '';
+}
+
+.accordion-chevron {
+  margin-left: auto;
   color: #68746f;
+  transition: transform 160ms ease;
+}
+
+.map-settings-accordion[open] .accordion-chevron {
+  transform: rotate(180deg);
 }
 
 .map-settings-grid {

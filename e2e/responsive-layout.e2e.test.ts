@@ -280,9 +280,10 @@ async function mapSettingsPlacementReport(page: Page): Promise<{
   missing: string[]
   settingsParentIsControlPane: boolean
   queryParentIsControlPane: boolean
-  settingsImmediatelyAfterQuery: boolean
+  settingsImmediatelyBeforeQuery: boolean
   settingsBelowResizeHandle: boolean
   queryBelowResizeHandle: boolean
+  hasDisclosureIcon: boolean
   settingsTop: number
   queryTop: number
   resizeBottom: number
@@ -310,7 +311,7 @@ async function mapSettingsPlacementReport(page: Page): Promise<{
       missing,
       settingsParentIsControlPane: settings?.parentElement === controlPane,
       queryParentIsControlPane: queryPanel?.parentElement === controlPane,
-      settingsImmediatelyAfterQuery: queryPanel?.nextElementSibling === settings,
+      settingsImmediatelyBeforeQuery: settings?.nextElementSibling === queryPanel,
       settingsBelowResizeHandle: Boolean(
         settingsRect &&
           resizeRect &&
@@ -319,7 +320,10 @@ async function mapSettingsPlacementReport(page: Page): Promise<{
       queryBelowResizeHandle: Boolean(
         queryRect &&
           resizeRect &&
-          queryRect.top >= resizeRect.bottom - 2,
+        queryRect.top >= resizeRect.bottom - 2,
+      ),
+      hasDisclosureIcon: Boolean(
+        settings?.querySelector('.accordion-chevron'),
       ),
       settingsTop: settingsRect?.top ?? Number.NaN,
       queryTop: queryRect?.top ?? Number.NaN,
@@ -460,7 +464,7 @@ describeE2E('responsive layout e2e', () => {
     }
   }, TEST_TIMEOUT_MS)
 
-  it('keeps map settings below the map resize handle as a query neighbour', async () => {
+  it('keeps map settings below the map resize handle before query', async () => {
     const { context, userDataDir } = await createContext({
       width: 1280,
       height: 720,
@@ -476,9 +480,10 @@ describeE2E('responsive layout e2e', () => {
       expect(report.missing, JSON.stringify(report)).toEqual([])
       expect(report.settingsParentIsControlPane, JSON.stringify(report)).toBe(true)
       expect(report.queryParentIsControlPane, JSON.stringify(report)).toBe(true)
-      expect(report.settingsImmediatelyAfterQuery, JSON.stringify(report)).toBe(true)
+      expect(report.settingsImmediatelyBeforeQuery, JSON.stringify(report)).toBe(true)
       expect(report.queryBelowResizeHandle, JSON.stringify(report)).toBe(true)
       expect(report.settingsBelowResizeHandle, JSON.stringify(report)).toBe(true)
+      expect(report.hasDisclosureIcon, JSON.stringify(report)).toBe(true)
     } finally {
       await page.close().catch(() => undefined)
       await context.close()
