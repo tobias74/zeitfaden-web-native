@@ -113,6 +113,190 @@
   overflow-wrap: anywhere;
 }
 
+.about-page {
+  width: min(980px, 100%);
+  display: grid;
+  gap: 18px;
+  padding: 0 8px 48px;
+  color: #111816;
+}
+
+.about-hero {
+  position: relative;
+  min-height: 330px;
+  display: grid;
+  align-items: center;
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid #cdd8d3;
+  background: #10211d;
+}
+
+.about-hero::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 7px;
+  background: #d84d2a;
+}
+
+.about-hero-copy {
+  position: relative;
+  z-index: 1;
+  width: min(620px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 42px;
+}
+
+.about-kicker,
+.about-section-label {
+  color: #d84d2a;
+  font-size: 12px;
+  font-weight: 780;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.about-hero h2 {
+  max-width: 560px;
+  color: #ffffff;
+  font-size: 38px;
+  font-weight: 760;
+  line-height: 1.05;
+  letter-spacing: 0;
+}
+
+.about-hero p {
+  max-width: 570px;
+  color: #dce7e2;
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+.about-hero-art {
+  position: absolute;
+  right: clamp(18px, 7vw, 80px);
+  bottom: -32px;
+  width: min(330px, 36vw);
+  opacity: 0.72;
+}
+
+.about-hero-art img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.about-intro {
+  padding: 4px 2px;
+}
+
+.about-intro p {
+  max-width: 780px;
+  color: #38443f;
+  font-size: 17px;
+  line-height: 1.55;
+}
+
+.about-highlights {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.about-highlight {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 18px;
+  border: 1px solid #d9e1dd;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.about-highlight-icon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #eef8f4;
+  color: #0f7668;
+}
+
+.about-highlight h3,
+.about-principles h3 {
+  color: #111816;
+  font-size: 17px;
+  font-weight: 740;
+  line-height: 1.2;
+}
+
+.about-highlight p {
+  color: #59645f;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.about-principles {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.2fr);
+  gap: 18px;
+  padding: 22px;
+  border-top: 1px solid #d9e1dd;
+  border-bottom: 1px solid #d9e1dd;
+}
+
+.about-principles > div {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.about-principles ul {
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+  list-style: none;
+}
+
+.about-principles li {
+  position: relative;
+  padding-left: 22px;
+  color: #38443f;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.about-principles li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.55em;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #d84d2a;
+}
+
+.about-footer-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: 780px;
+  color: #38443f;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.about-footer-note svg {
+  flex: 0 0 auto;
+  color: #0f7668;
+}
+
 .topbar h1 {
   font-size: 22px;
   font-weight: 720;
@@ -1945,6 +2129,32 @@
     padding: 18px 0;
   }
 
+  .about-hero {
+    min-height: 300px;
+  }
+
+  .about-hero-copy {
+    padding: 32px;
+  }
+
+  .about-hero h2 {
+    max-width: 520px;
+    font-size: 32px;
+  }
+
+  .about-hero-art {
+    width: min(260px, 34vw);
+    opacity: 0.52;
+  }
+
+  .about-highlights {
+    grid-template-columns: 1fr;
+  }
+
+  .about-principles {
+    grid-template-columns: 1fr;
+  }
+
   .workspace {
     display: grid;
     grid-template-columns: 1fr;
@@ -2088,6 +2298,39 @@
 
   .language-control select {
     width: min(104px, 100%);
+  }
+
+  .about-page {
+    padding: 0 0 32px;
+  }
+
+  .about-hero {
+    min-height: 330px;
+  }
+
+  .about-hero-copy {
+    padding: 26px;
+  }
+
+  .about-hero h2 {
+    font-size: 28px;
+  }
+
+  .about-hero p,
+  .about-intro p {
+    font-size: 15px;
+  }
+
+  .about-hero-art {
+    right: -24px;
+    bottom: -20px;
+    width: 210px;
+    opacity: 0.34;
+  }
+
+  .about-principles,
+  .about-highlight {
+    padding: 16px;
   }
 
   .cookie-consent {

@@ -46,6 +46,7 @@ import {
 import { MapView } from './components/MapView'
 import { MediaViewer } from './components/MediaViewer'
 import { Thumbnail } from './components/Thumbnail'
+import heroImage from './assets/hero.png'
 import privacyDeHtml from './legal/privacy.de.html?raw'
 import privacyEnHtml from './legal/privacy.en.html?raw'
 import { formatDistance } from './lib/distance'
@@ -85,7 +86,7 @@ import type {
   TimelineGroupResult,
 } from './types'
 
-type ActivePage = 'app' | 'imprint' | 'privacy'
+type ActivePage = 'app' | 'about' | 'imprint' | 'privacy'
 type ResultTab = 'catalog' | 'groups'
 type ResultDisplayMode = 'images' | 'cards' | 'list'
 type ResultThumbnailSize = 'small' | 'medium' | 'large'
@@ -707,6 +708,79 @@ function ResultSkeletons({
       )}
     </article>
   ))
+}
+
+type AboutPageProps = {
+  t: (key: TranslationKey, values?: TranslationValues) => string
+}
+
+function AboutPage({ t }: AboutPageProps) {
+  const highlights = [
+    {
+      key: 'media' as const,
+      icon: <Images size={21} aria-hidden="true" />,
+      title: t('aboutHighlightMediaTitle'),
+      body: t('aboutHighlightMediaBody'),
+    },
+    {
+      key: 'map' as const,
+      icon: <MapPin size={21} aria-hidden="true" />,
+      title: t('aboutHighlightMapTitle'),
+      body: t('aboutHighlightMapBody'),
+    },
+    {
+      key: 'route' as const,
+      icon: <Route size={21} aria-hidden="true" />,
+      title: t('aboutHighlightTimelineTitle'),
+      body: t('aboutHighlightTimelineBody'),
+    },
+  ]
+
+  return (
+    <article className="about-page">
+      <section className="about-hero">
+        <div className="about-hero-copy">
+          <span className="about-kicker">{t('aboutKicker')}</span>
+          <h2>{t('aboutHeroTitle')}</h2>
+          <p>{t('aboutHeroBody')}</p>
+        </div>
+        <div className="about-hero-art" aria-hidden="true">
+          <img src={heroImage} alt="" />
+        </div>
+      </section>
+
+      <section className="about-intro">
+        <p>{t('aboutIntro')}</p>
+      </section>
+
+      <section className="about-highlights" aria-label={t('aboutHighlights')}>
+        {highlights.map((highlight) => (
+          <article key={highlight.key} className="about-highlight">
+            <div className="about-highlight-icon">{highlight.icon}</div>
+            <h3>{highlight.title}</h3>
+            <p>{highlight.body}</p>
+          </article>
+        ))}
+      </section>
+
+      <section className="about-principles">
+        <div>
+          <span className="about-section-label">{t('aboutPrinciples')}</span>
+          <h3>{t('aboutPrinciplesTitle')}</h3>
+        </div>
+        <ul>
+          <li>{t('aboutPrincipleLocal')}</li>
+          <li>{t('aboutPrincipleFast')}</li>
+          <li>{t('aboutPrinciplePortable')}</li>
+        </ul>
+      </section>
+
+      <section className="about-footer-note">
+        <Save size={20} aria-hidden="true" />
+        <p>{t('aboutFooterNote')}</p>
+      </section>
+    </article>
+  )
 }
 
 type CookieConsentDialogProps = {
@@ -2255,7 +2329,15 @@ function App() {
             </h1>
           </div>
           <div className="topbar-tools">
-            <nav className="topbar-nav" aria-label="Legal">
+            <nav className="topbar-nav" aria-label="Pages">
+              <button
+                type="button"
+                className="topbar-link"
+                aria-current={activePage === 'about' ? 'page' : undefined}
+                onClick={() => setActivePage('about')}
+              >
+                {t('about')}
+              </button>
               <button
                 type="button"
                 className="topbar-link"
@@ -2301,7 +2383,9 @@ function App() {
           </div>
         </header>
         <section className="legal-content">
-          {activePage === 'imprint' ? (
+          {activePage === 'about' ? (
+            <AboutPage t={t} />
+          ) : activePage === 'imprint' ? (
             <article className="legal-panel">
               <div className="legal-panel-title">
                 <FileText size={20} />
@@ -2346,7 +2430,14 @@ function App() {
           </h1>
         </div>
         <div className="topbar-tools">
-          <nav className="topbar-nav" aria-label="Legal">
+          <nav className="topbar-nav" aria-label="Pages">
+            <button
+              type="button"
+              className="topbar-link"
+              onClick={() => setActivePage('about')}
+            >
+              {t('about')}
+            </button>
             <button
               type="button"
               className="topbar-link"

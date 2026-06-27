@@ -17,6 +17,33 @@ const en = {
   activityCatalogCleared: 'Catalog cleared',
   all: 'All',
   allMedia: 'All media',
+  about: 'About',
+  aboutKicker: 'Local media memory',
+  aboutHeroTitle: 'A private timeline for the places your photos remember.',
+  aboutHeroBody:
+    'Zeitfaden turns folders, device photos, and location exports into a searchable map of personal media without asking you to hand over the archive.',
+  aboutIntro:
+    'The app is built for people with large libraries, old backups, and scattered travel traces who want a calm way to find what happened where.',
+  aboutHighlights: 'About highlights',
+  aboutHighlightMediaTitle: 'Bring your archive together',
+  aboutHighlightMediaBody:
+    'Index media folders and imported location files into one local catalog for browsing and search.',
+  aboutHighlightMapTitle: 'Search by place and time',
+  aboutHighlightMapBody:
+    'Use the map, time ranges, and distance sorting to narrow years of media to the moments that matter.',
+  aboutHighlightTimelineTitle: 'Recover routes and groups',
+  aboutHighlightTimelineBody:
+    'Timeline imports can reveal trips, visits, and movement patterns that plain file folders hide.',
+  aboutPrinciples: 'Principles',
+  aboutPrinciplesTitle: 'Made for a personal archive, not a feed.',
+  aboutPrincipleLocal:
+    'Local-first: catalog data and generated thumbnails stay with this app unless you choose otherwise.',
+  aboutPrincipleFast:
+    'Responsive at scale: indexing and map aggregation are designed for large imports.',
+  aboutPrinciplePortable:
+    'File-friendly: original media stays where it is, so the catalog can be rebuilt from your own sources.',
+  aboutFooterNote:
+    'Zeitfaden is a prototype, but its direction is stable: help people understand their own media history with quiet, practical tools.',
   area: 'Area',
   areaFilter: 'Area filter',
   activityLog: 'Activity log',
@@ -272,6 +299,34 @@ const de: Record<TranslationKey, string> = {
   activityCatalogCleared: 'Katalog geleert',
   all: 'Alle',
   allMedia: 'Alle Medien',
+  about: 'Ueber',
+  aboutKicker: 'Lokale Medien-Erinnerung',
+  aboutHeroTitle:
+    'Eine private Zeitleiste fuer die Orte, an die deine Fotos erinnern.',
+  aboutHeroBody:
+    'Zeitfaden macht aus Ordnern, Geraetefotos und Standortexporten eine durchsuchbare Karte persoenlicher Medien, ohne dass du dein Archiv abgeben musst.',
+  aboutIntro:
+    'Die App ist fuer Menschen mit grossen Bibliotheken, alten Backups und verstreuten Reisespuren gebaut, die ruhig finden wollen, was wo passiert ist.',
+  aboutHighlights: 'Ueberblick',
+  aboutHighlightMediaTitle: 'Archiv zusammenfuehren',
+  aboutHighlightMediaBody:
+    'Indiziere Medienordner und importierte Standortdateien in einem lokalen Katalog zum Durchsuchen und Browsen.',
+  aboutHighlightMapTitle: 'Nach Ort und Zeit suchen',
+  aboutHighlightMapBody:
+    'Karte, Zeitbereiche und Distanzsortierung helfen, Jahre an Medien auf relevante Momente zu begrenzen.',
+  aboutHighlightTimelineTitle: 'Routen und Gruppen wiederfinden',
+  aboutHighlightTimelineBody:
+    'Timeline-Importe koennen Reisen, Besuche und Bewegungsmuster sichtbar machen, die in Ordnern verborgen bleiben.',
+  aboutPrinciples: 'Prinzipien',
+  aboutPrinciplesTitle: 'Gebaut fuer ein persoenliches Archiv, nicht fuer einen Feed.',
+  aboutPrincipleLocal:
+    'Lokal zuerst: Katalogdaten und erzeugte Vorschaubilder bleiben in dieser App, solange du nichts anderes waehlst.',
+  aboutPrincipleFast:
+    'Reaktionsfaehig bei grossen Datenmengen: Indizes und Kartenaggregation sind fuer grosse Importe ausgelegt.',
+  aboutPrinciplePortable:
+    'Dateifreundlich: Originalmedien bleiben an ihrem Ort, damit der Katalog aus deinen Quellen neu aufgebaut werden kann.',
+  aboutFooterNote:
+    'Zeitfaden ist ein Prototyp, aber die Richtung ist klar: Menschen sollen ihre eigene Mediengeschichte mit ruhigen, praktischen Werkzeugen verstehen.',
   area: 'Bereich',
   areaFilter: 'Bereichsfilter',
   activityLog: 'Aktivitätslog',
