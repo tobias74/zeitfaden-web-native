@@ -424,6 +424,7 @@ function createPlatform(): PlatformBackend {
       importFolder: vi.fn(),
       rescanFolders: vi.fn(),
       importGeoFile: vi.fn(),
+      importGeoFolder: vi.fn(),
       commitImport: vi.fn(),
       dispose: vi.fn(),
     },

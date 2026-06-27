@@ -149,6 +149,10 @@ export interface ImportBackend {
     onProgress?: (progress: ImportProgress) => void,
     options?: ImportOptions,
   ): Promise<ImportSummary>
+  importGeoFolder(
+    onProgress?: (progress: ImportProgress) => void,
+    options?: ImportOptions,
+  ): Promise<ImportSummary>
   commitImport(): Promise<void> | void
   dispose(): void
 }

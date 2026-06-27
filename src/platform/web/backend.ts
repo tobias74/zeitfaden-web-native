@@ -21,8 +21,14 @@ import { traceStartup } from '../../lib/startupTrace'
 
 declare global {
   interface Window {
-    __ZEITFADEN_E2E_GEO_FILE__?: () => File | Promise<File>
+    __ZEITFADEN_E2E_GEO_FILE__?: () =>
+      | File
+      | File[]
+      | Promise<File | File[]>
     __ZEITFADEN_E2E_DIRECTORY_HANDLE__?: () =>
+      | FileSystemDirectoryHandle
+      | Promise<FileSystemDirectoryHandle>
+    __ZEITFADEN_E2E_GEO_DIRECTORY_HANDLE__?: () =>
       | FileSystemDirectoryHandle
       | Promise<FileSystemDirectoryHandle>
   }
@@ -155,6 +161,25 @@ function sourceFromRecord(record: {
   }
 }
 
+function geoImportCandidateName(name: string): boolean {
+  const normalized = name.toLowerCase()
+  return (
+    normalized.endsWith('.gpx') ||
+    normalized.endsWith('.json') ||
+    normalized.endsWith('.geojson')
+  )
+}
+
+type GeoImportEntry = {
+  sourceRecord: {
+    id: string
+    label: string
+    duplicateSourceIds?: string[]
+  }
+  file: File
+  handle?: FileSystemFileHandle
+}
+
 class WebImportBackend implements ImportBackend {
   private readonly catalog: CatalogClient
 
@@ -176,6 +201,107 @@ class WebImportBackend implements ImportBackend {
       errors: [],
       cancelled: true,
     }
+  }
+
+  private async importGeoEntries(
+    entries: GeoImportEntry[],
+    sourceLabel: string,
+    onProgress?: (progress: ImportProgress) => void,
+    options: ImportOptions = {},
+  ): Promise<ImportSummary> {
+    const aggregateSource = {
+      id: `geo-import-batch:${sourceLabel}`,
+      label: sourceLabel,
+    }
+    const aggregate: ImportSummary = {
+      source: sourceFromRecord(aggregateSource),
+      sourceLabel,
+      scannedFiles: 0,
+      totalFiles: entries.length,
+      acceptedMedia: 0,
+      skippedFiles: 0,
+      errors: [],
+    }
+
+    for (const entry of entries) {
+      if (options.signal?.aborted) {
+        aggregate.cancelled = true
+        break
+      }
+
+      const duplicateSourceIds = entry.sourceRecord.duplicateSourceIds ?? []
+      try {
+        if (entry.handle) {
+          await putGeoFileHandle({
+            id: entry.sourceRecord.id,
+            label: entry.sourceRecord.label,
+            handle: entry.handle,
+          })
+          await Promise.all(
+            duplicateSourceIds.map((id) => removeGeoFileHandle(id)),
+          )
+        }
+
+        const summary = await this.catalog.importGeoFile(
+          {
+            source: sourceFromRecord(entry.sourceRecord),
+            duplicateSourceIds,
+            file: entry.file,
+          },
+          (progress) => {
+            onProgress?.({
+              ...progress,
+              sourceLabel,
+              scannedFiles: aggregate.scannedFiles + progress.scannedFiles,
+              totalFiles: entries.length,
+              acceptedMedia: aggregate.acceptedMedia + progress.acceptedMedia,
+              skippedFiles: aggregate.skippedFiles + progress.skippedFiles,
+            })
+          },
+          options.signal,
+        )
+        aggregate.scannedFiles += summary.scannedFiles
+        aggregate.acceptedMedia += summary.acceptedMedia
+        aggregate.skippedFiles += summary.skippedFiles
+        aggregate.errors.push(...summary.errors)
+        aggregate.cancelled = aggregate.cancelled || summary.cancelled
+        if (summary.cancelled) break
+      } catch (error) {
+        aggregate.scannedFiles += 1
+        aggregate.skippedFiles += 1
+        aggregate.errors.push(
+          `${entry.sourceRecord.label}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        )
+      }
+    }
+
+    return aggregate
+  }
+
+  private async geoEntriesFromDirectory(
+    handle: FileSystemDirectoryHandle,
+  ): Promise<GeoImportEntry[]> {
+    const entries: GeoImportEntry[] = []
+    const walk = async (directory: FileSystemDirectoryHandle): Promise<void> => {
+      for await (const [, entry] of directory.entries()) {
+        if (entry.kind === 'directory') {
+          await walk(entry as FileSystemDirectoryHandle)
+          continue
+        }
+        if (!geoImportCandidateName(entry.name)) continue
+        const fileHandle = entry as FileSystemFileHandle
+        const sourceRecord = await sourceRecordForGeoFileHandle(fileHandle)
+        entries.push({
+          sourceRecord,
+          file: await fileHandle.getFile(),
+          handle: fileHandle,
+        })
+      }
+    }
+    await walk(handle)
+    return entries
   }
 
   async importFolder(
@@ -298,25 +424,28 @@ class WebImportBackend implements ImportBackend {
     onProgress?: (progress: ImportProgress) => void,
     options: ImportOptions = {},
   ): Promise<ImportSummary> {
-    const testGeoFile = import.meta.env.DEV
+    const testGeoFiles = import.meta.env.DEV
       ? await window.__ZEITFADEN_E2E_GEO_FILE__?.()
       : undefined
-    if (testGeoFile) {
-      const sourceRecord = {
-        id: `e2e-geo-file:${testGeoFile.name}`,
-        label: testGeoFile.name,
-      }
+    if (testGeoFiles) {
+      const files = Array.isArray(testGeoFiles) ? testGeoFiles : [testGeoFiles]
       if (options.signal?.aborted) {
-        return this.cancelledSummary(sourceRecord)
+        return this.cancelledSummary({
+          id: 'e2e-geo-files',
+          label: 'Selected geo files',
+        })
       }
-      return this.catalog.importGeoFile(
-        {
-          source: sourceFromRecord(sourceRecord),
-          duplicateSourceIds: [],
-          file: testGeoFile,
-        },
+      return this.importGeoEntries(
+        files.map((file) => ({
+          sourceRecord: {
+            id: `e2e-geo-file:${file.name}`,
+            label: file.name,
+          },
+          file,
+        })),
+        files.length === 1 ? files[0].name : 'Selected geo files',
         onProgress,
-        options.signal,
+        options,
       )
     }
 
@@ -324,8 +453,8 @@ class WebImportBackend implements ImportBackend {
       throw new Error('This browser does not expose the File System Access API.')
     }
 
-    const [handle] = await window.showOpenFilePicker({
-      multiple: false,
+    const handles = await window.showOpenFilePicker({
+      multiple: true,
       types: [
         {
           description: 'Geo point files',
@@ -339,31 +468,62 @@ class WebImportBackend implements ImportBackend {
         },
       ],
     })
-    if (!handle) throw new Error('Import cancelled')
-
-    const sourceRecord = await sourceRecordForGeoFileHandle(handle)
-    const file = await handle.getFile()
+    if (handles.length === 0) throw new Error('Import cancelled')
     if (options.signal?.aborted) {
-      return this.cancelledSummary(sourceRecord)
+      return this.cancelledSummary({
+        id: 'selected-geo-files',
+        label: 'Selected geo files',
+      })
     }
 
-    await putGeoFileHandle({
-      id: sourceRecord.id,
-      label: sourceRecord.label,
-      handle: sourceRecord.handle,
-    })
-    await Promise.all(
-      sourceRecord.duplicateSourceIds.map((id) => removeGeoFileHandle(id)),
+    const entries = await Promise.all(
+      handles.map(async (handle) => {
+        const sourceRecord = await sourceRecordForGeoFileHandle(handle)
+        return {
+          sourceRecord,
+          file: await handle.getFile(),
+          handle,
+        }
+      }),
     )
 
-    return this.catalog.importGeoFile(
-      {
-        source: sourceFromRecord(sourceRecord),
-        duplicateSourceIds: sourceRecord.duplicateSourceIds,
-        file,
-      },
+    return this.importGeoEntries(
+      entries,
+      entries.length === 1
+        ? entries[0].sourceRecord.label
+        : 'Selected geo files',
       onProgress,
-      options.signal,
+      options,
+    )
+  }
+
+  async importGeoFolder(
+    onProgress?: (progress: ImportProgress) => void,
+    options: ImportOptions = {},
+  ): Promise<ImportSummary> {
+    const testHandle = import.meta.env.DEV
+      ? await window.__ZEITFADEN_E2E_GEO_DIRECTORY_HANDLE__?.()
+      : undefined
+    if (!testHandle && !window.showDirectoryPicker) {
+      throw new Error('This browser does not expose the File System Access API.')
+    }
+
+    const handle = testHandle ?? await window.showDirectoryPicker!({
+      mode: 'read',
+    })
+    if (options.signal?.aborted) {
+      return this.cancelledSummary({
+        id: `geo-folder:${handle.name}`,
+        label: handle.name,
+      })
+    }
+
+    const entries = await this.geoEntriesFromDirectory(handle)
+    return this.importGeoEntries(
+      entries,
+      handle.name || 'Geo folder',
+      onProgress,
+      options,
     )
   }
 

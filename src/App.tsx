@@ -1231,6 +1231,7 @@ function App() {
     importFolder,
     rescanFolders,
     importGeoFile,
+    importGeoFolder,
     cancelImport,
     commitImport,
   } = useImports({
@@ -2015,6 +2016,14 @@ function App() {
             >
               <MapPin size={17} />
               {t('importGeoFile')}
+            </button>
+            <button
+              type="button"
+              onClick={importGeoFolder}
+              disabled={busy || !catalogReady}
+            >
+              <FolderOpen size={17} />
+              {t('importGeoFolder')}
             </button>
             <button
               type="button"

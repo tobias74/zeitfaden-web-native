@@ -36,6 +36,7 @@ export function useImports({
   importFolder(): Promise<void>
   rescanFolders(): Promise<void>
   importGeoFile(): Promise<void>
+  importGeoFolder(): Promise<void>
   cancelImport(): void
   commitImport(): void
 } {
@@ -171,6 +172,36 @@ export function useImports({
     }
   }, [finishImport, onError, platform, recordActivity])
 
+  const importGeoFolder = useCallback(async () => {
+    onError('')
+    setImportProgress(undefined)
+    setBusy(true)
+    setCancelling(false)
+    setActiveImportKind('geo')
+    const controller = new AbortController()
+    activeImportControllerRef.current = controller
+    try {
+      const summary = await platform.importer.importGeoFolder(
+        (progress) => {
+          setImportProgress(progress)
+        },
+        { signal: controller.signal },
+      )
+      finishImport(summary)
+    } catch (caught) {
+      if (!isAbortError(caught)) {
+        onError(caught instanceof Error ? caught.message : String(caught))
+      }
+      recordActivity('activityImportStopped')
+    } finally {
+      activeImportControllerRef.current = undefined
+      setImportProgress(undefined)
+      setCancelling(false)
+      setActiveImportKind(undefined)
+      setBusy(false)
+    }
+  }, [finishImport, onError, platform, recordActivity])
+
   return {
     busy,
     importProgress,
@@ -179,6 +210,7 @@ export function useImports({
     importFolder,
     rescanFolders,
     importGeoFile,
+    importGeoFolder,
     cancelImport,
     commitImport,
   }

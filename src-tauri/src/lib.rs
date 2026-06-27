@@ -2740,7 +2740,12 @@ fn detect_geo_file_format_from_prefix(path: &Path, prefix: &str) -> AppResult<Ge
         {
             return Err("GeoJSON files are not supported yet. Supported formats are GPX and Google Takeout Location History JSON.".to_string());
         }
-        return Ok(GeoFileFormat::GoogleTakeoutJson);
+        if trimmed.contains("\"locations\"")
+            || (trimmed.contains("\"latitudeE7\"") && trimmed.contains("\"longitudeE7\""))
+        {
+            return Ok(GeoFileFormat::GoogleTakeoutJson);
+        }
+        return Err("Unsupported JSON geo file. Supported JSON formats are Google Takeout Records.json and Google Timeline JSON.".to_string());
     }
 
     if trimmed.contains("<gpx") || extension(path).as_deref() == Some("gpx") {
@@ -8827,22 +8832,59 @@ fn rescan_folders(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
     Ok(summary)
 }
 
-#[tauri::command]
-fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
-    let Some(path) = rfd::FileDialog::new()
-        .add_filter("Geo point files", &["gpx", "json", "geojson"])
-        .pick_file()
-    else {
-        return Err("Import cancelled".to_string());
-    };
-    reset_import_cancel();
+fn is_geo_import_candidate_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "gpx" | "json" | "geojson"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn geo_import_batch_source(label: String, root_path: Option<String>) -> MediaSource {
+    let id_input = root_path.as_deref().unwrap_or(&label);
+    MediaSource {
+        id: sha256_string(&format!("geo-import-batch:{id_input}")),
+        label,
+        root_path,
+    }
+}
+
+fn collect_geo_import_candidate_paths(root: &Path) -> (Vec<PathBuf>, Vec<String>) {
+    let mut paths = Vec::new();
+    let mut errors = Vec::new();
+    for entry in WalkDir::new(root).follow_links(false).into_iter() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                errors.push(error.to_string());
+                continue;
+            }
+        };
+        if entry.file_type().is_file() && is_geo_import_candidate_path(entry.path()) {
+            paths.push(entry.path().to_path_buf());
+        }
+    }
+    paths.sort();
+    (paths, errors)
+}
+
+fn import_geo_path(
+    app: &AppHandle,
+    window: &Window,
+    path: PathBuf,
+    materialize_after_success: bool,
+) -> AppResult<ImportSummary> {
     let path = path.canonicalize().unwrap_or(path);
     let absolute_path = path.to_string_lossy().to_string();
     let source = source_from_file(&path);
     let source_label = source.label.clone();
 
     emit_progress(
-        &window,
+        window,
         import_progress_bytes(
             "counting",
             &source_label,
@@ -8861,7 +8903,7 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
         .unwrap_or(0);
     let prefix = read_file_prefix(&path)?;
     let format = detect_geo_file_format_from_prefix(&path, &prefix)?;
-    let generation = prepare_import_source(&app, &source)?;
+    let generation = prepare_import_source(app, &source)?;
     let session = NativeImportSession {
         source_id: source.id.clone(),
         generation,
@@ -8871,32 +8913,37 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
     } else {
         let result = match format {
             GeoFileFormat::GoogleTakeoutJson => import_google_takeout_streaming(
-                &app,
+                app,
                 &path,
                 &source,
                 &session,
                 &absolute_path,
                 total_bytes,
-                &window,
+                window,
             ),
-            GeoFileFormat::GoogleTimelineJson => {
-                import_google_timeline_json(&app, &path, &source, &session, total_bytes, &window)
-            }
+            GeoFileFormat::GoogleTimelineJson => import_google_timeline_json(
+                app,
+                &path,
+                &source,
+                &session,
+                total_bytes,
+                window,
+            ),
             GeoFileFormat::Gpx => import_gpx_streaming(
-                &app,
+                app,
                 &path,
                 &source,
                 &session,
                 &absolute_path,
                 total_bytes,
-                &window,
+                window,
             ),
         };
         match result {
             Ok(summary) => {
-                if summary.0 > 0 {
-                    let mut manifest = load_file_catalog_manifest(&app)?;
-                    materialize_file_catalog(&app, &mut manifest)?;
+                if materialize_after_success && summary.0 > 0 {
+                    let mut manifest = load_file_catalog_manifest(app)?;
+                    materialize_file_catalog(app, &mut manifest)?;
                 }
                 summary
             }
@@ -8914,6 +8961,100 @@ fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
         errors: Vec::new(),
         cancelled: cancelled.then_some(true),
     })
+}
+
+fn import_geo_paths(
+    app: AppHandle,
+    window: Window,
+    paths: Vec<PathBuf>,
+    source: MediaSource,
+    initial_errors: Vec<String>,
+) -> AppResult<ImportSummary> {
+    reset_import_cancel();
+    let source_label = source.label.clone();
+    let mut summary = ImportSummary {
+        source,
+        source_label,
+        scanned_files: 0,
+        total_files: paths.len() as i64,
+        accepted_media: 0,
+        skipped_files: 0,
+        errors: initial_errors,
+        cancelled: None,
+    };
+
+    for path in paths {
+        if import_cancelled() {
+            summary.cancelled = Some(true);
+            break;
+        }
+        match import_geo_path(&app, &window, path.clone(), false) {
+            Ok(source_summary) => {
+                summary.scanned_files += source_summary.scanned_files;
+                summary.accepted_media += source_summary.accepted_media;
+                summary.skipped_files += source_summary.skipped_files;
+                summary.errors.extend(source_summary.errors);
+                if source_summary.cancelled.unwrap_or(false) {
+                    summary.cancelled = Some(true);
+                    break;
+                }
+            }
+            Err(error) => {
+                summary.scanned_files += 1;
+                summary.skipped_files += 1;
+                summary
+                    .errors
+                    .push(format!("{}: {error}", path.to_string_lossy()));
+            }
+        }
+    }
+
+    if summary.accepted_media > 0 {
+        let mut manifest = load_file_catalog_manifest(&app)?;
+        materialize_file_catalog(&app, &mut manifest)?;
+    }
+
+    Ok(summary)
+}
+
+#[tauri::command]
+fn import_geo_file(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
+    let Some(paths) = rfd::FileDialog::new()
+        .add_filter("Geo point files", &["gpx", "json", "geojson"])
+        .pick_files()
+    else {
+        return Err("Import cancelled".to_string());
+    };
+    let paths = paths
+        .into_iter()
+        .filter(|path| is_geo_import_candidate_path(path))
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return Err("No supported geo files were selected.".to_string());
+    }
+    if paths.len() == 1 {
+        reset_import_cancel();
+        return import_geo_path(&app, &window, paths.into_iter().next().unwrap(), true);
+    }
+
+    import_geo_paths(
+        app,
+        window,
+        paths,
+        geo_import_batch_source("Selected geo files".to_string(), None),
+        Vec::new(),
+    )
+}
+
+#[tauri::command]
+fn import_geo_folder(app: AppHandle, window: Window) -> AppResult<ImportSummary> {
+    let Some(root) = rfd::FileDialog::new().pick_folder() else {
+        return Err("Import cancelled".to_string());
+    };
+    let root = root.canonicalize().unwrap_or(root);
+    let source = source_from_root(&root);
+    let (paths, errors) = collect_geo_import_candidate_paths(&root);
+    import_geo_paths(app, window, paths, source, errors)
 }
 
 #[tauri::command]
@@ -8964,6 +9105,7 @@ pub fn run() {
             import_folder,
             rescan_folders,
             import_geo_file,
+            import_geo_folder,
             resolve_thumbnail_path,
             reveal_location
         ])

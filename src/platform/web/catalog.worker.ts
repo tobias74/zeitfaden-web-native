@@ -5791,6 +5791,13 @@ function throwKnownUnsupportedJsonPrefix(prefix: string): void {
   }
 }
 
+function googleTakeoutRecordsPrefix(prefix: string): boolean {
+  return (
+    /"locations"\s*:/.test(prefix) ||
+    (/"latitudeE7"\s*:/.test(prefix) && /"longitudeE7"\s*:/.test(prefix))
+  )
+}
+
 async function importGpxIntoCatalog(
   file: File,
   source: MediaSource,
@@ -6043,12 +6050,10 @@ async function importGeoFileIntoCatalog(
     totalBytes: file.size,
   })
   if (isCancelled()) return cancelledSummary()
-  await store.prepareImportSource(source, duplicateSourceIds)
-  if (isCancelled()) return cancelledSummary()
   const prefix = await file.slice(0, GEO_IMPORT_PREFIX_BYTES).text()
   if (isCancelled()) return cancelledSummary()
-  const result = jsonLikePrefix(prefix)
-    ? await (async () => {
+  const importDetectedGeoFile = jsonLikePrefix(prefix)
+    ? async () => {
         throwKnownUnsupportedJsonPrefix(prefix)
         if (
           /"semanticSegments"\s*:/.test(prefix) ||
@@ -6057,9 +6062,17 @@ async function importGeoFileIntoCatalog(
         ) {
           return importGoogleTimelineIntoCatalog(file, source, store, postProgress, isCancelled)
         }
+        if (!googleTakeoutRecordsPrefix(prefix)) {
+          throw new Error(
+            'Unsupported JSON geo file. Supported JSON formats are Google Takeout Records.json and Google Timeline JSON.',
+          )
+        }
         return importGoogleTakeoutIntoCatalog(file, source, store, postProgress, isCancelled)
-      })()
-    : await importGpxIntoCatalog(file, source, store, postProgress, isCancelled)
+      }
+    : async () => importGpxIntoCatalog(file, source, store, postProgress, isCancelled)
+  await store.prepareImportSource(source, duplicateSourceIds)
+  if (isCancelled()) return cancelledSummary()
+  const result = await importDetectedGeoFile()
   return {
     source,
     sourceLabel,
