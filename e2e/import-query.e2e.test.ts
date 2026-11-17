@@ -186,7 +186,7 @@ async function appDiagnostic(page: Page): Promise<string> {
     return JSON.stringify(
       {
         alert: text('[role="alert"]'),
-        topbarProgress: text('.topbar-progress-slot'),
+        status: text('.app-status'),
         indexesPanel: panelText('Indexes'),
         mediaCards: document.querySelectorAll('.media-card').length,
         mediaGridBusy: document.querySelector('.media-grid')?.getAttribute('aria-busy') ?? '',
@@ -242,7 +242,7 @@ function installGeneratedGeoFile(pageContext: BrowserContext): Promise<void> {
         }))
         return new File(
           [JSON.stringify({ locations })],
-          `zeitfaden-e2e-${pointCount}.json`,
+          `zeitfaden-e2e-${pointCount}-${'long-file-name-'.repeat(7)}.json`,
           { type: 'application/json' },
         )
       }
@@ -295,8 +295,33 @@ describeE2E('geo import and query UI e2e', () => {
     })
 
     await runStep(page, 'Open app and import generated geo file', async () => {
+      const desktop = page.viewportSize()!
+      await page.setViewportSize({ width: 360, height: 780 })
       await page.goto(baseUrl)
-      await page.getByRole('button', { name: /Import geo file/i }).click()
+      const importButton = page.getByRole('button', { name: /Import geo file/i })
+      const workspaceTop = () => page.locator('.workspace').evaluate(
+        (element) => element.getBoundingClientRect().top,
+      )
+      await importButton.click({ trial: true })
+      await page.locator('.index-update-strip').waitFor({ state: 'hidden' })
+      const idleTop = await workspaceTop()
+      await importButton.click()
+
+      const progress = page.locator('.import-progress-header')
+      await progress.waitFor({ timeout: STEP_TIMEOUT_MS })
+      expect(await progress.evaluate((row) => {
+        const rect = row.getBoundingClientRect()
+        const labelsAndButtons = row.children
+        return {
+          fits: rect.left >= 0 && rect.right <= document.documentElement.clientWidth,
+          aligned: Array.from(labelsAndButtons).every((control) => {
+            const box = control.getBoundingClientRect()
+            return Math.abs(box.top + box.height / 2 - (rect.top + rect.height / 2)) < 1
+          }),
+        }
+      })).toEqual({ fits: true, aligned: true })
+      expect(await workspaceTop()).toBe(idleTop)
+      await page.setViewportSize(desktop)
     })
 
     await runStep(page, 'Run initial timestamp query', async () => {

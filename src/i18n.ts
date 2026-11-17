@@ -397,7 +397,7 @@ const de: Record<TranslationKey, string> = {
   images: 'Bilder',
   imprint: 'Impressum',
   cancelImport: 'Abbrechen',
-  commitImport: 'Jetzt speichen',
+  commitImport: 'Jetzt speichern',
   importFolder: 'Medienordner importieren',
   importGeoFile: 'Geo-Dateien importieren',
   importItemsAcceptedSkipped:
@@ -416,7 +416,7 @@ const de: Record<TranslationKey, string> = {
   indexStatusPending: 'Ausstehend',
   indexStatusStale: 'Veraltet',
   indexStatusUnknown: 'Unbekannt',
-  indexUpdateFailed: 'Suchindizes konnten nicht aktualisiert werden',
+  indexUpdateFailed: 'Indexaufbau fehlgeschlagen',
   indexUpdateReady: 'Suchindizes sind aktuell',
   indexUpdateRunning: 'Suchindizes werden aktualisiert …',
   indexVersion: 'Indexversion',

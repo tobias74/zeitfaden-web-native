@@ -385,15 +385,30 @@
   flex: 0 0 auto;
 }
 
-.topbar-progress-slot {
-  grid-column: 1 / -1;
-  min-height: 32px;
-  min-width: 0;
-  width: 100%;
+.app-status {
+  position: fixed;
+  inset-inline-end: 12px;
+  inset-block-end: max(12px, env(safe-area-inset-bottom));
+  z-index: 40;
+  inline-size: min(520px, calc(100% - 24px));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: end;
+  pointer-events: none;
 }
 
-.topbar-progress-slot.idle {
-  display: none;
+.app-status > * {
+  max-inline-size: 100%;
+  pointer-events: auto;
+}
+
+.index-update-strip .index-status-badge,
+.import-progress-copy,
+.app-error-strip {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cookie-consent {
@@ -556,10 +571,6 @@
   padding: 0 6px;
   border: 0;
   background: transparent;
-}
-
-.import-progress-idle {
-  height: 100%;
 }
 
 .workspace {
@@ -923,12 +934,14 @@
 }
 
 .index-update-strip {
-  min-height: 32px;
-  min-width: 0;
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
   gap: 8px;
+}
+
+.index-update-strip .index-status-badge {
+  display: block;
+  line-height: 18px;
 }
 
 .index-status-badge {
@@ -1010,7 +1023,7 @@
 }
 
 .validation.bad,
-.topbar-error-strip {
+.app-error-strip {
   background: #fff0ec;
   color: #9a2f20;
 }
@@ -1120,55 +1133,38 @@
 }
 
 .import-progress-strip {
-  min-width: 0;
+  width: 100%;
   display: grid;
-  grid-template-rows: auto 4px;
-  gap: 4px;
-  align-content: center;
+  grid-template: auto 4px / minmax(0, 1fr);
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #d9dedb;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 2px 12px rgba(23, 34, 30, 0.12);
 }
 
 .import-progress-header {
-  min-width: 0;
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 10px;
+  align-items: center;
+  gap: 8px;
 }
 
-.import-progress-header span {
-  flex: 1 1 220px;
-  min-width: 0;
+.import-progress-copy {
+  flex: 1;
   color: #17221e;
   font-size: 12px;
   font-weight: 680;
   line-height: 1.25;
-  overflow-wrap: break-word;
-  word-break: normal;
 }
 
-.import-progress-header strong {
-  min-width: 0;
+.import-progress-copy strong {
   color: #0d6f5d;
-  font-size: 12px;
-  line-height: 1.25;
-  overflow-wrap: break-word;
-  word-break: normal;
-}
-
-.import-progress-actions {
-  flex: 1 1 260px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-width: 0;
 }
 
 .import-cancel-button {
-  height: 22px;
-  min-height: 0;
+  flex: none;
+  min-height: 28px;
   padding: 0 7px;
   display: inline-flex;
   align-items: center;
@@ -1430,18 +1426,13 @@
   padding: 0;
 }
 
-.topbar-error-strip {
-  min-height: 32px;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  padding: 0 9px;
+.app-error-strip {
+  padding: 8px 9px;
   border: 1px solid #f1c3b9;
   border-radius: 6px;
   font-size: 12px;
   font-weight: 680;
   line-height: 1.25;
-  overflow-wrap: anywhere;
 }
 
 .media-grid {
@@ -2075,10 +2066,6 @@
     width: 100%;
     flex-wrap: wrap;
     justify-content: stretch;
-  }
-
-  .topbar-progress-slot {
-    min-height: 24px;
   }
 
   .topbar-actions button {

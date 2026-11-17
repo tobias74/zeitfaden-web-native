@@ -29,8 +29,9 @@ const APPBAR_VIEWPORTS = [
   { name: 'large desktop', width: 1600, height: 900 },
 ] as const
 const APPBAR_STATUS_VIEWPORTS = [
-  { name: 'desktop', width: 1280, height: 720 },
-  { name: 'large desktop', width: 1600, height: 900 },
+  { name: 'narrow phone', width: 360, height: 780 },
+  { name: 'small desktop', width: 1100, height: 720 },
+  { name: 'desktop', width: 1440, height: 900 },
 ] as const
 
 let server: ViteDevServer | undefined
@@ -334,87 +335,19 @@ async function mapSettingsPlacementReport(page: Page): Promise<{
   })
 }
 
-async function appbarStatusReport(page: Page): Promise<{
-  statusMissing: boolean
-  statusOutside: string[]
-  overlaps: string[]
-  statusBelowFirstRow: boolean
-  titleTopDeltaPx: number
-  statusLeftDeltaToTitlePx: number
-  statusRightDeltaToActionsPx: number
-  topbarOverflowPx: number
-  viewportWidth: number
-}> {
+async function statusLayout(page: Page) {
   return page.evaluate(() => {
-    const topbar = document.querySelector('.topbar')
-    const status = topbar?.querySelector('.index-update-strip')
-    if (!topbar || !status) {
-      return {
-        statusMissing: true,
-        statusOutside: [],
-        overlaps: [],
-        statusBelowFirstRow: false,
-        titleTopDeltaPx: Number.POSITIVE_INFINITY,
-        statusLeftDeltaToTitlePx: Number.POSITIVE_INFINITY,
-        statusRightDeltaToActionsPx: Number.POSITIVE_INFINITY,
-        topbarOverflowPx: 0,
-        viewportWidth: window.innerWidth,
-      }
-    }
-
-    const topbarRect = topbar.getBoundingClientRect()
-    const statusRect = status.getBoundingClientRect()
-    const viewportLeft = -(window.visualViewport?.offsetLeft ?? 0)
-    const viewportRight = viewportLeft + window.innerWidth
-    const visibleRect = (rect: DOMRect) => rect.width > 1 && rect.height > 1
-    const outside = (rect: DOMRect) =>
-      visibleRect(rect) &&
-      (
-        rect.left < Math.max(topbarRect.left, viewportLeft) - 2 ||
-        rect.right > Math.min(topbarRect.right, viewportRight) + 2 ||
-        rect.top < topbarRect.top - 2 ||
-        rect.bottom > topbarRect.bottom + 2
-      )
-    const intersects = (a: DOMRect, b: DOMRect) =>
-      visibleRect(a) &&
-      visibleRect(b) &&
-      a.left < b.right - 1 &&
-      a.right > b.left + 1 &&
-      a.top < b.bottom - 1 &&
-      a.bottom > b.top + 1
-    const summary = (selector: string, rect: DOMRect) =>
-      `${selector} ${Math.round(rect.left)},${Math.round(rect.top)}-${Math.round(
-        rect.right,
-      )},${Math.round(rect.bottom)}`
-
-    const firstRowSelectors = ['.topbar h1', '.topbar-nav', '.topbar-actions']
-    const firstRowRects = firstRowSelectors.flatMap((selector) => {
-      const element = topbar.querySelector(selector)
-      return element ? [{ selector, rect: element.getBoundingClientRect() }] : []
-    })
-    const actionRect = topbar.querySelector('.topbar-actions')?.getBoundingClientRect()
-    const titleRect = topbar.querySelector('.topbar h1')?.getBoundingClientRect()
-    const firstRowBottom = Math.max(...firstRowRects.map(({ rect }) => rect.bottom))
-
+    const label = document.querySelector('.index-update-strip .index-status-badge')
+    const rect = label?.getBoundingClientRect()
+    const text = document.createRange()
+    if (label) text.selectNodeContents(label)
     return {
-      statusMissing: false,
-      statusOutside: outside(statusRect) ? [summary('.index-update-strip', statusRect)] : [],
-      overlaps: firstRowRects.flatMap(({ selector, rect }) =>
-        intersects(statusRect, rect) ? [summary(selector, rect)] : [],
-      ),
-      statusBelowFirstRow: statusRect.top >= firstRowBottom + 4,
-      titleTopDeltaPx:
-        actionRect && titleRect ? Math.abs(titleRect.top - actionRect.top) : Number.POSITIVE_INFINITY,
-      statusLeftDeltaToTitlePx:
-        titleRect ? Math.abs(statusRect.left - titleRect.left) : Number.POSITIVE_INFINITY,
-      statusRightDeltaToActionsPx:
-        actionRect ? Math.abs(statusRect.right - actionRect.right) : Number.POSITIVE_INFINITY,
-      topbarOverflowPx: Math.max(
-        0,
-        topbar.scrollWidth - topbar.clientWidth,
-        document.documentElement.scrollWidth - window.innerWidth,
-      ),
-      viewportWidth: window.innerWidth,
+      headerHeight: document.querySelector('.topbar')?.getBoundingClientRect().height,
+      workspaceTop: document.querySelector('.workspace')?.getBoundingClientRect().top,
+      lines: text.getClientRects().length,
+      labelFits: Boolean(rect && label && label.scrollWidth <= label.clientWidth),
+      labelInViewport: Boolean(rect && rect.left >= 0 && rect.top >= 0 &&
+        rect.right <= window.innerWidth && rect.bottom <= window.innerHeight),
     }
   })
 }
@@ -493,7 +426,7 @@ describeE2E('responsive layout e2e', () => {
     }
   }, TEST_TIMEOUT_MS)
 
-  it('keeps the index update status in its own appbar row on desktop widths', async () => {
+  it('shows the index status on one line without shifting the workspace', async () => {
     const { context, userDataDir } = await createContext({
       width: 1600,
       height: 900,
@@ -501,9 +434,12 @@ describeE2E('responsive layout e2e', () => {
     const page = await context.newPage()
     try {
       await page.goto(baseUrl)
+      const status = page.locator('.index-update-strip')
       for (const viewport of APPBAR_STATUS_VIEWPORTS) {
         await waitForIndexCurrent(page)
+        await status.waitFor({ state: 'hidden', timeout: STEP_TIMEOUT_MS })
         await page.setViewportSize(viewport)
+        const idle = await statusLayout(page)
         await page.evaluate(async () => {
           const root = await navigator.storage.getDirectory()
           const catalog = await root.getDirectoryHandle('catalog-file-v1')
@@ -511,20 +447,18 @@ describeE2E('responsive layout e2e', () => {
           await indexes.removeEntry('time-geo.idx')
         })
         await page.reload()
-        await page.locator('.index-update-strip')
+        await status
           .filter({ hasText: /Updating search indexes|Search indexes are up to date/ })
           .waitFor({ timeout: STEP_TIMEOUT_MS })
         await expectNoUiError(page)
 
-        const report = await appbarStatusReport(page)
-        expect(report.statusMissing, `${viewport.name} ${JSON.stringify(report)}`).toBe(false)
-        expect(report.statusOutside, `${viewport.name} ${JSON.stringify(report)}`).toEqual([])
-        expect(report.overlaps, `${viewport.name} ${JSON.stringify(report)}`).toEqual([])
-        expect(report.statusBelowFirstRow, `${viewport.name} ${JSON.stringify(report)}`).toBe(true)
-        expect(report.titleTopDeltaPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(12)
-        expect(report.statusLeftDeltaToTitlePx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
-        expect(report.statusRightDeltaToActionsPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
-        expect(report.topbarOverflowPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
+        expect(await statusLayout(page), viewport.name).toEqual({
+          headerHeight: idle.headerHeight,
+          workspaceTop: idle.workspaceTop,
+          lines: 1,
+          labelFits: true,
+          labelInViewport: true,
+        })
       }
     } finally {
       await page.close().catch(() => undefined)

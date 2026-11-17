@@ -1589,9 +1589,8 @@ function App() {
   const selectedIndexStatus = distanceIndexReady
     ? 'current'
     : (distanceIndex?.indexStatus ?? 'missing')
-  const canCommitImport =
-    Boolean(importProgress) &&
-    activeImportKind === 'geo'
+  const importLabel = importProgress && importProgressLabel(importProgress, t, locale)
+  const importDetail = importProgress && importProgressDetail(importProgress, t, locale)
   const visibleResults = distanceSortActive
   const skeletonCount = resultSkeletonCount(resultDisplayMode, resultPageSize)
   const visibleStart = resultItems.length === 0 ? 0 : resultOffset + 1
@@ -2433,91 +2432,85 @@ function App() {
             </details>
           </div>
         </div>
-        <div
-          className={`topbar-progress-slot ${
-            importProgress || indexUpdate || error ? 'active' : 'idle'
-          }`}
-          aria-live="polite"
-        >
-          {importProgress ? (
-            <div className="import-progress-strip">
-              <div className="import-progress-header">
-                <span>{importProgressLabel(importProgress, t, locale)}</span>
-                <div className="import-progress-actions">
-                  <strong>{importProgressDetail(importProgress, t, locale)}</strong>
-                  {canCommitImport && (
-                    <button
-                      type="button"
-                      className="import-cancel-button"
-                      onClick={commitImport}
-                    >
-                      <Save size={13} />
-                      {t('commitImport')}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="import-cancel-button"
-                    onClick={cancelImport}
-                    disabled={cancellingImport}
-                  >
-                    <X size={13} />
-                    {t('cancelImport')}
-                  </button>
-                </div>
+      </header>
+
+      <div className="app-status" aria-live="polite">
+        {importProgress ? (
+          <div className="import-progress-strip">
+            <div className="import-progress-header">
+              <div className="import-progress-copy" title={`${importLabel} · ${importDetail}`}>
+                {importLabel} <strong>· {importDetail}</strong>
               </div>
-              <div
-                className={`progress-track ${
-                  importProgress.phase === 'counting' ? 'indeterminate' : ''
-                }`}
-                role="progressbar"
-                aria-label={t('importProgress')}
-                aria-valuemax={importProgressMax(importProgress)}
-                aria-valuemin={0}
-                aria-valuenow={importProgressCurrent(importProgress)}
-              >
-                <div
-                  className="progress-fill"
-                  style={{
-                    width:
-                      importProgressPercent(importProgress) === undefined
-                        ? undefined
-                        : `${importProgressPercent(importProgress)}%`,
-                  }}
-                />
-              </div>
-            </div>
-          ) : indexUpdate?.phase === 'failed' ? (
-            <div className="index-update-strip">
-              <span className="index-status-badge failed" title={indexUpdate.message}>
-                {t('indexUpdateFailed')}
-              </span>
+              {activeImportKind === 'geo' && (
+                <button
+                  type="button"
+                  className="import-cancel-button"
+                  onClick={commitImport}
+                >
+                  <Save size={13} />
+                  {t('commitImport')}
+                </button>
+              )}
               <button
                 type="button"
-                className="secondary import-cancel-button"
-                disabled={busy}
-                onClick={retryIndexUpdate}
+                className="import-cancel-button"
+                onClick={cancelImport}
+                disabled={cancellingImport}
               >
-                {t('retryIndexUpdate')}
+                <X size={13} />
+                {t('cancelImport')}
               </button>
             </div>
-          ) : indexUpdate ? (
-            <div className="index-update-strip">
-              <span className={`index-status-badge ${indexUpdate.phase === 'updating' ? 'building' : 'current'}`}>
-                {indexUpdate.phase === 'updating'
-                  ? t('indexUpdateRunning')
-                  : t('indexUpdateReady')}
-              </span>
+            <div
+              className={`progress-track ${
+                importProgress.phase === 'counting' ? 'indeterminate' : ''
+              }`}
+              role="progressbar"
+              aria-label={t('importProgress')}
+              aria-valuemax={importProgressMax(importProgress)}
+              aria-valuemin={0}
+              aria-valuenow={importProgressCurrent(importProgress)}
+              aria-valuetext={importDetail}
+            >
+              <div
+                className="progress-fill"
+                style={{
+                  width:
+                    importProgressPercent(importProgress) === undefined
+                      ? undefined
+                      : `${importProgressPercent(importProgress)}%`,
+                }}
+              />
             </div>
-          ) : error ? (
-            <div className="topbar-error-strip" role="alert" title={error}>
-              {error}
-            </div>
-          ) : (
-            <div className="import-progress-idle" aria-hidden="true" />
-          )}
-        </div>
-      </header>
+          </div>
+        ) : indexUpdate?.phase === 'failed' ? (
+          <div className="index-update-strip">
+            <span className="index-status-badge failed" title={indexUpdate.message}>
+              {t('indexUpdateFailed')}
+            </span>
+            <button
+              type="button"
+              className="import-cancel-button"
+              disabled={busy}
+              onClick={retryIndexUpdate}
+            >
+              {t('retryIndexUpdate')}
+            </button>
+          </div>
+        ) : indexUpdate ? (
+          <div className="index-update-strip">
+            <span className={`index-status-badge ${indexUpdate.phase === 'updating' ? 'building' : 'current'}`}>
+              {indexUpdate.phase === 'updating'
+                ? t('indexUpdateRunning')
+                : t('indexUpdateReady')}
+            </span>
+          </div>
+        ) : error ? (
+          <div className="app-error-strip" role="alert" title={error}>
+            {error}
+          </div>
+        ) : null}
+      </div>
 
       <section ref={workspaceRef} className="workspace">
         <section ref={leftStackRef} className="left-stack">
