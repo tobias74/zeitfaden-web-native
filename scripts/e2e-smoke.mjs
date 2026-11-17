@@ -52,14 +52,14 @@ async function main() {
   await waitForText(page, 'Import folder')
   await waitForText(page, 'Import geo file')
 
-  await page.getByRole('button', { name: /imprint/i }).click()
+  await page.getByRole('link', { name: /imprint/i }).click()
   await waitForText(page, 'tobiga UG')
   await waitForText(page, 'USt-IdNr. DE 301206623')
   await page.screenshot({ path: '/tmp/ding-e2e-imprint.png', fullPage: true })
   await page.getByRole('link', { name: /zeitfaden/i }).click()
   await waitForText(page, 'Catalog results')
 
-  await page.getByRole('button', { name: /privacy policy/i }).click()
+  await page.getByRole('link', { name: /privacy policy/i }).click()
   await page
     .locator('.privacy-page')
     .getByRole('heading', { name: 'Privacy Policy', level: 1 })

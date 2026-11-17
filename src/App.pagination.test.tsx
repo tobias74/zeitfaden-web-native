@@ -515,6 +515,39 @@ describe('App pagination', () => {
     vi.restoreAllMocks()
   })
 
+  it('navigates between information pages and restores the catalog search on Back', async () => {
+    window.localStorage.setItem('geo-media-index-lab:cookie-consent', 'accepted')
+    window.history.replaceState(null, '', '/?kind=image')
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
+    const { default: App } = await import('./App')
+
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('link', { name: 'About' }))
+    expect(window.location.pathname).toBe('/about')
+    expect(window.location.search).toBe('')
+    expect(screen.getByRole('link', { name: 'zeitfaden' }).getAttribute('href'))
+      .toBe('/?kind=image')
+
+    fireEvent.click(screen.getByRole('link', { name: 'Imprint' }))
+    expect(window.location.pathname).toBe('/impressum')
+    expect(screen.getByRole('link', { name: 'Imprint' }).getAttribute('aria-current'))
+      .toBe('page')
+
+    window.history.back()
+    await waitFor(() => expect(window.location.pathname).toBe('/about'))
+    expect(screen.getByRole('link', { name: 'About' }).getAttribute('aria-current'))
+      .toBe('page')
+
+    window.history.back()
+    await waitFor(() => {
+      expect(window.location.pathname).toBe('/')
+      expect(window.location.search).toBe('?kind=image')
+      expect(screen.getByRole<HTMLSelectElement>('combobox', { name: 'Kind' }).value)
+        .toBe('image')
+    })
+  })
+
   it('stores cookie consent preferences and reopens the dialog from the top bar', async () => {
     const { default: App } = await import('./App')
 

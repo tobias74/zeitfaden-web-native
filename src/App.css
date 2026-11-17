@@ -345,6 +345,8 @@
 }
 
 .topbar-link {
+  display: inline-flex;
+  align-items: center;
   min-height: 28px;
   padding: 0 2px;
   border: 0;
@@ -353,6 +355,7 @@
   color: #4f5b56;
   font-size: 13px;
   font-weight: 620;
+  text-decoration: none;
   white-space: nowrap;
 }
 

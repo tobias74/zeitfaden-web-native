@@ -24,6 +24,7 @@ import {
 import {
   type CSSProperties,
   type KeyboardEvent,
+  type MouseEvent,
   type PointerEvent,
   memo,
   useCallback,
@@ -67,6 +68,7 @@ import {
   translate,
 } from './i18n'
 import { formatDateTime } from './lib/time'
+import { INFO_PAGES, pageFromPath } from './lib/pageRoutes'
 import { createPlatformBackend } from './platform'
 import type {
   ImportProgress,
@@ -87,7 +89,6 @@ import type {
   TimelineGroupResult,
 } from './types'
 
-type ActivePage = 'app' | 'about' | 'imprint' | 'privacy'
 type ResultTab = 'catalog' | 'groups'
 type ResultDisplayMode = 'images' | 'cards' | 'list'
 type ResultThumbnailSize = 'small' | 'medium' | 'large'
@@ -1054,7 +1055,7 @@ function App() {
   }, [])
   const catalog = platform.catalog
   const [language, setLanguage] = useState<Language>(() => storedLanguage())
-  const [activePage, setActivePage] = useState<ActivePage>('app')
+  const [activePage, setActivePage] = useState(() => pageFromPath(window.location.pathname))
   const [cookieConsentPreferences, setCookieConsentPreferences] =
     useState<CookieConsentPreferences>(
       () =>
@@ -1070,6 +1071,31 @@ function App() {
       translate(language, key, values),
     [language],
   )
+  useEffect(() => {
+    function restorePage() {
+      setActivePage(pageFromPath(window.location.pathname))
+    }
+    window.addEventListener('popstate', restorePage)
+    return () => window.removeEventListener('popstate', restorePage)
+  }, [])
+  useEffect(() => {
+    document.title = activePage === 'app' ? 'zeitfaden' : `${t(activePage)} · zeitfaden`
+  }, [activePage, t])
+
+  function followPageLink(event: MouseEvent<HTMLAnchorElement>) {
+    if (event.defaultPrevented || event.button !== 0 ||
+      event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) {
+      return
+    }
+
+    event.preventDefault()
+    const link = event.currentTarget
+    if (link.href === window.location.href) return
+
+    window.history.pushState(null, '', link.href)
+    setActivePage(pageFromPath(link.pathname))
+    window.scrollTo(0, 0)
+  }
   const [mapBubbleCellSize, setMapBubbleCellSizeState] = useState<
     (typeof MAP_BUBBLE_CELL_SIZE_OPTIONS)[number]
   >(() =>
@@ -1113,6 +1139,7 @@ function App() {
     defaultResultPageSize: DEFAULT_RESULT_PAGE_SIZE,
     allowedPageSizes: RESULT_PAGE_SIZE_OPTIONS,
     pageSizeStorageKey: RESULT_PAGE_SIZE_KEY,
+    isSearchPage: activePage === 'app',
   })
   const {
     selectedIndexId,
@@ -2186,6 +2213,35 @@ function App() {
   )
 
   const imprintHtml = language === 'de' ? imprintDeHtml : imprintEnHtml
+  const appTitle = (
+    <h1>
+      <a className="app-title-link" href={appHref} onClick={followPageLink}>
+        zeitfaden
+      </a>
+    </h1>
+  )
+  const pageNavigation = (
+    <nav className="topbar-nav" aria-label="Pages">
+      {INFO_PAGES.map(({ id, path }) => (
+        <a
+          key={id}
+          className="topbar-link"
+          href={path}
+          aria-current={activePage === id ? 'page' : undefined}
+          onClick={followPageLink}
+        >
+          {t(id)}
+        </a>
+      ))}
+      <button
+        type="button"
+        className="topbar-link"
+        onClick={openCookieConsentDialog}
+      >
+        {t('cookies')}
+      </button>
+    </nav>
+  )
   const cookieConsentDialog = cookieConsentDialogOpen ? (
     <CookieConsentDialog
       preferences={cookieConsentPreferences}
@@ -2203,53 +2259,10 @@ function App() {
       <main className="legal-shell">
         <header className="topbar legal-topbar">
           <div className="topbar-copy">
-            <h1>
-              <a
-                className="app-title-link"
-                href={appHref}
-                onClick={(event) => {
-                  event.preventDefault()
-                  setActivePage('app')
-                }}
-              >
-                zeitfaden
-              </a>
-            </h1>
+            {appTitle}
           </div>
           <div className="topbar-tools">
-            <nav className="topbar-nav" aria-label="Pages">
-              <button
-                type="button"
-                className="topbar-link"
-                aria-current={activePage === 'about' ? 'page' : undefined}
-                onClick={() => setActivePage('about')}
-              >
-                {t('about')}
-              </button>
-              <button
-                type="button"
-                className="topbar-link"
-                aria-current={activePage === 'imprint' ? 'page' : undefined}
-                onClick={() => setActivePage('imprint')}
-              >
-                {t('imprint')}
-              </button>
-              <button
-                type="button"
-                className="topbar-link"
-                aria-current={activePage === 'privacy' ? 'page' : undefined}
-                onClick={() => setActivePage('privacy')}
-              >
-                {t('privacy')}
-              </button>
-              <button
-                type="button"
-                className="topbar-link"
-                onClick={openCookieConsentDialog}
-              >
-                {t('cookies')}
-              </button>
-            </nav>
+            {pageNavigation}
             <div className="topbar-actions">
               <label className="language-control" title={t('language')}>
                 <span aria-hidden="true">
@@ -2300,50 +2313,10 @@ function App() {
     <main className="app-shell" style={resizeStyle}>
       <header className="topbar">
         <div className="topbar-copy">
-          <h1>
-            <a
-              className="app-title-link"
-              href={appHref}
-              onClick={(event) => {
-                event.preventDefault()
-                setActivePage('app')
-              }}
-            >
-              zeitfaden
-            </a>
-          </h1>
+          {appTitle}
         </div>
         <div className="topbar-tools">
-          <nav className="topbar-nav" aria-label="Pages">
-            <button
-              type="button"
-              className="topbar-link"
-              onClick={() => setActivePage('about')}
-            >
-              {t('about')}
-            </button>
-            <button
-              type="button"
-              className="topbar-link"
-              onClick={() => setActivePage('imprint')}
-            >
-              {t('imprint')}
-            </button>
-            <button
-              type="button"
-              className="topbar-link"
-              onClick={() => setActivePage('privacy')}
-            >
-              {t('privacy')}
-            </button>
-            <button
-              type="button"
-              className="topbar-link"
-              onClick={openCookieConsentDialog}
-            >
-              {t('cookies')}
-            </button>
-          </nav>
+          {pageNavigation}
           <div className="topbar-actions">
             <button
               type="button"

@@ -14,6 +14,7 @@ import {
   type SearchUrlDefaults,
   type SearchUrlState,
 } from '../lib/searchUrl'
+import { APP_PATH, pageFromPath } from '../lib/pageRoutes'
 import { dateInputEndToMillis, dateInputToMillis } from '../lib/time'
 import type {
   CatalogQuery,
@@ -32,6 +33,7 @@ export type UseSearchStateOptions = {
   defaultResultPageSize: number
   allowedPageSizes: readonly number[]
   pageSizeStorageKey: string
+  isSearchPage?: boolean
 }
 
 export type SearchStateValues = {
@@ -95,11 +97,6 @@ function timeRangeFromInputs(startDate: string, endDate: string): TimeRange {
   }
 }
 
-function pathWithSearchParams(params: URLSearchParams): string {
-  const search = params.toString()
-  return `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`
-}
-
 function clampPage(page: number): number {
   return Math.max(0, Math.trunc(page))
 }
@@ -139,7 +136,7 @@ export function useSearchState(options: UseSearchStateOptions): {
   const initialSearchState = useMemo(
     () =>
       parseSearchUrlState(
-        window.location.search,
+        pageFromPath(window.location.pathname) === 'app' ? window.location.search : '',
         initialSearchUrlDefaults,
         options.allowedIndexIds,
         options.allowedPageSizes,
@@ -178,7 +175,7 @@ export function useSearchState(options: UseSearchStateOptions): {
     initialSearchState.resultPageSize,
   )
   const hasSyncedSearchUrlRef = useRef(false)
-  const applyingPopStateRef = useRef(false)
+  const restoredSearchParamsRef = useRef<string | undefined>(undefined)
 
   const resetPage = useCallback(() => {
     setResultPageState(0)
@@ -324,10 +321,12 @@ export function useSearchState(options: UseSearchStateOptions): {
       startDate,
     ],
   )
-  const appHref = useMemo(
-    () => pathWithSearchParams(buildSearchUrlParams(searchUrlState, searchUrlDefaults)),
+  const searchParams = useMemo(
+    () => buildSearchUrlParams(searchUrlState, searchUrlDefaults).toString(),
     [searchUrlDefaults, searchUrlState],
   )
+  const searchSuffix = searchParams ? `?${searchParams}` : ''
+  const appHref = `${APP_PATH}${searchSuffix}`
 
   const applySearchUrlState = useCallback((nextState: SearchUrlState) => {
     setSelectedIndexIdState(nextState.selectedIndexId)
@@ -343,18 +342,15 @@ export function useSearchState(options: UseSearchStateOptions): {
   }, [])
 
   useEffect(() => {
-    const params = buildSearchUrlParams(searchUrlState, searchUrlDefaults)
-    const nextUrl = pathWithSearchParams(params)
-    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`
-
-    if (nextUrl === currentUrl) {
-      hasSyncedSearchUrlRef.current = true
-      applyingPopStateRef.current = false
+    if (options.isSearchPage === false || pageFromPath(window.location.pathname) !== 'app') {
       return
     }
 
-    if (applyingPopStateRef.current) {
-      applyingPopStateRef.current = false
+    const nextUrl = `${window.location.pathname}${searchSuffix}${window.location.hash}`
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`
+    const restoredSearch = restoredSearchParamsRef.current === searchParams
+    restoredSearchParamsRef.current = undefined
+    if (nextUrl === currentUrl || restoredSearch) {
       hasSyncedSearchUrlRef.current = true
       return
     }
@@ -362,19 +358,23 @@ export function useSearchState(options: UseSearchStateOptions): {
     const method = hasSyncedSearchUrlRef.current ? 'pushState' : 'replaceState'
     window.history[method](null, '', nextUrl)
     hasSyncedSearchUrlRef.current = true
-  }, [searchUrlDefaults, searchUrlState])
+  }, [options.isSearchPage, searchParams, searchSuffix])
 
   useEffect(() => {
     function onPopState() {
-      applyingPopStateRef.current = true
-      applySearchUrlState(
-        parseSearchUrlState(
-          window.location.search,
-          initialSearchUrlDefaults,
-          options.allowedIndexIds,
-          options.allowedPageSizes,
-        ),
+      if (pageFromPath(window.location.pathname) !== 'app') {
+        restoredSearchParamsRef.current = undefined
+        return
+      }
+
+      const nextState = parseSearchUrlState(
+        window.location.search,
+        initialSearchUrlDefaults,
+        options.allowedIndexIds,
+        options.allowedPageSizes,
       )
+      restoredSearchParamsRef.current = buildSearchUrlParams(nextState, searchUrlDefaults).toString()
+      applySearchUrlState(nextState)
     }
 
     window.addEventListener('popstate', onPopState)
@@ -384,6 +384,7 @@ export function useSearchState(options: UseSearchStateOptions): {
     initialSearchUrlDefaults,
     options.allowedIndexIds,
     options.allowedPageSizes,
+    searchUrlDefaults,
   ])
 
   return {
