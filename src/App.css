@@ -27,13 +27,18 @@
   min-height: 56px;
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
-  align-items: center;
+  align-items: start;
   gap: 16px;
   padding: 12px 14px;
 }
 
-.topbar-copy {
+.topbar-primary {
   min-width: 0;
+  min-height: 36px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 20px;
 }
 
 .legal-content {
@@ -326,22 +331,13 @@
   line-height: 1.35;
 }
 
-.topbar-tools {
-  min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px 16px;
-}
-
 .topbar-nav {
   min-width: 0;
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 16px;
   justify-content: flex-start;
-  flex: 0 0 auto;
 }
 
 .topbar-link {
@@ -374,7 +370,6 @@
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
-  flex: 0 1 auto;
 }
 
 .topbar-actions button,
@@ -2042,7 +2037,6 @@
   }
 
   .topbar,
-  .legal-topbar,
   .workspace,
   .library-header {
     grid-template-columns: 1fr;
@@ -2053,14 +2047,7 @@
     min-height: 0;
   }
 
-  .topbar-tools {
-    align-items: stretch;
-    justify-content: flex-start;
-  }
-
   .topbar-nav {
-    width: 100%;
-    flex-wrap: wrap;
     gap: 12px;
     padding: 2px 0;
   }

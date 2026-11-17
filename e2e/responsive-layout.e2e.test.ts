@@ -218,6 +218,7 @@ async function layoutReport(page: Page): Promise<{
 async function appbarReport(page: Page): Promise<{
   controlsOutside: string[]
   wrappedLegalLinks: string[]
+  navigationPositions: { left: number; top: number }[]
   topbarOverflowPx: number
   viewportWidth: number
 }> {
@@ -227,6 +228,7 @@ async function appbarReport(page: Page): Promise<{
       return {
         controlsOutside: ['missing .topbar'],
         wrappedLegalLinks: [],
+        navigationPositions: [],
         topbarOverflowPx: 0,
         viewportWidth: window.innerWidth,
       }
@@ -246,7 +248,7 @@ async function appbarReport(page: Page): Promise<{
       )}-${Math.round(rect.right)}`
 
     const controlsOutside = Array.from(
-      topbar.querySelectorAll('button, select, summary'),
+      topbar.querySelectorAll('a, button, select, summary'),
     ).flatMap((element) => {
       const rect = element.getBoundingClientRect()
       if (
@@ -269,6 +271,16 @@ async function appbarReport(page: Page): Promise<{
     return {
       controlsOutside,
       wrappedLegalLinks,
+      navigationPositions: Array.from(
+        topbar.querySelectorAll('.app-title-link, .topbar-nav .topbar-link'),
+        (element) => {
+          const rect = element.getBoundingClientRect()
+          return {
+            left: Math.round(rect.left - topbarRect.left),
+            top: Math.round(rect.top - topbarRect.top),
+          }
+        },
+      ),
       topbarOverflowPx: Math.max(
         0,
         topbar.scrollWidth - topbar.clientWidth,
@@ -371,7 +383,7 @@ describeE2E('responsive layout e2e', () => {
     await server?.close()
   })
 
-  it('keeps the appbar controls inside the header across common widths', async () => {
+  it('keeps the appbar within the header and navigation in place when actions change', async () => {
     const { context, userDataDir } = await createContext({
       width: 1600,
       height: 900,
@@ -391,6 +403,11 @@ describeE2E('responsive layout e2e', () => {
           `${viewport.name} ${JSON.stringify(report)}`,
         ).toEqual([])
         expect(report.topbarOverflowPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
+
+        await page.getByRole('link', { name: 'About', exact: true }).click()
+        await page.locator('.legal-content').waitFor({ timeout: STEP_TIMEOUT_MS })
+        const about = await appbarReport(page)
+        expect(about.navigationPositions, viewport.name).toEqual(report.navigationPositions)
       }
     } finally {
       await page.close().catch(() => undefined)

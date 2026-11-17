@@ -2254,35 +2254,112 @@ function App() {
     />
   ) : null
 
+  const topbar = (
+    <header className="topbar">
+      <div className="topbar-primary">
+        {appTitle}
+        {pageNavigation}
+      </div>
+      <div className="topbar-actions">
+        {activePage === 'app' && (
+          <>
+            <button
+              type="button"
+              onClick={importFolder}
+              disabled={busy || !catalogReady}
+            >
+              <FolderOpen size={17} />
+              {t('importFolder')}
+            </button>
+            <button
+              type="button"
+              onClick={importGeoFile}
+              disabled={busy || !catalogReady}
+            >
+              <MapPin size={17} />
+              {t('importGeoFile')}
+            </button>
+            <button
+              type="button"
+              onClick={rescanFolders}
+              disabled={busy || !catalogReady}
+            >
+              <RefreshCw size={17} />
+              {t('rescanFolders')}
+            </button>
+          </>
+        )}
+        <label className="language-control" title={t('language')}>
+          <span aria-hidden="true">
+            <Languages size={16} />
+          </span>
+          <select
+            aria-label={t('language')}
+            value={language}
+            onChange={(event) => changeLanguage(event.target.value)}
+          >
+            {LANGUAGES.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        {activePage === 'app' && (
+          <details ref={settingsMenuRef} className="display-menu settings-menu">
+            <summary>
+              <Settings2 size={17} />
+              {t('settings')}
+            </summary>
+            <div className="display-popover settings-popover">
+              <div className="display-section">
+                <label className="toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={showDebugData}
+                    onChange={(event) =>
+                      toggleDebugData(event.target.checked)
+                    }
+                  />
+                  {t('showDebugData')}
+                </label>
+              </div>
+              <div className="display-section">
+                <span>{t('activityLog')}</span>
+                <div className="activity-log" aria-label={t('activityLog')}>
+                  {activityLog.map((entry) => (
+                    <div key={entry.id} className="activity-log-entry">
+                      <time dateTime={new Date(entry.createdAt).toISOString()}>
+                        {formatDateTime(entry.createdAt, locale)}
+                      </time>
+                      <p>{t(entry.key, entry.values)}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="display-section">
+                <span>{t('catalogData')}</span>
+                <button
+                  type="button"
+                  className="danger settings-clear-button"
+                  onClick={confirmClearCatalog}
+                  disabled={busy || !catalogReady}
+                >
+                  <Trash2 size={16} />
+                  {t('clearCatalog')}
+                </button>
+              </div>
+            </div>
+          </details>
+        )}
+      </div>
+    </header>
+  )
+
   if (activePage !== 'app') {
     return (
       <main className="legal-shell">
-        <header className="topbar legal-topbar">
-          <div className="topbar-copy">
-            {appTitle}
-          </div>
-          <div className="topbar-tools">
-            {pageNavigation}
-            <div className="topbar-actions">
-              <label className="language-control" title={t('language')}>
-                <span aria-hidden="true">
-                  <Languages size={16} />
-                </span>
-                <select
-                  aria-label={t('language')}
-                  value={language}
-                  onChange={(event) => changeLanguage(event.target.value)}
-                >
-                  {LANGUAGES.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          </div>
-        </header>
+        {topbar}
         <section className="legal-content">
           {activePage === 'about' ? (
             <AboutPage t={t} />
@@ -2311,101 +2388,7 @@ function App() {
 
   return (
     <main className="app-shell" style={resizeStyle}>
-      <header className="topbar">
-        <div className="topbar-copy">
-          {appTitle}
-        </div>
-        <div className="topbar-tools">
-          {pageNavigation}
-          <div className="topbar-actions">
-            <button
-              type="button"
-              onClick={importFolder}
-              disabled={busy || !catalogReady}
-            >
-              <FolderOpen size={17} />
-              {t('importFolder')}
-            </button>
-            <button
-              type="button"
-              onClick={importGeoFile}
-              disabled={busy || !catalogReady}
-            >
-              <MapPin size={17} />
-              {t('importGeoFile')}
-            </button>
-            <button
-              type="button"
-              onClick={rescanFolders}
-              disabled={busy || !catalogReady}
-            >
-              <RefreshCw size={17} />
-              {t('rescanFolders')}
-            </button>
-            <label className="language-control" title={t('language')}>
-              <span aria-hidden="true">
-                <Languages size={16} />
-              </span>
-              <select
-                aria-label={t('language')}
-                value={language}
-                onChange={(event) => changeLanguage(event.target.value)}
-              >
-                {LANGUAGES.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <details ref={settingsMenuRef} className="display-menu settings-menu">
-              <summary>
-                <Settings2 size={17} />
-                {t('settings')}
-              </summary>
-              <div className="display-popover settings-popover">
-                <div className="display-section">
-                  <label className="toggle-row">
-                    <input
-                      type="checkbox"
-                      checked={showDebugData}
-                      onChange={(event) =>
-                        toggleDebugData(event.target.checked)
-                      }
-                    />
-                    {t('showDebugData')}
-                  </label>
-                </div>
-                <div className="display-section">
-                  <span>{t('activityLog')}</span>
-                  <div className="activity-log" aria-label={t('activityLog')}>
-                    {activityLog.map((entry) => (
-                      <div key={entry.id} className="activity-log-entry">
-                        <time dateTime={new Date(entry.createdAt).toISOString()}>
-                          {formatDateTime(entry.createdAt, locale)}
-                        </time>
-                        <p>{t(entry.key, entry.values)}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <div className="display-section">
-                  <span>{t('catalogData')}</span>
-                  <button
-                    type="button"
-                    className="danger settings-clear-button"
-                    onClick={confirmClearCatalog}
-                    disabled={busy || !catalogReady}
-                  >
-                    <Trash2 size={16} />
-                    {t('clearCatalog')}
-                  </button>
-                </div>
-              </div>
-            </details>
-          </div>
-        </div>
-      </header>
+      {topbar}
 
       <div className="app-status" aria-live="polite">
         {importProgress ? (
