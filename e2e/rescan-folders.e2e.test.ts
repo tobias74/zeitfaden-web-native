@@ -197,6 +197,7 @@ describeE2E('folder rescan e2e', () => {
       window.localStorage.setItem('geo-media-index-lab:cookie-consent', 'accepted')
       window.localStorage.setItem('geo-media-index-lab:result-page-size', '50')
       window.localStorage.setItem('geo-media-index-lab:result-display-mode', 'cards')
+      window.localStorage.setItem('geo-media-index-lab:debug-data', 'true')
     })
     await installFolderHarness(context)
     page = await context.newPage()

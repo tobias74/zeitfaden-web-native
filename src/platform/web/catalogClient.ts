@@ -93,7 +93,7 @@ export class CatalogClient {
   ): Promise<ImportSummary> {
     return this.request('importFolder', payload, (progress) => {
       onProgress?.(progress as ImportProgress)
-    }, signal)
+    }, signal, true)
   }
 
   importGeoFile(
@@ -103,7 +103,7 @@ export class CatalogClient {
   ): Promise<ImportSummary> {
     return this.request('importGeoFile', payload, (progress) => {
       onProgress?.(progress as ImportProgress)
-    }, signal)
+    }, signal, true)
   }
 
   commitImport(): Promise<void> {
@@ -333,6 +333,7 @@ export class CatalogClient {
     payload?: unknown,
     onProgress?: (progress: unknown) => void,
     signal?: AbortSignal,
+    waitForCancellation = false,
   ): Promise<T> {
     const id = this.nextId++
     const startedAt = performance.now()
@@ -354,6 +355,8 @@ export class CatalogClient {
           elapsedMs: performance.now() - startedAt,
         })
         this.worker?.postMessage({ id, type: 'cancel' })
+        // Import cancellation can commit a partial batch before the worker replies.
+        if (waitForCancellation) return
         if (this.pending.delete(id)) {
           cleanup?.()
           reject(abortError())

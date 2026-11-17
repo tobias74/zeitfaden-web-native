@@ -17,7 +17,6 @@ export type UseSearchResultsOptions = {
   pageSpec: SearchSpec
   mapSpec?: SearchSpec
   revision: number
-  indexVersion: number
   onError(message: string): void
   onStats(stats: SearchIndexStats): void
 }
@@ -104,7 +103,6 @@ export function useSearchResults({
   pageSpec,
   mapSpec,
   revision,
-  indexVersion,
   onError,
   onStats,
 }: UseSearchResultsOptions): {
@@ -266,7 +264,6 @@ export function useSearchResults({
     }
   }, [
     catalog,
-    indexVersion,
     onError,
     onStats,
     pageSpec,
@@ -275,7 +272,7 @@ export function useSearchResults({
   ])
 
   useEffect(() => {
-    if (!ready || !mapSpec) {
+    if (!mapSpec) {
       ++mapRequestIdRef.current
       mapAbortControllerRef.current?.abort()
       mapAbortControllerRef.current = undefined
@@ -395,7 +392,7 @@ export function useSearchResults({
       }
       abortController.abort()
     }
-  }, [catalog, indexVersion, mapSpec, onError, ready, revision])
+  }, [catalog, mapSpec, onError, revision])
 
   return {
     results,

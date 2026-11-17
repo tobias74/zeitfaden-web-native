@@ -280,6 +280,10 @@ const geoIndexRegistry = new GeoIndexRegistry()
 const residentDistanceIndexInstances = new Map<string, ResidentPackedDistanceIndex>()
 const cancelledRequests = new Set<number>()
 
+function withCatalogWriteLock<T>(write: () => Promise<T>): Promise<T> {
+  return globalThis.navigator?.locks?.request('zeitfaden-catalog-write', write) ?? write()
+}
+
 function neverCancelled(): boolean {
   return false
 }
@@ -4013,6 +4017,8 @@ class FileCatalogStore implements CatalogStore {
     source: MediaSource,
     duplicateSourceIds: string[],
   ): Promise<void> {
+    // A rescan can begin the next source while the preceding source is indexing.
+    await this.backgroundIndexPromise
     const manifest = await this.ensureManifest()
     const existing = manifest.sources[source.id]
     const generation = (existing?.generation ?? 0) + 1
@@ -4041,6 +4047,10 @@ class FileCatalogStore implements CatalogStore {
 
   async writeMediaBatch(items: MediaItem[]): Promise<MediaBatchWriteResult> {
     if (items.length === 0) return { written: 0 }
+    return withCatalogWriteLock(() => this.writeMediaChunk(items))
+  }
+
+  private async writeMediaChunk(items: MediaItem[]): Promise<MediaBatchWriteResult> {
     const manifest = await this.ensureManifest()
     const chunkId = `chunk-${String(manifest.nextChunkId).padStart(6, '0')}`
     manifest.nextChunkId += 1
@@ -4606,10 +4616,31 @@ class FileCatalogStore implements CatalogStore {
     forceRebuild: boolean,
     postProgress: (progress: GeoIndexBuildProgress) => void,
   ): Promise<GeoIndexBuildSummary & { engineCount: number }> {
-    if (isFileCatalogIndexId(indexId)) {
-      return this.buildFileCatalogIndexes(indexId, postProgress)
-    }
-    return buildSearchIndexes(this, indexId, forceRebuild, postProgress)
+    await this.backgroundIndexPromise
+    return withCatalogWriteLock(async () => {
+      // Another tab may have completed the rebuild while this worker was waiting.
+      const previousVersion = this.manifest?.catalogVersion
+      this.manifest = undefined
+      const manifest = await this.ensureManifest()
+      if (manifest.catalogVersion !== previousVersion) {
+        this.materialized = undefined
+        this.clearResidentPackedIndexes()
+      }
+      if (isFileCatalogIndexId(indexId)) {
+        return this.buildFileCatalogIndexes(indexId, forceRebuild, postProgress)
+      }
+      if (indexId === 'brute-force') {
+        const startedAt = performance.now()
+        const points = await this.getGeoPoints()
+        await geoIndexRegistry.get(indexId).build(points)
+        return {
+          pointCount: points.length,
+          buildTimeMs: performance.now() - startedAt,
+          engineCount: 1,
+        }
+      }
+      return buildSearchIndexes(this, indexId, forceRebuild, postProgress)
+    })
   }
 
   async getSearchIndexStats(): Promise<SearchIndexStats[]> {
@@ -4988,7 +5019,9 @@ class FileCatalogStore implements CatalogStore {
 
   private scheduleBackgroundCatalogIndexing(): void {
     if (this.backgroundIndexPromise) return
-    this.backgroundIndexPromise = this.applyCatalogIndexJounal(postBackgroundIndexProgress)
+    this.backgroundIndexPromise = withCatalogWriteLock(() =>
+      this.applyCatalogIndexJounal(postBackgroundIndexProgress),
+    )
       .catch((error) => {
         console.error('[geo-index:worker] background catalog indexing failed', error)
       })
@@ -5860,78 +5893,17 @@ class FileCatalogStore implements CatalogStore {
 
   private async buildFileCatalogIndexes(
     indexId: FileCatalogIndexId,
+    forceRebuild: boolean,
     postProgress: (progress: GeoIndexBuildProgress) => void,
   ): Promise<GeoIndexBuildSummary & { engineCount: number }> {
-    if (this.backgroundIndexPromise) {
-      await this.backgroundIndexPromise
-    }
     const startedAt = performance.now()
-    const label = 'Catalog packed indexes'
-    console.log('[geo-index:worker] buildFileCatalogIndexes start', {
-      indexId,
-      label,
-    })
-    postProgress({
-      phase: 'building',
-      pointCount: 0,
-      builtIndexes: 0,
-      totalIndexes: 1,
-      currentIndexId: indexId,
-      currentIndexLabel: label,
-    })
-    let manifest = await this.ensureManifest()
-    manifest.indexAppliedVersion = -1
-    manifest.indexJob = {
-      status: 'indexing',
-      pendingSince: manifest.indexJob?.pendingSince ?? Date.now(),
-      startedAt: Date.now(),
+    if (forceRebuild || (await this.fileCatalogIndexStats(indexId)).indexStatus !== 'current') {
+      const manifest = await this.ensureManifest()
+      manifest.indexAppliedVersion = -1
+      await this.applyCatalogIndexJounal(postProgress)
     }
-    await this.saveManifest()
-    if (manifest.materializedVersion !== manifest.catalogVersion) {
-      console.log('[geo-index:worker] materializing catalog before file index build', {
-        catalogVersion: manifest.catalogVersion,
-        materializedVersion: manifest.materializedVersion,
-      })
-      postProgress({
-        phase: 'building',
-        pointCount: manifest.assetCount || manifest.occurrenceCount,
-        builtIndexes: 0,
-        totalIndexes: 1,
-        currentIndexId: indexId,
-        currentIndexLabel: `${label}: materializing catalog`,
-        currentIndexProcessedPoints: 0,
-        currentIndexTotalPoints: manifest.assetCount || manifest.occurrenceCount,
-      })
-      await this.materialize(postProgress, `${label}: materializing catalog`)
-    }
-    await this.writeMaterializedIndexFiles(postProgress, label)
-    manifest = await this.ensureManifest()
-    manifest.indexAppliedVersion = manifest.catalogVersion
-    manifest.indexJob = {
-      status: 'current',
-      pendingSince: manifest.indexJob?.pendingSince,
-      startedAt: manifest.indexJob?.startedAt,
-      finishedAt: Date.now(),
-    }
-    await this.saveManifest()
-    await this.ensureResidentPackedIndexes()
-    console.log('[geo-index:worker] buildFileCatalogIndexes ready', {
-      indexId,
-      elapsedMs: performance.now() - startedAt,
-      pointCount: manifest.assetCount,
-    })
-    postProgress({
-      phase: 'ready',
-      pointCount: manifest.assetCount,
-      builtIndexes: 1,
-      totalIndexes: 1,
-      currentIndexId: indexId,
-      currentIndexLabel: label,
-      currentIndexProcessedPoints: manifest.assetCount,
-      currentIndexTotalPoints: manifest.assetCount,
-    })
     return {
-      pointCount: manifest.assetCount,
+      pointCount: (await this.ensureManifest()).assetCount,
       buildTimeMs: performance.now() - startedAt,
       engineCount: 1,
     }

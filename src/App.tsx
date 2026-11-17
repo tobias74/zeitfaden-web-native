@@ -34,7 +34,7 @@ import {
 } from 'react'
 import './App.css'
 import { useCatalogLifecycle } from './app/useCatalogLifecycle'
-import { useGeoIndexes } from './app/useGeoIndexes'
+import { CATALOG_INDEX_ID, DISTANCE_INDEX_ID, useGeoIndexes } from './app/useGeoIndexes'
 import { useImports } from './app/useImports'
 import { useMediaViewer } from './app/useMediaViewer'
 import { useSearchResults } from './app/useSearchResults'
@@ -47,8 +47,10 @@ import { MapView } from './components/MapView'
 import { MediaViewer } from './components/MediaViewer'
 import { Thumbnail } from './components/Thumbnail'
 import heroImage from './assets/hero.png'
-import privacyDeHtml from './legal/privacy.de.html?raw'
-import privacyEnHtml from './legal/privacy.en.html?raw'
+import imprintDeHtml from './legal/imprint.de.html?raw'
+import imprintEnHtml from './legal/imprint.en.html?raw'
+import PrivacyDe from './legal/PrivacyDe'
+import PrivacyEn from './legal/PrivacyEn'
 import { formatDistance } from './lib/distance'
 import {
   formatTimelineGroupId,
@@ -67,7 +69,6 @@ import {
 import { formatDateTime } from './lib/time'
 import { createPlatformBackend } from './platform'
 import type {
-  GeoIndexBuildProgress,
   ImportProgress,
   ThumbnailBackend,
 } from './platform/types'
@@ -167,7 +168,6 @@ const DEFAULT_MAP_MAX_BUBBLES = 5_000
 const MAP_POLYLINE_MAX_POINTS = 10_000
 const DEFAULT_LINE_BREAKS: LineBreakState = {}
 const DEFAULT_DISTANCE_ENGINE_ID = 'segmented-ball-tree'
-const CATALOG_QUERY_INDEX_ID = 'file-time-geo'
 const DISTANCE_ENGINE_IDS = [
   'brute-force',
   'segmented-ball-tree',
@@ -524,69 +524,6 @@ function importProgressDetail(
   return `${progress.scannedFiles.toLocaleString(locale)} / ${progress.totalFiles.toLocaleString(locale)}`
 }
 
-function geoIndexProgressPercent(
-  progress: GeoIndexBuildProgress,
-): number | undefined {
-  if (progress.phase === 'loading' || progress.totalIndexes === 0) {
-    return undefined
-  }
-  const currentIndexProgress =
-    typeof progress.currentIndexProcessedPoints === 'number' &&
-    typeof progress.currentIndexTotalPoints === 'number' &&
-    progress.currentIndexTotalPoints > 0
-      ? Math.min(
-          1,
-          progress.currentIndexProcessedPoints / progress.currentIndexTotalPoints,
-        )
-      : 0
-  return Math.min(
-    100,
-    ((progress.builtIndexes + currentIndexProgress) / progress.totalIndexes) *
-      100,
-  )
-}
-
-function geoIndexProgressLabel(
-  progress: GeoIndexBuildProgress,
-  t: (key: TranslationKey, values?: TranslationValues) => string,
-): string {
-  if (progress.phase === 'loading') {
-    return t('loadingDistanceIndex', {
-      indexLabel: progress.currentIndexLabel ?? '',
-    })
-  }
-  if (progress.phase === 'ready') return t('geoIndexesReady')
-  return t('buildingGeoIndex', {
-    indexLabel: progress.currentIndexLabel ?? '',
-  })
-}
-
-function geoIndexProgressDetail(
-  progress: GeoIndexBuildProgress,
-  t: (key: TranslationKey, values?: TranslationValues) => string,
-  locale: string,
-): string {
-  if (
-    typeof progress.currentIndexProcessedPoints === 'number' &&
-    typeof progress.currentIndexTotalPoints === 'number' &&
-    progress.currentIndexTotalPoints > 0
-  ) {
-    return t('geoIndexProgressDetailWithCurrent', {
-      points: progress.pointCount.toLocaleString(locale),
-      built: progress.builtIndexes.toLocaleString(locale),
-      total: progress.totalIndexes.toLocaleString(locale),
-      processed: progress.currentIndexProcessedPoints.toLocaleString(locale),
-      currentTotal: progress.currentIndexTotalPoints.toLocaleString(locale),
-    })
-  }
-
-  return t('geoIndexProgressDetail', {
-    points: progress.pointCount.toLocaleString(locale),
-    built: progress.builtIndexes.toLocaleString(locale),
-    total: progress.totalIndexes.toLocaleString(locale),
-  })
-}
-
 function indexStatusLabel(
   status: SearchIndexStats['indexStatus'] | undefined,
   t: (key: TranslationKey, values?: TranslationValues) => string,
@@ -599,35 +536,6 @@ function indexStatusLabel(
   if (status === 'indexing') return t('indexStatusIndexing')
   if (status === 'failed') return t('indexStatusFailed')
   return t('indexStatusUnknown')
-}
-
-function catalogIndexStatus(
-  stats: SearchIndexStats | undefined,
-  progress: GeoIndexBuildProgress | undefined,
-): SearchIndexStats['indexStatus'] {
-  if (progress?.currentIndexId?.startsWith('file-')) return 'building'
-  return stats?.indexStatus ?? 'missing'
-}
-
-function combinedIndexStatus(
-  statuses: Array<SearchIndexStats['indexStatus'] | undefined>,
-): SearchIndexStats['indexStatus'] {
-  if (statuses.some((status) => status === 'failed')) return 'failed'
-  if (statuses.some((status) => status === 'building')) return 'building'
-  if (statuses.some((status) => status === 'indexing')) return 'indexing'
-  if (statuses.some((status) => status === 'pending')) return 'pending'
-  if (statuses.some((status) => status === 'stale')) return 'stale'
-  if (statuses.some((status) => status === 'missing' || !status)) return 'missing'
-  return 'current'
-}
-
-function combinedIndexButtonLabel(
-  status: SearchIndexStats['indexStatus'] | undefined,
-  t: (key: TranslationKey, values?: TranslationValues) => string,
-): string {
-  if (status === 'current') return t('rebuildCatalogIndexes')
-  if (status === 'building' || status === 'indexing' || status === 'pending') return t('updatingCatalogIndexes')
-  return t('updateCatalogIndexes')
 }
 
 function formatDimensions(item: MediaItem): string | undefined {
@@ -1334,22 +1242,47 @@ function App() {
     onError: reportError,
     onInitFailed: recordCatalogInitFailure,
   })
+  const handleImported = useCallback(() => {
+    setResultPage(0)
+    setTimelineGroupPage(0)
+    markCatalogChanged()
+  }, [markCatalogChanged, setResultPage])
   const {
-    geoPointCount,
-    geoIndexVersion,
-    geoIndexProgress,
-    indexStats,
-    allIndexStats,
-    updateCatalogIndexes,
-    updateIndex,
-    optimizeIndex,
+    busy: importBusy,
+    importProgress,
+    activeImportKind,
+    cancelling: cancellingImport,
+    importFolder,
+    rescanFolders,
+    importGeoFile,
+    cancelImport,
+    commitImport,
+  } = useImports({
+    platform,
+    locale,
+    t,
+    recordActivity,
+    onError: reportError,
+    onImported: handleImported,
+  })
+  const catalogMutationBusy = importBusy || catalogBusy
+  const {
+    catalogIndex,
+    catalogIndexReady,
+    distanceIndex,
+    distanceIndexReady,
+    update: indexUpdate,
+    updating: indexesUpdating,
+    retryUpdate: retryIndexUpdate,
   } = useGeoIndexes({
     catalog,
     catalogInfo,
     catalogRevision,
+    catalogBusy: catalogMutationBusy,
     selectedIndexId,
-    onError: reportError,
   })
+  const geoPointCount = distanceIndex?.pointCount ?? 0
+  const busy = catalogMutationBusy || indexesUpdating
   const [indexStatsOverride, setIndexStatsOverride] =
     useState<SearchIndexStats>()
   const searchOrder = useMemo<SearchSpec['order']>(() => {
@@ -1364,7 +1297,7 @@ function App() {
     return {
       kind: 'timestamp',
       sort: catalogSort,
-      engineId: CATALOG_QUERY_INDEX_ID,
+      engineId: CATALOG_INDEX_ID,
     }
   }, [
     catalogSort,
@@ -1400,7 +1333,7 @@ function App() {
       order: {
         kind: 'timestamp',
         sort: catalogSort,
-        engineId: CATALOG_QUERY_INDEX_ID,
+        engineId: CATALOG_INDEX_ID,
       },
       limit: timelineGroupPageSize,
       offset: timelineGroupOffset,
@@ -1438,7 +1371,7 @@ function App() {
           order: {
             kind: 'timestamp',
             sort: 'timestamp_asc',
-            engineId: CATALOG_QUERY_INDEX_ID,
+            engineId: CATALOG_INDEX_ID,
           },
           limit: MAP_POLYLINE_MAX_POINTS,
           offset: 0,
@@ -1466,7 +1399,7 @@ function App() {
         order: {
           kind: 'timestamp',
           sort: catalogSort,
-          engineId: CATALOG_QUERY_INDEX_ID,
+          engineId: CATALOG_INDEX_ID,
         },
         limit: mapMaxBubbles,
         offset: 0,
@@ -1502,11 +1435,10 @@ function App() {
     clearMap,
   } = useSearchResults({
     catalog,
-    ready: catalogReady,
+    ready: distanceSortActive ? distanceIndexReady : catalogIndexReady,
     pageSpec: resultSearchSpec,
-    mapSpec: mapSearchSpec,
+    mapSpec: catalogIndexReady ? mapSearchSpec : undefined,
     revision: catalogRevision,
-    indexVersion: geoIndexVersion,
     onError: reportError,
     onStats: setIndexStatsOverride,
   })
@@ -1547,7 +1479,7 @@ function App() {
     [catalog, lineBreaks, lineTileSource, recordLineTileResult],
   )
   useEffect(() => {
-    if (!catalogReady || resultTab !== 'groups') {
+    if (!catalogIndexReady || resultTab !== 'groups') {
       return
     }
 
@@ -1580,7 +1512,7 @@ function App() {
     return () => controller.abort()
   }, [
     catalog,
-    catalogReady,
+    catalogIndexReady,
     catalogRevision,
     groupSearchSpec,
     reportError,
@@ -1588,7 +1520,7 @@ function App() {
   ])
 
   useEffect(() => {
-    if (!catalogReady || resultTab !== 'groups' || !hoveredTimelineGroupId) return
+    if (!catalogIndexReady || resultTab !== 'groups' || !hoveredTimelineGroupId) return
 
     const cached = timelineGroupPolylineCacheRef.current.get(hoveredTimelineGroupId)
     let active = true
@@ -1629,7 +1561,7 @@ function App() {
     }
   }, [
     catalog,
-    catalogReady,
+    catalogIndexReady,
     hoveredTimelineGroupId,
     reportError,
     resultTab,
@@ -1639,8 +1571,7 @@ function App() {
     timelineGroupPolylineCacheRef.current.clear()
   }, [catalogRevision])
 
-  const effectiveIndexStats =
-    indexStatsOverride ?? resultMetrics ?? indexStats
+  const effectiveIndexStats = indexStatsOverride ?? resultMetrics
   const hoveredResultPoint = useMemo<QueryPoint | undefined>(() => {
     if (!hoveredResultId) return undefined
     const hoveredItem = resultItems.find(
@@ -1654,61 +1585,10 @@ function App() {
     }
     return { lat: hoveredItem.latitude, lon: hoveredItem.longitude }
   }, [hoveredResultId, resultItems])
-  const distanceIndexBuilding =
-    geoIndexProgress?.currentIndexId === selectedIndexId ||
-    geoIndexProgress?.currentIndexId === 'segmented-ball-tree'
-  const selectedIndexStatus = distanceIndexBuilding
-    ? 'building'
-    : (indexStats.indexStatus ?? 'missing')
-  const timeGeoIndexStats = allIndexStats.find(
-    (entry) => entry.engineId === 'file-time-geo',
-  )
-  const regularIndexStatus = catalogIndexStatus(
-    timeGeoIndexStats,
-    geoIndexProgress,
-  )
-  const combinedIndexesStatus = combinedIndexStatus([
-    regularIndexStatus,
-    selectedIndexStatus,
-  ])
-  const handleUpdateIndexes = async () => {
-    if (combinedIndexesStatus === 'current') {
-      await updateCatalogIndexes()
-      await optimizeIndex()
-      return
-    }
-
-    if (regularIndexStatus !== 'current') {
-      await updateCatalogIndexes()
-    }
-    if (selectedIndexStatus !== 'current') {
-      await updateIndex()
-    }
-  }
-  const handleImported = useCallback(() => {
-    setResultPage(0)
-    setTimelineGroupPage(0)
-    markCatalogChanged()
-  }, [markCatalogChanged, setResultPage])
-  const {
-    busy: importBusy,
-    importProgress,
-    activeImportKind,
-    cancelling: cancellingImport,
-    importFolder,
-    rescanFolders,
-    importGeoFile,
-    cancelImport,
-    commitImport,
-  } = useImports({
-    platform,
-    locale,
-    t,
-    recordActivity,
-    onError: reportError,
-    onImported: handleImported,
-  })
-  const busy = importBusy || catalogBusy
+  const regularIndexStatus = catalogIndex?.indexStatus ?? 'missing'
+  const selectedIndexStatus = distanceIndexReady
+    ? 'current'
+    : (distanceIndex?.indexStatus ?? 'missing')
   const canCommitImport =
     Boolean(importProgress) &&
     activeImportKind === 'geo'
@@ -2306,7 +2186,7 @@ function App() {
     [mapHeight],
   )
 
-  const privacyHtml = language === 'de' ? privacyDeHtml : privacyEnHtml
+  const imprintHtml = language === 'de' ? imprintDeHtml : imprintEnHtml
   const cookieConsentDialog = cookieConsentDialogOpen ? (
     <CookieConsentDialog
       preferences={cookieConsentPreferences}
@@ -2400,20 +2280,16 @@ function App() {
                 <FileText size={20} />
                 <h2>{t('imprint')}</h2>
               </div>
-              <address className="imprint-address">
-                <strong>tobiga UG (haftungsbeschr&auml;nkt)</strong>
-                <span>Tobias Gassmann</span>
-                <span>Bodenseestr. 4a</span>
-                <span>81241 M&uuml;nchen</span>
-                <span>HRB 219431</span>
-                <span>USt-IdNr. DE 301206623</span>
-              </address>
+              <div
+                className="imprint-copy"
+                dangerouslySetInnerHTML={{ __html: imprintHtml }}
+              />
             </article>
           ) : (
-            <article
-              className="privacy-page"
-              dangerouslySetInnerHTML={{ __html: privacyHtml }}
-            />
+            <article className="privacy-page">
+              <h1>{t('privacy')}</h1>
+              {language === 'de' ? <PrivacyDe /> : <PrivacyEn />}
+            </article>
           )}
         </section>
         {cookieConsentDialog}
@@ -2559,7 +2435,7 @@ function App() {
         </div>
         <div
           className={`topbar-progress-slot ${
-            importProgress || geoIndexProgress || error ? 'active' : 'idle'
+            importProgress || indexUpdate || error ? 'active' : 'idle'
           }`}
           aria-live="polite"
         >
@@ -2611,43 +2487,27 @@ function App() {
                 />
               </div>
             </div>
-          ) : geoIndexProgress ? (
-            <div className="import-progress-strip">
-              <div className="import-progress-header">
-                <span>{geoIndexProgressLabel(geoIndexProgress, t)}</span>
-                <strong>
-                  {geoIndexProgressDetail(geoIndexProgress, t, locale)}
-                </strong>
-              </div>
-              <div
-                className={`progress-track ${
-                  geoIndexProgress.phase === 'loading' ? 'indeterminate' : ''
-                }`}
-                role="progressbar"
-                aria-label={t('buildingGeoIndex', { indexLabel: '' })}
-                aria-valuemax={100}
-                aria-valuemin={0}
-                aria-valuenow={
-                  geoIndexProgress.phase === 'loading'
-                    ? undefined
-                    : geoIndexProgressPercent(geoIndexProgress)
-                }
-                aria-valuetext={geoIndexProgressDetail(
-                  geoIndexProgress,
-                  t,
-                  locale,
-                )}
+          ) : indexUpdate?.phase === 'failed' ? (
+            <div className="index-update-strip">
+              <span className="index-status-badge failed" title={indexUpdate.message}>
+                {t('indexUpdateFailed')}
+              </span>
+              <button
+                type="button"
+                className="secondary import-cancel-button"
+                disabled={busy}
+                onClick={retryIndexUpdate}
               >
-                <div
-                  className="progress-fill"
-                  style={{
-                    width:
-                      geoIndexProgressPercent(geoIndexProgress) === undefined
-                        ? undefined
-                        : `${geoIndexProgressPercent(geoIndexProgress)}%`,
-                  }}
-                />
-              </div>
+                {t('retryIndexUpdate')}
+              </button>
+            </div>
+          ) : indexUpdate ? (
+            <div className="index-update-strip">
+              <span className={`index-status-badge ${indexUpdate.phase === 'updating' ? 'building' : 'current'}`}>
+                {indexUpdate.phase === 'updating'
+                  ? t('indexUpdateRunning')
+                  : t('indexUpdateReady')}
+              </span>
             </div>
           ) : error ? (
             <div className="topbar-error-strip" role="alert" title={error}>
@@ -2847,7 +2707,7 @@ function App() {
                     value={selectedIndexId}
                     onChange={(event) => setSelectedIndexId(event.target.value)}
                   >
-                    <option value="segmented-ball-tree">
+                    <option value={DISTANCE_INDEX_ID}>
                       {t('segmentedBallTree')}
                     </option>
                     <option value="brute-force">{t('bruteForceOracle')}</option>
@@ -2856,28 +2716,14 @@ function App() {
               )}
             </section>
 
+            {showDebugData && (
             <section className="panel index-panel">
               <div className="panel-title">
                 <Activity size={17} />
                 <h2>{t('indexes')}</h2>
               </div>
-              <div className="index-status-row">
-                <span className={`index-status-badge ${regularIndexStatus}`}>
-                  {indexStatusLabel(regularIndexStatus, t)}
-                </span>
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={!catalogInfo || Boolean(geoIndexProgress)}
-                  onClick={() => {
-                    void handleUpdateIndexes().catch(reportError)
-                  }}
-                >
-                  {combinedIndexButtonLabel(combinedIndexesStatus, t)}
-                </button>
-              </div>
               <dl className="index-status-grid">
-                <div data-index-id="file-time-geo">
+                <div data-index-id={CATALOG_INDEX_ID}>
                   <dt>{t('timeFirstIndex')}</dt>
                   <dd>
                     <span className={`index-status-badge ${regularIndexStatus}`}>
@@ -2889,37 +2735,37 @@ function App() {
                   <dt>{t('assets')}</dt>
                   <dd>
                     {statsNumber(
-                      timeGeoIndexStats?.pointCount ?? 0,
+                      catalogIndex?.pointCount ?? 0,
                       locale,
                     )}
                   </dd>
                 </div>
-                {typeof timeGeoIndexStats?.indexSizeBytes === 'number' && (
+                {typeof catalogIndex?.indexSizeBytes === 'number' && (
                   <div>
                     <dt>{t('indexSize')}</dt>
                     <dd>
                       {formatBytes(
-                        timeGeoIndexStats.indexSizeBytes,
+                        catalogIndex.indexSizeBytes,
                         locale,
                       )}
                     </dd>
                   </div>
                 )}
-                {typeof timeGeoIndexStats?.catalogVersion === 'number' && (
+                {typeof catalogIndex?.catalogVersion === 'number' && (
                   <div>
                     <dt>{t('catalogVersion')}</dt>
                     <dd>
-                      {statsNumber(timeGeoIndexStats.catalogVersion, locale)}
+                      {statsNumber(catalogIndex.catalogVersion, locale)}
                     </dd>
                   </div>
                 )}
-                {typeof timeGeoIndexStats?.indexCatalogVersion ===
+                {typeof catalogIndex?.indexCatalogVersion ===
                   'number' && (
                   <div>
                     <dt>{t('indexVersion')}</dt>
                     <dd>
                       {statsNumber(
-                        timeGeoIndexStats.indexCatalogVersion,
+                        catalogIndex.indexCatalogVersion,
                         locale,
                       )}
                     </dd>
@@ -2935,40 +2781,41 @@ function App() {
                 </div>
                 <div>
                   <dt>{t('distanceEngine')}</dt>
-                  <dd>{indexStats.engineLabel ?? indexStats.engineId}</dd>
+                  <dd>{distanceIndex?.engineLabel ?? selectedIndexId}</dd>
                 </div>
                 <div>
                   <dt>{t('geoPoints')}</dt>
-                  <dd>{statsNumber(indexStats.pointCount, locale)}</dd>
+                  <dd>{statsNumber(geoPointCount, locale)}</dd>
                 </div>
-                {typeof indexStats.catalogVersion === 'number' && (
+                {typeof distanceIndex?.catalogVersion === 'number' && (
                   <div>
                     <dt>{t('catalogVersion')}</dt>
-                    <dd>{statsNumber(indexStats.catalogVersion, locale)}</dd>
+                    <dd>{statsNumber(distanceIndex.catalogVersion, locale)}</dd>
                   </div>
                 )}
-                {typeof indexStats.indexCatalogVersion === 'number' && (
+                {typeof distanceIndex?.indexCatalogVersion === 'number' && (
                   <div>
                     <dt>{t('indexVersion')}</dt>
                     <dd>
-                      {statsNumber(indexStats.indexCatalogVersion, locale)}
+                      {statsNumber(distanceIndex.indexCatalogVersion, locale)}
                     </dd>
                   </div>
                 )}
-                {typeof indexStats.indexSizeBytes === 'number' && (
+                {typeof distanceIndex?.indexSizeBytes === 'number' && (
                   <div>
                     <dt>{t('indexSize')}</dt>
-                    <dd>{formatBytes(indexStats.indexSizeBytes, locale)}</dd>
+                    <dd>{formatBytes(distanceIndex.indexSizeBytes, locale)}</dd>
                   </div>
                 )}
-                {typeof indexStats.segmentCount === 'number' && (
+                {typeof distanceIndex?.segmentCount === 'number' && (
                   <div>
                     <dt>{t('segments')}</dt>
-                    <dd>{statsNumber(indexStats.segmentCount, locale)}</dd>
+                    <dd>{statsNumber(distanceIndex.segmentCount, locale)}</dd>
                   </div>
                 )}
               </dl>
             </section>
+            )}
 
             {showDebugData && (
             <section className="panel metrics-panel">
@@ -3532,7 +3379,7 @@ function App() {
                   </div>
                 </>
               )}
-              <button type="button" onClick={clearSearch} disabled={busy}>
+              <button type="button" onClick={clearSearch} disabled={catalogMutationBusy}>
                 <Trash2 size={17} />
                 {t('clearSearch')}
               </button>

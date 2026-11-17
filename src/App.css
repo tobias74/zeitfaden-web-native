@@ -69,16 +69,19 @@
   letter-spacing: 0;
 }
 
-.imprint-address {
+.imprint-copy {
   display: grid;
-  gap: 6px;
+  gap: 12px;
   color: #1d2824;
   font-size: 15px;
-  font-style: normal;
   line-height: 1.45;
 }
 
-.imprint-address strong {
+.imprint-copy p {
+  margin: 0;
+}
+
+.imprint-copy strong {
   font-weight: 720;
 }
 
@@ -104,6 +107,7 @@
   line-height: 1.25;
 }
 
+.imprint-copy a,
 .privacy-page :where(a) {
   color: #0b63b6;
   overflow-wrap: anywhere;
@@ -918,11 +922,11 @@
   gap: 12px;
 }
 
-.index-status-row {
+.index-update-strip {
+  min-height: 32px;
   min-width: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   flex-wrap: wrap;
   gap: 8px;
 }

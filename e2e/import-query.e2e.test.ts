@@ -299,10 +299,6 @@ describeE2E('geo import and query UI e2e', () => {
       await page.getByRole('button', { name: /Import geo file/i }).click()
     })
 
-    await runStep(page, 'Wait for catalog index build', async () => {
-      await waitForIndexCurrent(page, 'file-time-geo')
-    })
-
     await runStep(page, 'Run initial timestamp query', async () => {
       await page.getByLabel('Kind').selectOption('geo_point')
       await page.getByLabel('Sort').selectOption('timestamp_asc')
@@ -368,10 +364,7 @@ describeE2E('geo import and query UI e2e', () => {
       await expectNoUiError(page)
     })
 
-    await runStep(page, 'Build distance index and run distance query', async () => {
-      await indexesPanel(page)
-        .getByRole('button', { name: /Update indexes|Rebuild indexes/i })
-        .click()
+    await runStep(page, 'Wait for the distance index and run a distance query', async () => {
       await waitForIndexCurrent(page, 'segmented-ball-tree')
       await page.getByLabel('Sort').selectOption('distance')
       await waitForResultCards(page)

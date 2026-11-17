@@ -421,10 +421,10 @@ function createPlatform(): PlatformBackend {
       buildTimeMs: 0,
       engineCount: 4,
     })),
-    getSearchIndexStats: vi.fn(async () => [
-      {
-        engineId: 'file-time-geo',
-        engineLabel: 'Time-first packed index',
+    getSearchIndexStats: vi.fn(async () =>
+      ['file-time-geo', 'segmented-ball-tree'].map((engineId) => ({
+        engineId,
+        indexStatus: 'current' as const,
         exact: true,
         persistent: true,
         pointCount: 0,
@@ -434,8 +434,8 @@ function createPlatform(): PlatformBackend {
         candidatesInspected: 0,
         prunedByGeo: 0,
         prunedByTime: 0,
-      },
-    ]),
+      })),
+    ),
     listMedia: async (query) => {
       return createItems(query.offset ?? 0, query.limit ?? 100)
     },
@@ -857,6 +857,7 @@ describe('App pagination', () => {
   })
 
   it('labels the selected distance index status as a distance index, not a missing engine', async () => {
+    window.localStorage.setItem('geo-media-index-lab:debug-data', 'true')
     const { default: App } = await import('./App')
 
     const { container } = render(<App />)

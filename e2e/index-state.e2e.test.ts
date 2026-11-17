@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { chromium, type BrowserContext, type Page } from 'playwright-core'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it } from 'vitest'
 import { createServer, type ViteDevServer } from 'vite'
 
 const env = process.env
@@ -93,6 +93,7 @@ async function importGeoFile(
   name: string,
   points: TestGeoPoint[],
 ): Promise<void> {
+  await waitForIndexCurrent(activePage, 'segmented-ball-tree')
   await setGeoFile(activePage, name, points)
   await activePage.getByRole('button', { name: /Import geo file/i }).click()
 }
@@ -105,46 +106,11 @@ function indexesPanel(activePage: Page) {
   return panel(activePage, 'Indexes')
 }
 
-async function waitForCombinedIndexStatus(
-  activePage: Page,
-  status: 'current' | 'missing' | 'stale' | 'failed' | 'indexing' | 'pending',
-): Promise<void> {
+async function waitForIndexCurrent(activePage: Page, indexId: string): Promise<void> {
   await indexesPanel(activePage)
-    .locator('.index-status-row')
-    .locator(`.index-status-badge.${status}`)
+    .locator(`[data-index-id="${indexId}"] .index-status-badge.current`)
     .first()
     .waitFor({ timeout: STEP_TIMEOUT_MS })
-}
-
-async function waitForAnyCombinedIndexStatus(
-  activePage: Page,
-  statuses: Array<'current' | 'missing' | 'stale' | 'failed' | 'indexing' | 'pending'>,
-): Promise<void> {
-  await indexesPanel(activePage)
-    .locator('.index-status-row')
-    .locator(statuses.map((status) => `.index-status-badge.${status}`).join(', '))
-    .first()
-    .waitFor({ timeout: STEP_TIMEOUT_MS })
-}
-
-async function waitForIndexStatus(
-  activePage: Page,
-  indexId: string,
-  status: 'current' | 'missing' | 'stale' | 'failed' | 'indexing' | 'pending' | 'building',
-): Promise<void> {
-  await indexesPanel(activePage)
-    .locator(`[data-index-id="${indexId}"] .index-status-badge.${status}`)
-    .first()
-    .waitFor({ timeout: STEP_TIMEOUT_MS })
-}
-
-async function expectIndexButtonLabel(
-  activePage: Page,
-  pattern: RegExp,
-): Promise<void> {
-  const button = indexesPanel(activePage).getByRole('button', { name: pattern })
-  await button.waitFor({ timeout: STEP_TIMEOUT_MS })
-  expect((await button.innerText()).trim()).toMatch(pattern)
 }
 
 async function waitForResultCardCount(
@@ -171,46 +137,6 @@ async function expectNoUiError(activePage: Page): Promise<void> {
     const message = (await alert.first().innerText()).trim()
     throw new Error(`Unexpected UI error: ${message}`)
   }
-}
-
-async function waitForAlert(
-  activePage: Page,
-  pattern: RegExp,
-): Promise<string> {
-  const alert = activePage.getByRole('alert')
-  await alert.waitFor({ timeout: STEP_TIMEOUT_MS })
-  await activePage.waitForFunction(
-    (source) => {
-      const alertText = document.querySelector('[role="alert"]')?.textContent ?? ''
-      return new RegExp(source, 'i').test(alertText)
-    },
-    pattern.source,
-    { timeout: STEP_TIMEOUT_MS },
-  )
-  return (await alert.first().innerText()).trim()
-}
-
-async function waitForNoAlert(activePage: Page): Promise<void> {
-  await activePage.waitForFunction(
-    () => !document.querySelector('[role="alert"]'),
-    { timeout: STEP_TIMEOUT_MS },
-  )
-}
-
-async function buildDistanceIndex(activePage: Page): Promise<void> {
-  await indexesPanel(activePage)
-    .getByRole('button', { name: /Update indexes|Rebuild indexes/i })
-    .click()
-  await waitForIndexStatus(activePage, 'segmented-ball-tree', 'current')
-  await waitForCombinedIndexStatus(activePage, 'current')
-}
-
-async function buildCatalogIndexes(activePage: Page): Promise<void> {
-  await indexesPanel(activePage)
-    .getByRole('button', { name: /Update indexes|Rebuild indexes/i })
-    .click()
-  await waitForIndexStatus(activePage, 'file-time-geo', 'current')
-  await waitForCombinedIndexStatus(activePage, 'current')
 }
 
 async function deletePackedCatalogIndex(activePage: Page): Promise<void> {
@@ -260,6 +186,7 @@ describeE2E('index state and query result e2e', () => {
       window.localStorage.setItem('geo-media-index-lab:cookie-consent', 'accepted')
       window.localStorage.setItem('geo-media-index-lab:result-page-size', '100')
       window.localStorage.setItem('geo-media-index-lab:result-display-mode', 'cards')
+      window.localStorage.setItem('geo-media-index-lab:debug-data', 'true')
     })
     page = await openFreshApp()
   }, TEST_TIMEOUT_MS)
@@ -277,12 +204,12 @@ describeE2E('index state and query result e2e', () => {
     await server?.close()
   })
 
-  it('returns timestamp results with a current catalog index and clears them when the catalog index is missing', async () => {
+  it('repairs a missing catalog index on reload and restores timestamp results', async () => {
     if (!page) throw new Error('Page was not initialized.')
 
     await importGeoFile(page, 'catalog-index-a.json', pointsNearZurich(3))
-    await waitForIndexStatus(page, 'file-time-geo', 'current')
-    await expectIndexButtonLabel(page, /Update indexes/i)
+    await waitForIndexCurrent(page, 'file-time-geo')
+    await waitForIndexCurrent(page, 'segmented-ball-tree')
     await page.getByLabel('Kind').selectOption('geo_point')
     await page.getByLabel('Sort').selectOption('timestamp_asc')
     await waitForResultCardCount(page, 3)
@@ -290,63 +217,43 @@ describeE2E('index state and query result e2e', () => {
 
     await deletePackedCatalogIndex(page)
     await page.reload()
-    await waitForAlert(
-      page,
-      /Catalog indexes|Time-first packed index|missing|loaded into memory/,
-    )
-    await waitForResultCardCount(page, 0)
-    await waitForAnyCombinedIndexStatus(page, ['missing', 'failed'])
-
-    await buildCatalogIndexes(page)
-    await waitForNoAlert(page)
+    await page.getByText('Search indexes are up to date', { exact: true })
+      .waitFor({ timeout: STEP_TIMEOUT_MS })
+    await waitForIndexCurrent(page, 'file-time-geo')
     await waitForResultCardCount(page, 3)
-  }, TEST_TIMEOUT_MS)
-
-  it('shows the catalog index headline as current when only the distance index is missing', async () => {
-    if (!page) throw new Error('Page was not initialized.')
-
-    await importGeoFile(page, 'catalog-index-current-distance-missing.json', pointsNearZurich(3))
-    await waitForIndexStatus(page, 'file-time-geo', 'current')
-    await waitForIndexStatus(page, 'segmented-ball-tree', 'missing')
-    await waitForCombinedIndexStatus(page, 'current')
-    expect(
-      await indexesPanel(page)
-        .locator('.index-status-row .index-status-badge.missing')
-        .count(),
-    ).toBe(0)
     await expectNoUiError(page)
   }, TEST_TIMEOUT_MS)
 
-  it('clears distance results when the selected distance index is missing, stale, and restores them after rebuild', async () => {
+  it('opens an empty catalog in two tabs and prepares both indexes', async () => {
+    if (!page) throw new Error('Page was not initialized.')
+
+    const secondPage = await openFreshApp()
+    try {
+      for (const activePage of [page, secondPage]) {
+        await waitForIndexCurrent(activePage, 'file-time-geo')
+        await waitForIndexCurrent(activePage, 'segmented-ball-tree')
+        await expectNoUiError(activePage)
+      }
+    } finally {
+      await secondPage.close()
+    }
+  }, TEST_TIMEOUT_MS)
+
+  it('automatically refreshes distance results after an import makes the index stale', async () => {
     if (!page) throw new Error('Page was not initialized.')
 
     await importGeoFile(page, 'distance-index-a.json', pointsNearZurich(4))
-    await waitForIndexStatus(page, 'file-time-geo', 'current')
+    await waitForIndexCurrent(page, 'file-time-geo')
     await page.getByLabel('Kind').selectOption('geo_point')
     await page.getByLabel('Sort').selectOption('timestamp_asc')
     await waitForResultCardCount(page, 4)
-    await waitForIndexStatus(page, 'segmented-ball-tree', 'missing')
-    await expectIndexButtonLabel(page, /Update indexes/i)
-
     await page.getByLabel('Sort').selectOption('distance')
-    await waitForAlert(page, /index is missing|No exact search index/i)
-    await waitForResultCardCount(page, 0)
-
-    await buildDistanceIndex(page)
-    await waitForCombinedIndexStatus(page, 'current')
-    await expectIndexButtonLabel(page, /Rebuild indexes/i)
-    await waitForNoAlert(page)
+    await waitForIndexCurrent(page, 'segmented-ball-tree')
     await waitForResultCardCount(page, 4)
 
     await importGeoFile(page, 'distance-index-b.json', pointsNearZurich(2, 60))
-    await waitForIndexStatus(page, 'file-time-geo', 'current')
-    await waitForIndexStatus(page, 'segmented-ball-tree', 'stale')
-    await expectIndexButtonLabel(page, /Update indexes/i)
-    await waitForAlert(page, /index is stale|No exact search index/i)
-    await waitForResultCardCount(page, 0)
-
-    await buildDistanceIndex(page)
-    await waitForNoAlert(page)
     await waitForResultCardCount(page, 6)
+    await waitForIndexCurrent(page, 'segmented-ball-tree')
+    await expectNoUiError(page)
   }, TEST_TIMEOUT_MS)
 })

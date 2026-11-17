@@ -86,6 +86,7 @@ function installSampleGeoFile(pageContext: BrowserContext): Promise<void> {
     window.localStorage.setItem('geo-media-index-lab:cookie-consent', 'accepted')
     window.localStorage.setItem('geo-media-index-lab:result-page-size', '50')
     window.localStorage.setItem('geo-media-index-lab:result-display-mode', 'cards')
+    window.localStorage.setItem('geo-media-index-lab:debug-data', 'true')
     window.__ZEITFADEN_E2E_GEO_FILE__ = () =>
       new File(
         [

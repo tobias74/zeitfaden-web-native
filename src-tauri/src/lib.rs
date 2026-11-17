@@ -8192,7 +8192,20 @@ fn build_geo_indexes(app: AppHandle, window: Window) -> AppResult<GeoIndexBuildS
 }
 
 #[tauri::command]
-fn build_search_indexes(
+async fn build_search_indexes(
+    app: AppHandle,
+    window: Window,
+    index_id: String,
+    force_rebuild: Option<bool>,
+) -> AppResult<SearchIndexBuildSummary> {
+    tauri::async_runtime::spawn_blocking(move || {
+        build_search_indexes_blocking(app, window, index_id, force_rebuild)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn build_search_indexes_blocking(
     app: AppHandle,
     window: Window,
     index_id: String,
@@ -8200,6 +8213,16 @@ fn build_search_indexes(
 ) -> AppResult<SearchIndexBuildSummary> {
     let started = Instant::now();
     if index_id == "file-time-geo" {
+        if !force_rebuild.unwrap_or(false) {
+            let stats = file_catalog_index_status_stats(&app, &index_id, "Time-first packed index")?;
+            if stats.index_status.as_deref() == Some("current") {
+                return Ok(SearchIndexBuildSummary {
+                    point_count: stats.point_count,
+                    build_time_ms: started.elapsed().as_secs_f64() * 1000.0,
+                    engine_count: 1,
+                });
+            }
+        }
         return build_file_catalog_indexes(&app, &window, &index_id, started);
     }
     let total_indexes = 1_usize;

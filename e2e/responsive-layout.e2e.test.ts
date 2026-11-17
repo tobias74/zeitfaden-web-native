@@ -28,7 +28,7 @@ const APPBAR_VIEWPORTS = [
   { name: 'wide desktop', width: 1440, height: 900 },
   { name: 'large desktop', width: 1600, height: 900 },
 ] as const
-const APPBAR_ALERT_VIEWPORTS = [
+const APPBAR_STATUS_VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 720 },
   { name: 'large desktop', width: 1600, height: 900 },
 ] as const
@@ -79,6 +79,7 @@ async function createContext(
     window.localStorage.setItem('geo-media-index-lab:cookie-consent', 'accepted')
     window.localStorage.setItem('geo-media-index-lab:result-page-size', '50')
     window.localStorage.setItem('geo-media-index-lab:result-display-mode', 'cards')
+    window.localStorage.setItem('geo-media-index-lab:debug-data', 'true')
     window.__ZEITFADEN_E2E_GEO_FILE__ = () => {
       const baseTime = new Date(2024, 0, 1, 12, 0, 0).getTime()
       const locations = Array.from({ length: 36 }, (_, index) => ({
@@ -333,36 +334,36 @@ async function mapSettingsPlacementReport(page: Page): Promise<{
   })
 }
 
-async function appbarAlertReport(page: Page): Promise<{
-  alertMissing: boolean
-  alertOutside: string[]
+async function appbarStatusReport(page: Page): Promise<{
+  statusMissing: boolean
+  statusOutside: string[]
   overlaps: string[]
-  alertBelowFirstRow: boolean
+  statusBelowFirstRow: boolean
   titleTopDeltaPx: number
-  alertLeftDeltaToTitlePx: number
-  alertRightDeltaToActionsPx: number
+  statusLeftDeltaToTitlePx: number
+  statusRightDeltaToActionsPx: number
   topbarOverflowPx: number
   viewportWidth: number
 }> {
   return page.evaluate(() => {
     const topbar = document.querySelector('.topbar')
-    const alert = topbar?.querySelector('[role="alert"]')
-    if (!topbar || !alert) {
+    const status = topbar?.querySelector('.index-update-strip')
+    if (!topbar || !status) {
       return {
-        alertMissing: true,
-        alertOutside: [],
+        statusMissing: true,
+        statusOutside: [],
         overlaps: [],
-        alertBelowFirstRow: false,
+        statusBelowFirstRow: false,
         titleTopDeltaPx: Number.POSITIVE_INFINITY,
-        alertLeftDeltaToTitlePx: Number.POSITIVE_INFINITY,
-        alertRightDeltaToActionsPx: Number.POSITIVE_INFINITY,
+        statusLeftDeltaToTitlePx: Number.POSITIVE_INFINITY,
+        statusRightDeltaToActionsPx: Number.POSITIVE_INFINITY,
         topbarOverflowPx: 0,
         viewportWidth: window.innerWidth,
       }
     }
 
     const topbarRect = topbar.getBoundingClientRect()
-    const alertRect = alert.getBoundingClientRect()
+    const statusRect = status.getBoundingClientRect()
     const viewportLeft = -(window.visualViewport?.offsetLeft ?? 0)
     const viewportRight = viewportLeft + window.innerWidth
     const visibleRect = (rect: DOMRect) => rect.width > 1 && rect.height > 1
@@ -396,18 +397,18 @@ async function appbarAlertReport(page: Page): Promise<{
     const firstRowBottom = Math.max(...firstRowRects.map(({ rect }) => rect.bottom))
 
     return {
-      alertMissing: false,
-      alertOutside: outside(alertRect) ? [summary('[role="alert"]', alertRect)] : [],
+      statusMissing: false,
+      statusOutside: outside(statusRect) ? [summary('.index-update-strip', statusRect)] : [],
       overlaps: firstRowRects.flatMap(({ selector, rect }) =>
-        intersects(alertRect, rect) ? [summary(selector, rect)] : [],
+        intersects(statusRect, rect) ? [summary(selector, rect)] : [],
       ),
-      alertBelowFirstRow: alertRect.top >= firstRowBottom + 4,
+      statusBelowFirstRow: statusRect.top >= firstRowBottom + 4,
       titleTopDeltaPx:
         actionRect && titleRect ? Math.abs(titleRect.top - actionRect.top) : Number.POSITIVE_INFINITY,
-      alertLeftDeltaToTitlePx:
-        titleRect ? Math.abs(alertRect.left - titleRect.left) : Number.POSITIVE_INFINITY,
-      alertRightDeltaToActionsPx:
-        actionRect ? Math.abs(alertRect.right - actionRect.right) : Number.POSITIVE_INFINITY,
+      statusLeftDeltaToTitlePx:
+        titleRect ? Math.abs(statusRect.left - titleRect.left) : Number.POSITIVE_INFINITY,
+      statusRightDeltaToActionsPx:
+        actionRect ? Math.abs(statusRect.right - actionRect.right) : Number.POSITIVE_INFINITY,
       topbarOverflowPx: Math.max(
         0,
         topbar.scrollWidth - topbar.clientWidth,
@@ -492,30 +493,37 @@ describeE2E('responsive layout e2e', () => {
     }
   }, TEST_TIMEOUT_MS)
 
-  it('keeps the index error banner in its own appbar row on desktop widths', async () => {
+  it('keeps the index update status in its own appbar row on desktop widths', async () => {
     const { context, userDataDir } = await createContext({
       width: 1600,
       height: 900,
     })
     const page = await context.newPage()
     try {
-      for (const viewport of APPBAR_ALERT_VIEWPORTS) {
+      await page.goto(baseUrl)
+      for (const viewport of APPBAR_STATUS_VIEWPORTS) {
+        await waitForIndexCurrent(page)
         await page.setViewportSize(viewport)
-        await page.goto(baseUrl)
-        await page.locator('.topbar').waitFor({ timeout: STEP_TIMEOUT_MS })
-        await page
-          .getByRole('alert')
-          .filter({ hasText: /index.*missing/i })
+        await page.evaluate(async () => {
+          const root = await navigator.storage.getDirectory()
+          const catalog = await root.getDirectoryHandle('catalog-file-v1')
+          const indexes = await catalog.getDirectoryHandle('indexes')
+          await indexes.removeEntry('time-geo.idx')
+        })
+        await page.reload()
+        await page.locator('.index-update-strip')
+          .filter({ hasText: /Updating search indexes|Search indexes are up to date/ })
           .waitFor({ timeout: STEP_TIMEOUT_MS })
+        await expectNoUiError(page)
 
-        const report = await appbarAlertReport(page)
-        expect(report.alertMissing, `${viewport.name} ${JSON.stringify(report)}`).toBe(false)
-        expect(report.alertOutside, `${viewport.name} ${JSON.stringify(report)}`).toEqual([])
+        const report = await appbarStatusReport(page)
+        expect(report.statusMissing, `${viewport.name} ${JSON.stringify(report)}`).toBe(false)
+        expect(report.statusOutside, `${viewport.name} ${JSON.stringify(report)}`).toEqual([])
         expect(report.overlaps, `${viewport.name} ${JSON.stringify(report)}`).toEqual([])
-        expect(report.alertBelowFirstRow, `${viewport.name} ${JSON.stringify(report)}`).toBe(true)
+        expect(report.statusBelowFirstRow, `${viewport.name} ${JSON.stringify(report)}`).toBe(true)
         expect(report.titleTopDeltaPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(12)
-        expect(report.alertLeftDeltaToTitlePx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
-        expect(report.alertRightDeltaToActionsPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
+        expect(report.statusLeftDeltaToTitlePx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
+        expect(report.statusRightDeltaToActionsPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
         expect(report.topbarOverflowPx, `${viewport.name} ${JSON.stringify(report)}`).toBeLessThanOrEqual(2)
       }
     } finally {

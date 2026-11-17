@@ -6,6 +6,12 @@
 - Catalog import speed matters. Do not add catalog secondary indexes unless a measured query path needs them and the import cost is accepted.
 - Smoke/dev logs belong under `tmp/smoke-logs/`, which is gitignored. Do not write temporary log files at the repository root.
 
+## Dev Deployment
+
+- Commit completed project changes and push them to `origin/dev`.
+- Build the pushed commit with `npm run build` and deploy `dist/` to `dev.zeitfaden.de` using the existing service on `213.133.99.169`.
+- Stage the release under `/srv/zeitfaden-dev/site/releases/`, update the `site/current` symlink atomically, and verify the served build over HTTPS.
+
 ## Resume After Context Compaction
 
 - Treat the post-compaction summary as the current working state. Do not restart broad environment discovery unless the summary is missing a specific fact needed for the next action.

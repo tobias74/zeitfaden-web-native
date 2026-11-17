@@ -1,246 +1,152 @@
-import { useCallback, useEffect, useState } from 'react'
-import type {
-  CatalogBackend,
-  CatalogInfo,
-  GeoIndexBuildProgress,
-} from '../platform/types'
-import { traceStartup } from '../lib/startupTrace'
+import { useEffect, useRef, useState } from 'react'
+import type { CatalogBackend, CatalogInfo } from '../platform/types'
 import type { SearchIndexStats } from '../types'
 
-const defaultStats: SearchIndexStats = {
-  engineId: 'none',
-  engineLabel: 'None',
-  exact: true,
-  persistent: true,
-  pointCount: 0,
-  distanceComputations: 0,
-  nodesVisited: 0,
-  pagesRead: 0,
-  candidatesInspected: 0,
-  prunedByGeo: 0,
-  prunedByTime: 0,
+export const CATALOG_INDEX_ID = 'file-time-geo'
+export const DISTANCE_INDEX_ID = 'segmented-ball-tree'
+const BRUTE_FORCE_INDEX_ID = 'brute-force'
+const maintainedIndexes = [CATALOG_INDEX_ID, DISTANCE_INDEX_ID]
+
+type IndexUpdate =
+  | { phase: 'updating' }
+  | { phase: 'ready' }
+  | { phase: 'failed'; message: string }
+
+type IndexSnapshot = {
+  catalogInfo: CatalogInfo
+  revision: number
+  stats: SearchIndexStats[]
+  bruteForceReady: boolean
 }
 
-export type UseGeoIndexesOptions = {
+type UseGeoIndexesOptions = {
   catalog: CatalogBackend
   catalogInfo: CatalogInfo | undefined
   catalogRevision: number
+  catalogBusy: boolean
   selectedIndexId: string
-  onError(message: string): void
 }
 
 export function useGeoIndexes({
   catalog,
   catalogInfo,
   catalogRevision,
+  catalogBusy,
   selectedIndexId,
-  onError,
-}: UseGeoIndexesOptions): {
-  geoPointCount: number
-  geoIndexVersion: number
-  geoIndexProgress: GeoIndexBuildProgress | undefined
-  indexStats: SearchIndexStats
-  allIndexStats: SearchIndexStats[]
-  updateCatalogIndexes(): Promise<void>
-  updateIndex(): Promise<void>
-  optimizeIndex(): Promise<void>
-  resetIndexState(): void
-} {
-  const [geoPointCount, setGeoPointCount] = useState(0)
-  const [geoIndexVersion, setGeoIndexVersion] = useState(0)
-  const [geoIndexProgress, setGeoIndexProgress] =
-    useState<GeoIndexBuildProgress>()
-  const [indexStats, setIndexStats] = useState<SearchIndexStats>(defaultStats)
-  const [allIndexStats, setAllIndexStats] = useState<SearchIndexStats[]>([])
-
-  const resetIndexState = useCallback(() => {
-    setGeoPointCount(0)
-    setGeoIndexVersion(0)
-    setGeoIndexProgress(undefined)
-    setIndexStats(defaultStats)
-    setAllIndexStats([])
-  }, [])
-
-  const refreshIndexStats = useCallback(async () => {
-    const stats = await catalog.getSearchIndexStats()
-    setAllIndexStats(stats)
-    const selectedStats =
-      stats.find((entry) => entry.engineId === selectedIndexId) ??
-      stats.find((entry) => entry.engineId === 'segmented-ball-tree') ??
-      defaultStats
-    setIndexStats(selectedStats)
-    setGeoPointCount(selectedStats.pointCount)
-    setGeoIndexProgress((current) => {
-      if (!current || current.phase === 'ready') return current
-      const currentIndex = current.currentIndexId
-        ? stats.find((entry) => entry.engineId === current.currentIndexId)
-        : undefined
-      return currentIndex?.indexStatus === 'current' ? undefined : current
-    })
-  }, [catalog, selectedIndexId])
-
-  const runIndexBuild = useCallback(
-    async (
-      forceRebuild: boolean,
-      isCancelled: () => boolean = () => false,
-      indexId = selectedIndexId,
-    ) => {
-      if (isCancelled()) return
-      const startedAt = performance.now()
-      traceStartup('[startup:index-hook]', 'runIndexBuild start', {
-        indexId,
-        forceRebuild,
-      })
-      console.log('[geo-index:ui] runIndexBuild start', {
-        indexId,
-        forceRebuild,
-      })
-      setGeoIndexProgress({
-        phase: 'loading',
-        pointCount: 0,
-        builtIndexes: 0,
-        totalIndexes: 1,
-        currentIndexId: indexId,
-      })
-      try {
-        const summary = await (forceRebuild
-          ? catalog.rebuildSearchIndex
-          : catalog.buildSearchIndexes
-        ).call(catalog, indexId, (progress) => {
-          traceStartup('[startup:index-hook]', 'runIndexBuild progress', {
-            indexId,
-            forceRebuild,
-            progress,
-          })
-          if (!isCancelled()) setGeoIndexProgress(progress)
-        })
-        if (isCancelled()) return
-        traceStartup('[startup:index-hook]', 'runIndexBuild complete', {
-          indexId,
-          forceRebuild,
-          elapsedMs: performance.now() - startedAt,
-          summary,
-        })
-        console.log('[geo-index:ui] runIndexBuild complete', {
-          indexId,
-          forceRebuild,
-          elapsedMs: performance.now() - startedAt,
-          summary,
-        })
-        setGeoPointCount(summary.pointCount)
-        setGeoIndexVersion((version) => version + 1)
-        await refreshIndexStats()
-      } catch (error) {
-        traceStartup('[startup:index-hook]', 'runIndexBuild failed', {
-          indexId,
-          forceRebuild,
-          elapsedMs: performance.now() - startedAt,
-          error: error instanceof Error ? error.message : String(error),
-        })
-        console.error('[geo-index:ui] runIndexBuild failed', {
-          indexId,
-          forceRebuild,
-          elapsedMs: performance.now() - startedAt,
-          error,
-        })
-        throw error
-      } finally {
-        traceStartup('[startup:index-hook]', 'runIndexBuild cleanup', {
-          indexId,
-          forceRebuild,
-          elapsedMs: performance.now() - startedAt,
-          cancelled: isCancelled(),
-        })
-        if (!isCancelled()) setGeoIndexProgress(undefined)
-      }
-    },
-    [catalog, refreshIndexStats, selectedIndexId],
+}: UseGeoIndexesOptions) {
+  const [snapshot, setSnapshot] = useState<IndexSnapshot>()
+  const [update, setUpdate] = useState<IndexUpdate>()
+  const [retry, setRetry] = useState(0)
+  const runningUpdate = useRef(Promise.resolve())
+  const bruteForceBuild = useRef<Pick<IndexSnapshot, 'catalogInfo' | 'revision'>>(
+    undefined,
   )
-
-  const updateIndex = useCallback(async () => {
-    await runIndexBuild(false)
-  }, [runIndexBuild])
-
-  const updateCatalogIndexes = useCallback(async () => {
-    console.log('[geo-index:ui] updateCatalogIndexes clicked', {
-      indexId: 'file-time-geo',
-      selectedIndexId,
-    })
-    await runIndexBuild(true, () => false, 'file-time-geo')
-  }, [runIndexBuild, selectedIndexId])
-
-  const optimizeIndex = useCallback(async () => {
-    await runIndexBuild(true)
-  }, [runIndexBuild])
+  const needsBruteForce = selectedIndexId === BRUTE_FORCE_INDEX_ID
 
   useEffect(() => {
-    const unsubscribe = catalog.onIndexProgress?.((progress) => {
-      setGeoIndexProgress(progress)
-      if (progress.phase === 'ready') {
-        setGeoPointCount(progress.pointCount)
-        setGeoIndexVersion((version) => version + 1)
-        refreshIndexStats().catch((caught) => {
-          onError(caught instanceof Error ? caught.message : String(caught))
-        })
-        window.setTimeout(() => {
-          setGeoIndexProgress((current) => (current === progress ? undefined : current))
-        }, 1200)
+    if (!catalogInfo || catalogBusy) return
+
+    const currentCatalog = { catalogInfo, revision: catalogRevision }
+    let cancelled = false
+
+    async function updateIndexes() {
+      if (cancelled) return
+
+      let stats: SearchIndexStats[] = []
+      let bruteForceReady =
+        bruteForceBuild.current?.catalogInfo === catalogInfo &&
+        bruteForceBuild.current?.revision === catalogRevision
+      const publish = () => {
+        setSnapshot({ ...currentCatalog, stats, bruteForceReady })
       }
-    })
-    return unsubscribe
-  }, [catalog, onError, refreshIndexStats])
 
-  useEffect(() => {
-    if (!catalogInfo) {
-      traceStartup('[startup:index-hook]', 'catalogInfo missing; scheduling index reset', {
-        selectedIndexId,
-        catalogRevision,
-      })
-      const resetTimer = window.setTimeout(resetIndexState, 0)
-      return () => window.clearTimeout(resetTimer)
+      try {
+        stats = await catalog.getSearchIndexStats()
+        if (cancelled) return
+        const pending = maintainedIndexes.filter((id) =>
+          stats.find((entry) => entry.engineId === id)?.indexStatus !== 'current',
+        )
+        const buildBruteForce = needsBruteForce && !bruteForceReady
+        if (pending.length === 0 && !buildBruteForce) {
+          publish()
+          setUpdate(undefined)
+          return
+        }
+
+        setUpdate({ phase: 'updating' })
+        publish()
+        for (const indexId of pending) {
+          const status = stats.find((entry) => entry.engineId === indexId)?.indexStatus
+          if (status === 'current') continue
+          if (status === 'failed') {
+            await catalog.rebuildSearchIndex(indexId)
+          } else {
+            await catalog.buildSearchIndexes(indexId)
+          }
+          if (cancelled) return
+          stats = await catalog.getSearchIndexStats()
+          if (cancelled) return
+          if (stats.find((entry) => entry.engineId === indexId)?.indexStatus !== 'current') {
+            throw new Error(`Index ${indexId} is still out of date.`)
+          }
+          publish()
+        }
+
+        if (buildBruteForce) {
+          await catalog.buildSearchIndexes(BRUTE_FORCE_INDEX_ID)
+          bruteForceBuild.current = currentCatalog
+          if (cancelled) return
+          bruteForceReady = true
+          stats = await catalog.getSearchIndexStats()
+          if (cancelled) return
+          publish()
+        }
+        setUpdate({ phase: 'ready' })
+      } catch (error) {
+        if (cancelled) return
+        publish()
+        setUpdate({
+          phase: 'failed',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
     }
 
-    let cancelled = false
-    traceStartup('[startup:index-hook]', 'catalogInfo ready; refreshing index status', {
-      selectedIndexId,
-      catalogRevision,
-      catalogInfo,
-    })
     const timer = window.setTimeout(() => {
-      refreshIndexStats().catch((caught) => {
-        if (!cancelled) {
-          onError(caught instanceof Error ? caught.message : String(caught))
-        }
-      })
+      runningUpdate.current = runningUpdate.current.then(updateIndexes)
     }, 0)
-
     return () => {
       cancelled = true
-      traceStartup('[startup:index-hook]', 'index status effect cleanup', {
-        selectedIndexId,
-        catalogRevision,
-      })
       window.clearTimeout(timer)
     }
-  }, [
-    catalog,
-    catalogInfo,
-    catalogRevision,
-    onError,
-    refreshIndexStats,
-    resetIndexState,
-    selectedIndexId,
-  ])
+  }, [catalog, catalogBusy, catalogInfo, catalogRevision, needsBruteForce, retry])
+
+  useEffect(() => {
+    if (update?.phase !== 'ready') return
+    const timer = window.setTimeout(() => setUpdate(undefined), 2_500)
+    return () => window.clearTimeout(timer)
+  }, [update])
+
+  const currentSnapshot =
+    snapshot?.catalogInfo === catalogInfo && snapshot?.revision === catalogRevision
+      ? snapshot
+      : undefined
+  const catalogIndex = currentSnapshot?.stats.find((entry) => entry.engineId === CATALOG_INDEX_ID)
+  const distanceIndex = currentSnapshot?.stats.find((entry) => entry.engineId === selectedIndexId)
+  const catalogIndexReady = !catalogBusy && catalogIndex?.indexStatus === 'current'
+  const distanceIndexReady = !catalogBusy && (
+    needsBruteForce
+      ? currentSnapshot?.bruteForceReady === true
+      : distanceIndex?.indexStatus === 'current'
+  )
 
   return {
-    geoPointCount,
-    geoIndexVersion,
-    geoIndexProgress,
-    indexStats,
-    allIndexStats,
-    updateCatalogIndexes,
-    updateIndex,
-    optimizeIndex,
-    resetIndexState,
+    catalogIndex,
+    catalogIndexReady,
+    distanceIndex,
+    distanceIndexReady,
+    update,
+    updating: Boolean(catalogInfo) && (!currentSnapshot || update?.phase === 'updating'),
+    retryUpdate: () => setRetry((value) => value + 1),
   }
 }
